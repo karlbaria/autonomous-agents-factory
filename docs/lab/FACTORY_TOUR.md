@@ -11,7 +11,7 @@ One Lambda runs the whole task lifecycle — no Step Functions state machine. It
 | | |
 |---|---|
 | Code | `cdk/src/handlers/orchestrate-task.ts` (entrypoint), `cdk/src/constructs/task-orchestrator.ts` (`TaskOrchestrator` construct) |
-| AWS resource | Lambda function `backgroundagent-dev-factory-TaskOrchestrator*` (see `aws lambda list-functions --region us-east-2 | grep TaskOrchestrator`) |
+| AWS resource | Lambda function `backgroundagent-dev-factory-TaskOrchestrator*` (see `aws lambda list-functions --region us-east-2 \| grep TaskOrchestrator`) |
 | See it | CloudWatch Logs for that function; `bgagent watch <task-id>` streams its progress events live |
 
 Task submission (`POST /tasks`) and status (`GET /tasks/{id}`) are separate Lambdas behind the Task API — see `cdk/src/handlers/create-task.ts`, `get-task.ts`. The orchestrator starts the compute session (AgentCore `InvokeAgentRuntime`, SigV4-authed — see `cdk/src/handlers/shared/strategies/agentcore-strategy.ts`), polls it, and writes `TaskRecord` updates.

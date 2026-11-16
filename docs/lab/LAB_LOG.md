@@ -138,18 +138,11 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev-factory --re
 
 ### 5. Open items
 
-- **Tag `project=software-factory` not yet applied** to `backgroundagent-dev-factory` — run (Admin, `factory-base`):
-  ```bash
-  MISE_EXPERIMENTAL=1 AWS_PROFILE=factory-base AWS_REGION=us-east-2 mise //cdk:deploy -- \
-    -c stackName=backgroundagent-dev-factory \
-    --all --require-approval never --progress events \
-    --tags project=software-factory
-  ```
-  Should be a tag-only changeset — `abca.deployment.backgroundagent-dev-factory.json` already matches the deployed (all-features) state.
+- ~~Tag `project=software-factory` not yet applied~~ — **done.** Applied via a direct `mise //cdk:deploy -- ... --tags project=software-factory` (the owner ran it; this session's Bash tool was denied by Claude Code's own permission classifier — see Problems). Combined with the X-Ray tracing deploy below in one command.
 - **Least-privilege CDK bootstrap with a separate qualifier (ADR-002)** — the account's `CDKToolkit` is the vanilla default (`AdministratorAccess` execution role); ABCA's own scoped policy bundle isn't in use. Do before team use, not needed for solo lab use today.
-- **`docs/lab/FACTORY_TOUR.md` not yet written** — depends on the demo (component-to-code-to-AWS-resource-to-dashboard mapping is clearest after a real task has run end to end). Now unblocked; see Demo results below.
-- **Demo run once, but the build gate was a false positive** — see Demo results below. Rerun needed once `factory-sandbox-py` has a real `mise run build` task.
-- **X-Ray trace missing** — `otel_trace_id` is recorded on both tasks, but `xray:GetTraceSummaries` found zero traces in this account/region over 3 hours. Needs investigation (Transaction Search? ADOT config?), not yet done.
+- ~~`docs/lab/FACTORY_TOUR.md` not yet written~~ — **done**, see `docs/lab/FACTORY_TOUR.md`.
+- ~~Demo run once, but the build gate was a false positive~~ — **rerun, with a real gate this time.** See Demo results (second run) below.
+- ~~X-Ray trace missing~~ — **root-caused and fixed.** `cdk/src/stacks/agent.ts`'s `agentcore.Runtime` never set `tracingEnabled` (defaults `false`); the account-level prerequisite the code's own comment worried about (`UpdateTraceSegmentDestination`) was already `ACTIVE`. Filed as #6, fixed in PR #7 (`autonomous-agents-factory`), merged and deployed. Confirmed working — see Demo results (second run).
 - **Slack, Jira, Linear left unconnected** until the demo works cleanly, then walked through separately with new apps scoped to this stack only — deferred to a new session.
 - **`.github/workflows/` safe-to-enable-later classification** (none enabled this task):
 
@@ -186,3 +179,22 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev-factory --re
 - **`build_passed: True` on both is a false positive** — confirms the predicted gap exactly: with no `mise run build` task in the target repo, the gate is inert and reports green regardless of test results. The agent noticed this itself: in the feature task it ran `pytest` by hand via a throwaway venv (rather than relying on the gate) and correctly reported in its final message that `test_subtract` was failing before its change.
 - A good side-effect: the feature-task agent **saw the pre-existing bug and explicitly declined to touch it** ("deliberate bug ... left in for a separate demo ... I'll leave it alone"), confirming per-task scope isolation holds even with two tasks running against overlapping code.
 - **X-Ray trace not found** for either task's `otel_trace_id` (converted to X-Ray's `1-{8hex}-{24hex}` form) — `xray:GetTraceSummaries` returned zero traces in `us-east-2` over a 3-hour window. Not a transient ingestion-lag read: checked twice, no results either time. Not yet root-caused.
+
+### 8. Demo results (second run, with a real build gate and X-Ray enabled)
+
+`factory-sandbox-py` PR #7 (the `mise.toml` build-gate fix) and PR #6 (the first run's `/multiply` feature) were merged; PR #5 (the first run's bug fix) deliberately left unmerged so `main` still had the real bug to resubmit against. Filed a fresh feature issue (#8, `/divide`) since #4 had already shipped. Resubmitted both task types against the now-gated repo, after merging and deploying #6 (`autonomous-agents-factory`, X-Ray tracing).
+
+| | Bug-fix task | Feature task |
+|---|---|---|
+| Task ID | `01M7K9DTDJGGPFTFQT1S6733VZ` | `01M7K9DZHJ1C872SEX3ZYE09N7` |
+| Issue | [factory-sandbox-py#3](https://github.com/karlbaria/factory-sandbox-py/issues/3) (resubmitted) | [factory-sandbox-py#8](https://github.com/karlbaria/factory-sandbox-py/issues/8) — add `/divide` |
+| PR | [factory-sandbox-py#9](https://github.com/karlbaria/factory-sandbox-py/pull/9) | [factory-sandbox-py#10](https://github.com/karlbaria/factory-sandbox-py/pull/10) |
+| Turns | 6 | 7 |
+| Cost | $0.1318 | $0.1173 |
+| Duration | 37.6s | 44.7s |
+| `build_passed` | **`True`** (agent ran `mise run build` directly this time, not a manual venv) | **`False`** |
+| X-Ray span (`aws/spans`, `AgentCore.Runtime.Invoke`) | ✅ found | ✅ found |
+
+- **The gate is real now.** The bug-fix task's `build_passed: True` reflects an actual `mise run build` run inside the agent's turn (visible in its transcript), not a bypass. The feature task's `build_passed: False` is genuine, unplanned proof the gate catches real failures: `test_subtract` was still broken (PR #9 unmerged at the time), the agent correctly left it alone as out of scope for a `/divide` feature, and the gate recorded the failure honestly rather than reporting green.
+- **X-Ray tracing confirmed working**, with a caveat on how to look: `xray:BatchGetTraces` on the converted trace ID still returns nothing for either task — that's not the right path once Transaction Search's destination is `CloudWatchLogs` (this account's setting). A CloudWatch Logs Insights query against the `aws/spans` log group, filtering on the raw `otel_trace_id`, finds both: a real `AgentCore.Runtime.Invoke` span each. Use Transaction Search / the GenAI Observability console page, or `aws/spans` directly — not the classic X-Ray trace-summary API — when the destination is `CloudWatchLogs`.
+- `bgagent budget status --me` now shows the running UTC-month total across all four lab demo tasks (~$0.49).
