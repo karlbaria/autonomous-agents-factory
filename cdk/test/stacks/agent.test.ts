@@ -906,7 +906,7 @@ describe('AgentStack', () => {
     // already on the library's naming sees no change at all.
     const sources = template.findResources('AWS::Logs::DeliverySource');
     const ids = Object.keys(sources);
-    expect(ids).toHaveLength(2);
+    expect(ids).toHaveLength(3);
 
     for (const id of ids) {
       // Library-generated, not ours: no self-chosen prefix and no stack name baked
@@ -922,14 +922,15 @@ describe('AgentStack', () => {
       // Update the regex, and add the new shape to the migration note in
       // docs/design/OBSERVABILITY.md ("AgentCore log delivery") so operators can
       // tell which side of the rename their stack is on.
-      expect(id).toMatch(/^Runtime(Application|Usage)LogsDeliverySource[0-9A-F]{8}$/);
+      expect(id).toMatch(/^Runtime(ApplicationLogs|UsageLogs|Traces)DeliverySource[0-9A-F]{8}$/);
     }
 
-    // Both log types are wired, so "no pin" cannot mean "no delivery".
+    // All three sources are wired (#6: tracingEnabled added the TRACES one), so
+    // "no pin" cannot mean "no delivery".
     const logTypes = Object.values(sources)
       .map((r) => (r as { Properties?: { LogType?: string } }).Properties?.LogType)
       .sort();
-    expect(logTypes).toEqual(['APPLICATION_LOGS', 'USAGE_LOGS']);
+    expect(logTypes).toEqual(['APPLICATION_LOGS', 'TRACES', 'USAGE_LOGS']);
   });
 
   test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {

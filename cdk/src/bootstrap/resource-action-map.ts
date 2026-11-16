@@ -145,6 +145,10 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Logs::Delivery': ['logs:CreateDelivery'],
   'AWS::Logs::DeliveryDestination': ['logs:PutDeliveryDestination'],
   'AWS::Logs::DeliverySource': ['logs:PutDeliverySource'],
+  // #6: created by configureTracingDelivery alongside the TRACES delivery
+  // trio when tracingEnabled is set. Already granted — policies/observability.ts
+  // 'XRay' statement.
+  'AWS::XRay::ResourcePolicy': ['xray:PutResourcePolicy'],
   'AWS::Logs::LogGroup': ['logs:CreateLogGroup'],
   'AWS::Route53Resolver::FirewallDomainList': ['route53resolver:CreateFirewallDomainList'],
   'AWS::Route53Resolver::FirewallRuleGroup': ['route53resolver:CreateFirewallRuleGroup'],

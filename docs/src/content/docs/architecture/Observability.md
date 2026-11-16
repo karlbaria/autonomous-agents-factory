@@ -190,7 +190,7 @@ Fields whose source did not run for a given task are returned `null`/empty (e.g.
 
 ## AgentCore log delivery
 
-The agent runtime's application and usage logs reach CloudWatch through a trio of resources per log type — `AWS::Logs::DeliverySource`, `AWS::Logs::DeliveryDestination`, and an `AWS::Logs::Delivery` link joining them. The stack does not declare these. The AgentCore `Runtime` L2 construct creates them from the `loggingConfigs` passed to it, and names them from its own internal construct path.
+The agent runtime's application and usage logs reach CloudWatch through a trio of resources per log type — `AWS::Logs::DeliverySource`, `AWS::Logs::DeliveryDestination`, and an `AWS::Logs::Delivery` link joining them. The stack does not declare these. The AgentCore `Runtime` L2 construct creates them from the `loggingConfigs` passed to it, and names them from its own internal construct path. `tracingEnabled: true` (#6) adds a third trio the same way, with `LogType: TRACES` and a destination in X-Ray instead of CloudWatch Logs — everything below about not renaming these resources applies to it equally.
 
 **The stack deliberately does not override their logical ids.** That is a load-bearing decision rather than an oversight, because the obvious alternatives are worse in a way that is not obvious until a deployment fails.
 

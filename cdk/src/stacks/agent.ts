@@ -675,6 +675,7 @@ export class AgentStack extends Stack {
         networkConfiguration: runtimeNetworkConfig,
         environmentVariables: runtimeEnvironmentVariables,
         lifecycleConfiguration: lifecycleConfiguration,
+        tracingEnabled: true,
         loggingConfigs: [
           {
             logType: agentcore.LogType.APPLICATION_LOGS,
@@ -836,9 +837,15 @@ export class AgentStack extends Stack {
     });
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
 
-    // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
-    // which needs CloudWatch Logs resource policy propagation. Re-enable via
-    // tracingEnabled: true once resolved.
+    // X-Ray tracing (#6): tracingEnabled above adds one AWS::Logs::Delivery
+    // resource wiring the runtime's trace source to X-Ray. The runtime
+    // execution role's XRayAccess IAM statement is granted unconditionally by
+    // the L2 construct regardless of this flag, so there is no IAM change
+    // here. This previously stayed off pending account-level
+    // UpdateTraceSegmentDestination (CloudWatch Transaction Search) —
+    // `aws xray get-trace-segment-destination` confirms that's already
+    // ACTIVE/CloudWatchLogs in the lab account, so the prerequisite this
+    // comment used to describe no longer blocks enabling it.
 
     if (runtime) {
       NagSuppressions.addResourceSuppressions(runtime, [
