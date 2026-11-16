@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "features": {
+    "slack": true,
+    "linear": true,
+    "jira": true,
+    "deployPreviewScreenshots": true,
+    "agentRegistry": true,
+    "toolGateway": true
+  },
+  "compute": [
+    "agentcore"
+  ]
+}

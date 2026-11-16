@@ -9,6 +9,10 @@
   - **Agent AWS credentials:** `AWS_PROFILE=factory-bedrock`, assuming role `factory-bedrock-invoke`, which is scoped to only `bedrock:InvokeModel` / `bedrock:InvokeModelWithResponseStream` on Anthropic models and inference profiles. No admin or broader credentials are used for agent runs.
   - **GitHub token:** the fine-grained PAT for `factory-sandbox-py` lives in the macOS Keychain under service name `factory-sandbox-pat`, read inline per command (`GITHUB_TOKEN="$(security find-generic-password -s factory-sandbox-pat -w)"`) — never exported persistently or printed.
   - **Git hooks:** `core.hooksPath` stays pointed at git-defender (system scope, unchanged); `prek install` is skipped for this repo rather than overriding it. Substitute: run `mise run build` and `mise run security` manually before every commit here.
+- **2026-11-16 (Task 2):**
+  - **Deployed features:** `backgroundagent-dev-factory` went up with every optional feature (Slack, Linear, Jira, deploy-preview screenshots, Agent Registry, Tool Gateway) via the interactive `bgagent setup` wizard, not the plan's `--features none`. Audited every new route this adds: each is either Cognito-authenticated or HMAC-verified in its Lambda handler (no gateway-level `NONE` auth without an in-handler signature check); see `docs/lab/LAB_LOG.md`'s Task 2 entry for the full table.
+  - **CDKToolkit bootstrap:** the account's existing bootstrap is the vanilla default (CloudFormation execution role = `AdministratorAccess`), not ABCA's own least-privilege policy bundle (`cdk/src/bootstrap/policies/`). Reused as-is (matches the precedent already set by the stock `backgroundagent-dev` stack); a separately-qualified least-privilege bootstrap is deferred to the hardening backlog rather than done now, since it would be new, untested surface area for a single-task deploy.
+  - **Idle cost:** roughly $149/month for the stack's always-on resources, ~90% of it the VPC NAT Gateway + 7 interface endpoints that AgentCore's private-networking design requires — not something this task's scope can reduce while keeping AgentCore and the current security posture.
 
 ## How to use this plan with Claude Code
 
@@ -129,6 +133,9 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 - Demo: the local agent opens a PR on the sandbox repo.
 
 ### Task 2: Deploy the baseline to the lab account and write a component tour
+
+> **Deviation (2026-11-16):** deployed with the `bgagent setup` wizard interactively rather than `--features none`, and the owner chose every optional feature (Slack, Linear, Jira, deploy-preview screenshots, Agent Registry, Tool Gateway) instead of the minimal profile. See `docs/lab/LAB_LOG.md`'s Task 2 entry for the endpoint security audit this triggered (every added route is Cognito- or HMAC-authenticated; none are open) and the idle-cost impact.
+
 - Objective: the fork's ABCA running in the lab account, with each factory component identified.
 - Guidance:
   - Confirm the account with `aws sts get-caller-identity`, and use least-privilege credentials.

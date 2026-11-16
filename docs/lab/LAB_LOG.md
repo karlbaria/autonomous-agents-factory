@@ -81,3 +81,86 @@ AWS_PROFILE=factory-bedrock AWS_REGION=us-east-2 \
 - Check `CDKToolkit` (bootstrap stack) in the target account/region before deploying.
 - Stack name: `backgroundagent-dev-factory`.
 - Tag: `project=software-factory`.
+
+## Task 2: Deploy the baseline to the lab account and write a component tour
+
+### 1. What was done, and where it differed from the plan
+
+- **Fixed #3 before deploying, as planned**, and found a second issue along the way: with the vendored `uv` binary clean, `mise run security` still failed on 17 HIGH CVEs in the vendored `gh` CLI (`GH_VERSION=2.93.0`, 11 releases stale) — pre-existing, unrelated to #3, surfaced only because #3's fix cleared the first blocker. Filed as **#4**, fixed in the same branch (bumping `GH_VERSION` to `2.104.0` and the `golang` builder image to `1.27.4-bookworm`), with one remaining unreachable finding (`CVE-2026-78661`, `golang.org/x/net/html` — confirmed via `go mod why` that `gh` never imports it) suppressed in a dated, justified `agent/.trivyignore` entry. PR [#5](https://github.com/karlbaria/autonomous-agents-factory/pull/5), `mise run build` and `mise run security` both pass clean, merged before any deploy step ran.
+- **Corrected a Task 1 assumption about the AgentCore image-size limit.** It is real and does apply to the deployed image (the CDK stack builds from the same `agent/Dockerfile`), but AWS measures it on **compressed** image size, not the uncompressed `docker images` figure `run.sh` prints. Pushed the built image to a local registry and measured the real compressed manifest: ~740 MB, comfortably under AgentCore platform-V1's 2 GB (compressed) cap — no shrinking needed, no reason to consider ECS.
+- **Deployed with every optional feature, not `--features none`.** The owner ran `bgagent setup` interactively and chose Slack, Linear, Jira, deploy-preview screenshots, Agent Registry and Tool Gateway. **Differed from plan:** before that run, this session wrote `abca.deployment.backgroundagent-dev-factory.json` with `--no-deploy` to pre-stage the minimal profile for review; the wizard overwrote it with all features `true`, matching the deployed stack's `DeploymentFeatures` output. Audited the result: every route the extra features add is either `AuthorizationType.COGNITO` or `NONE` at the gateway with a real HMAC check in its Lambda handler (Slack signing secret, GitHub `X-Hub-Signature-256`, Jira/Linear webhook secrets) — none are open. Full per-route table below.
+- **Reused the account's existing CDKToolkit bootstrap as-is**, after confirming it's the vanilla default (`CloudFormationExecutionRole` = `AdministratorAccess`), not ABCA's own least-privilege bundle (`cdk/src/bootstrap/policies/`, currently `BOOTSTRAP_VERSION 1.8.0`) — `bgagent setup` itself detects this (no `BootstrapPolicyVersion` output) and skips the `backgroundagent-dev[-suffix]` naming check accordingly. The stock `backgroundagent-dev` stack already deploys against the same bootstrap. Owner's call: don't touch shared account state for this task; track the gap in Open items.
+- **`project=software-factory` tag not yet applied.** Every other required tag (`compute_type`, `github:*`) landed from CDK's own `Tags.of()` calls, but there's no `--tags` passthrough in `bgagent setup` — only in the underlying `mise //cdk:deploy` CDK invocation. **Differed from plan:** this session's Bash tool was denied (by Claude Code's own auto-mode permission classifier, "Blind Apply") from running `mise //cdk:deploy` directly, on the first attempt (an initial deploy) and the second (a tag-only re-deploy). The command is written up in Open items for the owner to run.
+- **Reviewed every `.github/workflows/` file** for fit with a solo-owner lab fork; none enabled. See the table in Open items.
+
+### 2. Baseline metrics
+
+| Metric | Before (Task 1) | After (Task 2) |
+|---|---|---|
+| `agent/Dockerfile` image CVEs (trivy, HIGH/CRITICAL) | 5 (vendored `uv`) | 0 (uv and gh both clean; 1 justified `.trivyignore` suppression) |
+| Image size, uncompressed (`docker images`) | 2616 MB | 2599.6 MB |
+| Image size, compressed (actual registry/AgentCore measure) | not measured | ~740.5 MB (63% headroom under the 2 GB V1 cap) |
+| Stack | none deployed | `backgroundagent-dev-factory`, `CREATE_COMPLETE`, us-east-2 |
+| Deployed features | — | slack, linear, jira, deployPreviewScreenshots, agentRegistry, toolGateway (all) |
+| Compute backend | — | AgentCore only (`ComputeDeploymentMode=exclusive`) |
+| Est. idle cost | — | ~$149/month (~90% NAT Gateway + 7 interface VPC endpoints × 2 AZs) |
+| Bedrock model access | — | all 6 required models `ACTIVE` in us-east-2, global inference profiles present; no changes needed |
+| `.github/workflows/` reviewed | — | 10 reviewed, 0 enabled |
+
+### 3. Problems hit and how each was solved
+
+1. **Fixing #3 exposed #4** — see "What was done" above. Resolved in the same branch/PR rather than a second issue-branch-PR cycle, since both are the same root cause (a stale pinned build input) discovered in sequence while chasing one security gate.
+2. **This session's Bash tool could not run `mise //cdk:deploy`.** Claude Code's auto-mode permission classifier denied it twice ("Blind Apply") — once for the initial deploy (the owner ran it themselves via the `bgagent setup` wizard instead) and once for a tag-only re-deploy to add `project=software-factory`. Did not attempt to route the same mutation through a different tool (e.g. a raw `UpdateStack` call) to work around the denial, since that would defeat the point of the restriction. Left the exact command for the owner to run.
+3. **The AgentCore image-size question needed a real measurement, not a guess.** `run.sh`'s printed size is uncompressed local disk usage; AWS's limit is on compressed registry size, and the two differ by ~3.5x for this image (mixed Python/Node/binary content compresses well). Measured it directly: pushed the built image to a throwaway local `registry:2` container and read the pushed manifest's layer sizes, rather than estimating from `gzip` ratios.
+
+### 4. Exact commands that worked
+
+```bash
+# Issue #3/#4 fix (see agent/Dockerfile and agent/.trivyignore diffs in PR #5)
+MISE_EXPERIMENTAL=1 mise run build
+MISE_EXPERIMENTAL=1 mise run security
+
+# Compressed image size measurement
+docker run -d --name local-registry-check -p 5501:5000 registry:2
+docker tag bgagent-local:latest localhost:5501/bgagent-check:latest
+docker push localhost:5501/bgagent-check:latest
+# then read the pushed OCI manifest's layer sizes (config + layers, compressed)
+
+# Pre-stage the minimal deployment profile (later overwritten by the wizard)
+AWS_PROFILE=factory-base AWS_REGION=us-east-2 node cli/lib/bin/bgagent.js setup \
+  --region us-east-2 --stack-name backgroundagent-dev-factory \
+  --features none --compute agentcore --yes --no-deploy
+
+# Confirm stack status and outputs
+aws cloudformation describe-stacks --stack-name backgroundagent-dev-factory --region us-east-2
+```
+
+### 5. Open items
+
+- **Tag `project=software-factory` not yet applied** to `backgroundagent-dev-factory` — run (Admin, `factory-base`):
+  ```bash
+  MISE_EXPERIMENTAL=1 AWS_PROFILE=factory-base AWS_REGION=us-east-2 mise //cdk:deploy -- \
+    -c stackName=backgroundagent-dev-factory \
+    --all --require-approval never --progress events \
+    --tags project=software-factory
+  ```
+  Should be a tag-only changeset — `abca.deployment.backgroundagent-dev-factory.json` already matches the deployed (all-features) state.
+- **Least-privilege CDK bootstrap with a separate qualifier (ADR-002)** — the account's `CDKToolkit` is the vanilla default (`AdministratorAccess` execution role); ABCA's own scoped policy bundle isn't in use. Do before team use, not needed for solo lab use today.
+- **`docs/lab/FACTORY_TOUR.md` not yet written** — depends on the demo (component-to-code-to-AWS-resource-to-dashboard mapping is clearest after a real task has run end to end).
+- **Demo not yet run** — waiting on the owner's "onboarding done" signal (they're running `bgagent github set-token`, `invite-user`, `login`, and `repo onboard karlbaria/factory-sandbox-py` themselves). Then: a feature task and a bug-fix task from the CLI, with `bgagent watch`, the CloudWatch dashboard, an X-Ray trace, and `bgagent budget status --me`.
+- **Slack, Jira, Linear left unconnected** until the demo works, then walked through separately with new apps scoped to this stack only — not started.
+- **`.github/workflows/` safe-to-enable-later classification** (none enabled this task):
+
+  | Workflow | Verdict | Why |
+  |---|---|---|
+  | `security-pr.yml` | Safe | `contents: read` only, no AWS creds, no checkout of untrusted code with elevated perms |
+  | `pull-request-lint.yml` | Safe | Title lint only, no checkout, no AWS |
+  | `docs.yml` | Safe | Publishes docs to Pages, no AWS creds |
+  | `security.yml` | Safe | Weekly security suite, no AWS creds |
+  | `monthly-repo-metrics.yml` | Safe | Scheduled metrics report, no AWS creds |
+  | `upgrade-main.yml` | Safe, but noisy | Daily dependency-bump PRs, no AWS creds, but toil for a solo repo |
+  | `build.yml` | Mostly safe, one caveat | PR build/test is safe; its `workflow_dispatch` has a `deploy: agentcore` input that would actually deploy — don't invoke it until OIDC + environment approval exist |
+  | `auto-approve.yml` | Not recommended yet | No AWS exposure, but auto-approves labeled PRs with no human review, and `main` has no branch protection yet |
+  | `deploy.yml` | Not safe | Auto-deploys via OIDC after a build; no OIDC IAM role or environment approvers configured yet |
+  | `integ.yml` | Not safe | Runs integration tests against this shared account via an OIDC deploy role; same missing prerequisites as `deploy.yml` |
+- **Endpoint security audit (done, for reference):** every route this stack exposes beyond the Task API's Cognito-gated core is either Cognito-authenticated or HMAC-verified in-handler — GitHub (`X-Hub-Signature-256`), Slack (signing secret, 3 routes + OAuth callback), Jira and Linear webhook secrets, and the generic `/webhooks/tasks` custom `X-Webhook-Id`/`X-Webhook-Signature` authorizer. The public CloudFront screenshot domain is intentionally anonymous (serves preview-deploy images to GitHub PR / Linear renders) with a private S3 origin behind Origin Access Control. No gaps found.
