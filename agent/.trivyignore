@@ -1,0 +1,14 @@
+# Each entry here is a documented exception, not a silence. Every entry needs
+# a comment explaining why the finding is not fixed yet and an `exp:` expiry
+# date (trivy's native syntax) to force a revisit — an expired entry stops
+# suppressing the finding and `mise run security` fails again until it is
+# re-justified or the underlying version is bumped.
+
+# CVE-2026-78661 — golang.org/x/net/html, found in /usr/local/bin/gh (#4).
+# gh's go.sum resolves golang.org/x/net to v0.61.0 (below the v0.62.0 fix);
+# no gh release has bumped past it yet. Unreachable in practice: gh never
+# imports golang.org/x/net/html — confirmed with
+# `go mod why golang.org/x/net/html` against github.com/cli/cli v2.104.0,
+# which reports "main module does not need package golang.org/x/net/html".
+# Revisit when gh bumps x/net, or sooner if a newer gh release is available.
+CVE-2026-78661 exp:2027-01-15
