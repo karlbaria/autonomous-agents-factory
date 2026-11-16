@@ -129,6 +129,9 @@ Plans/
 # draw.io editor artifacts
 .$*.drawio.bkp
 
+# Local secrets/real values for the software-factory lab (see docs/lab/FACTORY_PLAN.md)
+.local.env
+
 # ──────────────────────────────────────────────
 # Explicit keeps (override ignores above)
 # ──────────────────────────────────────────────

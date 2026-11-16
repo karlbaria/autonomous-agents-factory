@@ -2,6 +2,14 @@
 
 > Where this file lives: drafted at `kiro_projects/Autonomous agents/FACTORY_PLAN.md`. In Task 1, copy it into your fork as `docs/lab/FACTORY_PLAN.md` so Claude Code can read it in every session.
 
+## Lab decisions log
+
+- **2026-11-16 (Task 1):**
+  - **AWS account:** the lab shares non-prod account `<lab-account-id>` (`us-east-2`) rather than a dedicated account per the Requirements section above; revisit before Task 2's deploy if isolation becomes a problem. The real account id is kept only in the untracked, gitignored `.local.env` at the repo root — never commit it.
+  - **Agent AWS credentials:** `AWS_PROFILE=factory-bedrock`, assuming role `factory-bedrock-invoke`, which is scoped to only `bedrock:InvokeModel` / `bedrock:InvokeModelWithResponseStream` on Anthropic models and inference profiles. No admin or broader credentials are used for agent runs.
+  - **GitHub token:** the fine-grained PAT for `factory-sandbox-py` lives in the macOS Keychain under service name `factory-sandbox-pat`, read inline per command (`GITHUB_TOKEN="$(security find-generic-password -s factory-sandbox-pat -w)"`) — never exported persistently or printed.
+  - **Git hooks:** `core.hooksPath` stays pointed at git-defender (system scope, unchanged); `prek install` is skipped for this repo rather than overriding it. Substitute: run `mise run build` and `mise run security` manually before every commit here.
+
 ## How to use this plan with Claude Code
 
 - **One task per session.** A session is one Claude Code conversation (from `claude` until you exit or type `/clear`). Do one task, check it, merge it, then start a fresh session for the next task. Long conversations fill Claude Code's context and quality drops; each task is a checkpoint. The plan file, code, tests and merged PRs carry everything forward between sessions.
