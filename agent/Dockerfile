@@ -1,5 +1,12 @@
 ARG TARGETPLATFORM=linux/arm64
-ARG GH_VERSION=2.93.0
+# Bumped from 2.93.0 to 2.104.0 (#4): clears 16 of 17 HIGH transitive Go CVEs
+# (klauspost/compress, sigstore/rekor, x/crypto, x/mod, x/text, grpc) via its
+# own go.sum. The 17th (CVE-2026-78661, golang.org/x/net/html) is handled in
+# .trivyignore: gh's go.sum still resolves x/net to v0.61.0 (below the 0.62.0
+# fix), but `go mod why golang.org/x/net/html` against this same gh version
+# confirms "main module does not need package golang.org/x/net/html" — gh
+# never imports it.
+ARG GH_VERSION=2.104.0
 
 # Every external image is pinned by DIGEST, not by tag.
 #
@@ -22,7 +29,9 @@ ARG GH_VERSION=2.93.0
 FROM --platform=$TARGETPLATFORM jdxcode/mise:latest@sha256:df5adf538c92d86f9807e738c7c7a9b32a1ae06edf441ede141333e3fe6a2cd9 AS mise
 
 # Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
-FROM --platform=$TARGETPLATFORM golang:1.27.1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b AS gh-builder
+# Bumped from 1.27.1 to 1.27.4 (#4): stdlib CVE-2026-111943, CVE-2026-78667 and
+# CVE-2026-97031 are fixed in go1.27.3+.
+FROM --platform=$TARGETPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS gh-builder
 ARG GH_VERSION
 RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
@@ -99,7 +108,12 @@ RUN npm install -g npm@latest && \
 # Install uv (fast Python package manager) — pinned by digest, not just version:
 # a published tag can be re-pushed, and this COPY sits above the dependency sync,
 # so a silent move here invalidates it. See the digest note at the top of the file.
-COPY --from=ghcr.io/astral-sh/uv:0.11.14@sha256:1025398289b62de8269e70c45b91ffa37c373f38118d7da036fb8bb8efc85d97 /uv /usr/local/bin/uv
+# Kept equal to the mise-managed uv version (mise.toml / agent/mise.toml) so the
+# vendored binary and the CLI tool don't drift apart again. Bumped from 0.11.14
+# to 0.13.7 to clear 5 HIGH/CRITICAL CVEs (#3): quinn-proto >=0.11.15 (was
+# 0.11.14) and the vulnerable zip/zip2 crate, which 0.13.7 no longer depends on
+# at all — uv's zip handling moved to its own `astral_async_zip` fork.
+COPY --from=ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /usr/local/bin/uv
 
 # Install Python dependencies via uv. Build context is repo root (set in
 # ``cdk/src/stacks/agent.ts``) so source paths are prefixed with ``agent/``.
