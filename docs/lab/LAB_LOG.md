@@ -146,9 +146,10 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev-factory --re
   ```
   Should be a tag-only changeset — `abca.deployment.backgroundagent-dev-factory.json` already matches the deployed (all-features) state.
 - **Least-privilege CDK bootstrap with a separate qualifier (ADR-002)** — the account's `CDKToolkit` is the vanilla default (`AdministratorAccess` execution role); ABCA's own scoped policy bundle isn't in use. Do before team use, not needed for solo lab use today.
-- **`docs/lab/FACTORY_TOUR.md` not yet written** — depends on the demo (component-to-code-to-AWS-resource-to-dashboard mapping is clearest after a real task has run end to end).
-- **Demo not yet run** — waiting on the owner's "onboarding done" signal (they're running `bgagent github set-token`, `invite-user`, `login`, and `repo onboard karlbaria/factory-sandbox-py` themselves). Then: a feature task and a bug-fix task from the CLI, with `bgagent watch`, the CloudWatch dashboard, an X-Ray trace, and `bgagent budget status --me`.
-- **Slack, Jira, Linear left unconnected** until the demo works, then walked through separately with new apps scoped to this stack only — not started.
+- **`docs/lab/FACTORY_TOUR.md` not yet written** — depends on the demo (component-to-code-to-AWS-resource-to-dashboard mapping is clearest after a real task has run end to end). Now unblocked; see Demo results below.
+- **Demo run once, but the build gate was a false positive** — see Demo results below. Rerun needed once `factory-sandbox-py` has a real `mise run build` task.
+- **X-Ray trace missing** — `otel_trace_id` is recorded on both tasks, but `xray:GetTraceSummaries` found zero traces in this account/region over 3 hours. Needs investigation (Transaction Search? ADOT config?), not yet done.
+- **Slack, Jira, Linear left unconnected** until the demo works cleanly, then walked through separately with new apps scoped to this stack only — deferred to a new session.
 - **`.github/workflows/` safe-to-enable-later classification** (none enabled this task):
 
   | Workflow | Verdict | Why |
@@ -164,3 +165,23 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev-factory --re
   | `deploy.yml` | Not safe | Auto-deploys via OIDC after a build; no OIDC IAM role or environment approvers configured yet |
   | `integ.yml` | Not safe | Runs integration tests against this shared account via an OIDC deploy role; same missing prerequisites as `deploy.yml` |
 - **Endpoint security audit (done, for reference):** every route this stack exposes beyond the Task API's Cognito-gated core is either Cognito-authenticated or HMAC-verified in-handler — GitHub (`X-Hub-Signature-256`), Slack (signing secret, 3 routes + OAuth callback), Jira and Linear webhook secrets, and the generic `/webhooks/tasks` custom `X-Webhook-Id`/`X-Webhook-Signature` authorizer. The public CloudFront screenshot domain is intentionally anonymous (serves preview-deploy images to GitHub PR / Linear renders) with a private S3 origin behind Origin Access Control. No gaps found.
+
+### 7. Demo results (first run)
+
+`factory-sandbox-py` had no mise tasks (confirmed: no `mise.toml` in the repo), so a real bug was needed to demo a bug-fix task meaningfully. Introduced one directly (`app/main.py`'s `subtract` handler changed from `a - b` to `a + b`, committed straight to the sandbox repo's `main` — it's a disposable lab target, not a reviewed codebase), then filed two issues and submitted two tasks.
+
+| | Bug-fix task | Feature task |
+|---|---|---|
+| Task ID | `01M7JTQ5SYTCC7G5TT30RB19S1` | `01M7JTQCS1Y18S6YW5D590FGGY` |
+| Issue | [factory-sandbox-py#3](https://github.com/karlbaria/factory-sandbox-py/issues/3) — `/subtract` regression | [factory-sandbox-py#4](https://github.com/karlbaria/factory-sandbox-py/issues/4) — add `/multiply` |
+| PR | [factory-sandbox-py#5](https://github.com/karlbaria/factory-sandbox-py/pull/5) | [factory-sandbox-py#6](https://github.com/karlbaria/factory-sandbox-py/pull/6) |
+| Turns | 5 | 9 |
+| Cost | $0.1362 | $0.1073 |
+| Duration | 33.5s | 43.6s |
+| `build_passed` | `True` | `True` |
+
+- `bgagent watch` streamed both live; `bgagent budget status --me` showed `$0.24` spent this UTC month (matches the two costs), no limit configured.
+- CloudWatch dashboard `BackgroundAgent-Tasks-backgroundagent-dev-factory` exists and is populated.
+- **`build_passed: True` on both is a false positive** — confirms the predicted gap exactly: with no `mise run build` task in the target repo, the gate is inert and reports green regardless of test results. The agent noticed this itself: in the feature task it ran `pytest` by hand via a throwaway venv (rather than relying on the gate) and correctly reported in its final message that `test_subtract` was failing before its change.
+- A good side-effect: the feature-task agent **saw the pre-existing bug and explicitly declined to touch it** ("deliberate bug ... left in for a separate demo ... I'll leave it alone"), confirming per-task scope isolation holds even with two tasks running against overlapping code.
+- **X-Ray trace not found** for either task's `otel_trace_id` (converted to X-Ray's `1-{8hex}-{24hex}` form) — `xray:GetTraceSummaries` returned zero traces in `us-east-2` over a 3-hour window. Not a transient ingestion-lag read: checked twice, no results either time. Not yet root-caused.
