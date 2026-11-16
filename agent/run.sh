@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ---------------------------------------------------------------------------
 # Usage
@@ -177,7 +178,7 @@ fi
 # Build
 # ---------------------------------------------------------------------------
 echo "Building Docker image..."
-docker build --build-arg CACHE_BUST="$(date +%s)" -t bgagent-local "$SCRIPT_DIR"
+docker build --build-arg CACHE_BUST="$(date +%s)" -t bgagent-local -f "$SCRIPT_DIR/Dockerfile" "$REPO_ROOT"
 
 # Print image size
 IMAGE_SIZE=$(docker image inspect bgagent-local --format='{{.Size}}')
