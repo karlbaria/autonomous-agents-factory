@@ -13,6 +13,7 @@
   - **Deployed features:** `backgroundagent-dev-factory` went up with every optional feature (Slack, Linear, Jira, deploy-preview screenshots, Agent Registry, Tool Gateway) via the interactive `bgagent setup` wizard, not the plan's `--features none`. Audited every new route this adds: each is either Cognito-authenticated or HMAC-verified in its Lambda handler (no gateway-level `NONE` auth without an in-handler signature check); see `docs/lab/LAB_LOG.md`'s Task 2 entry for the full table.
   - **CDKToolkit bootstrap:** the account's existing bootstrap is the vanilla default (CloudFormation execution role = `AdministratorAccess`), not ABCA's own least-privilege policy bundle (`cdk/src/bootstrap/policies/`). Reused as-is (matches the precedent already set by the stock `backgroundagent-dev` stack); a separately-qualified least-privilege bootstrap is deferred to the hardening backlog rather than done now, since it would be new, untested surface area for a single-task deploy.
   - **Idle cost:** roughly $149/month for the stack's always-on resources, ~90% of it the VPC NAT Gateway + 7 interface endpoints that AgentCore's private-networking design requires — not something this task's scope can reduce while keeping AgentCore and the current security posture.
+- **2026-11-18 (Planning):** Added Tasks 13–15 to the task breakdown — outbound Jira issue creation + auto-tracking (13), Confluence publishing for generated documentation (14), and a feature-planning workflow that decomposes an unscoped request into Jira stories/subtasks plus a Confluence doc (15) — after confirming during the Jira setup session (`docs/lab/LAB_LOG.md`'s Task 2b continued) that ABCA has zero outbound Jira/Linear issue-creation and zero Confluence integration today. Not yet scheduled for a specific session; priority among 3–15 (including whether to interleave with the already-planned verified-workflow tasks) is still to be decided.
 
 ## How to use this plan with Claude Code
 
@@ -276,3 +277,33 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
     - the internal policy check on Claude Code use
 - Tests: unit tests for the aggregation.
 - Demo: a one-page cost report and a prioritised backlog.
+
+### Task 13: Outbound Jira issue creation and auto-tracking for non-Jira-originated tasks
+- Objective: any task, regardless of origin channel, can get a Jira record and stay in sync with the board-transition and comment machinery that Jira-originated tasks already have.
+- Guidance:
+  - Add a Jira "create issue" call to the outbound Forge app actor (`api.asApp().requestJira(...)`), parallel to the existing comment/transition calls. Needs the target project's issue-type/field schema resolved first (Jira rejects a create that omits a required field).
+  - When a task starts with `channel_source` other than `jira` and its repo has an active Jira project mapping, create a Jira issue summarizing the task and record its key on the task, reusing the same tenant/project-mapping resolution Jira-origin tasks already use.
+  - Reuse the existing board-transition and comment logic unchanged — it should fire the same way regardless of how the originating Jira issue came to exist.
+  - Make this opt-in per project mapping (e.g. `bgagent jira map ... --auto-track`), since not every repo wants every Slack/CLI/API task appearing on its board.
+- Tests: issue creation is attempted only for non-Jira channels with an active, opted-in mapping; the created issue key is recorded on the task; existing Jira-origin board-transition/comment tests are unaffected.
+- Demo: a task submitted from Slack (`@Jarvis ...`) produces a new Jira card that moves through In Progress → In Review exactly like a Jira-originated task, with the same final comment.
+
+### Task 14: Confluence publishing for generated documentation
+- Objective: any generated write-up (ADR, PRD, epic doc, user story, research artifact) can be delivered to a Confluence page instead of, or in addition to, its current destination (S3, repo file).
+- Guidance:
+  - A new Atlassian OAuth (3LO) integration with Confluence scopes (`read:confluence-space.summary`, `write:confluence-content`, etc.) — decide via ADR whether this extends the existing Jira OAuth app's scopes or stands alone.
+  - A space + page mapping per repo, parallel to Jira's project mapping, stored the same way in DynamoDB.
+  - A generic "publish artifact to Confluence" step/adapter that `knowledge/web-research-v1` (and Task 15) can call — content-agnostic: markdown-to-Confluence-storage-format conversion, then create or update a page under the mapped space.
+  - Decide whether writes need a dedicated app actor (Forge), matching the Jira precedent for attribution, or whether 3LO is sufficient since Confluence has no board-visibility concern driving that choice the way Jira did.
+- Tests: the markdown-to-Confluence conversion round-trips known fixtures; publish is skipped gracefully when no space mapping exists; existing `web-research-v1` S3 delivery is unaffected when Confluence isn't configured.
+- Demo: a `knowledge/web-research-v1` task's write-up appears as a new or updated Confluence page under the mapped space, with a link back in the task's final summary.
+
+### Task 15: Feature-planning workflow (research → decompose → file Jira + Confluence)
+- Objective: an unscoped request ("I want to build a new feature") becomes a repo-aware research pass, a decompose-or-not judgment, and the matching Jira structure plus a planning doc in Confluence — without re-solving any code-writing, which the existing coding pipeline already does once a story is filed. Depends on Tasks 13 and 14.
+- Guidance:
+  - New workflow kind, e.g. `knowledge/feature-planning-v1`: repo-aware (unlike `web-research-v1`'s `requires_repo: false`), read-only tool allowlist (`Read, Glob, Grep, WebFetch` — no Bash/Write/Edit, no PR).
+  - The agent researches the existing repo (or confirms it's a fresh app), judges whether the request is one scoped unit or needs decomposition, and emits either (a) one Jira issue via Task 13's primitive, or (b) a parent issue plus Jira subtasks with `blocks`/`is blocked by` links via the same primitive — then applies the trigger label to the parent so ABCA's existing "authored subtask orchestration" (see [JIRA_SETUP_GUIDE.md](../guides/JIRA_SETUP_GUIDE.md#authored-subtask-orchestration)) takes over automatically. No new execution-side orchestration code is needed — this routing already exists.
+  - Writes the planning doc (PRD, epic write-up, ADR — whichever fits the request) to Confluence via Task 14's publishing adapter, and links it from the filed Jira issue(s).
+  - Entry point: a Slack conversational request (`@Jarvis I want to build X`), distinct from today's "repo + instruction" task-submission parser, which currently falls back to "please include a repo" for anything it doesn't recognize as a direct coding instruction.
+- Tests: decompose-vs-single judgment on corpus fixtures (clear single-story asks vs. clear multi-story asks); filed Jira structure is correct (flat vs. parent+subtasks with correct link direction); the Confluence doc link is attached; no code is written and no PR is opened by this workflow itself.
+- Demo: `@Jarvis I want to build a tagging feature for factory-sandbox-py` produces a Jira epic with 2-3 linked subtasks and a Confluence planning doc, and labeling the first subtask kicks off an ordinary coding task exactly like today.
