@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from review.probes import Probe, ProbeResult
-from review.prompts import code_reviewer_user_prompt, probe_writer_user_prompt
+from review.prompts import (
+    CODE_REVIEWER_SYSTEM_PROMPT,
+    code_reviewer_user_prompt,
+    probe_writer_user_prompt,
+)
 from review.signatures import PublicSignature
 
 
@@ -44,3 +48,19 @@ class TestCodeReviewerUserPrompt:
         prompt = code_reviewer_user_prompt("task", "diff", results)
         assert "test_p1.py" in prompt and "PASS" in prompt
         assert "test_p2.py" in prompt and "FAIL" in prompt
+
+
+class TestCodeReviewerSystemPromptTypeSeverityDisambiguation:
+    """Regression: autonomous-agents-factory#19 — the reviewer wrote a severity
+    word ("minor") into the "type" field. The system prompt must state, with an
+    example, that "type" and "severity" are separate fields and that "type" is
+    never a severity word."""
+
+    def test_states_type_and_severity_are_separate_fields(self):
+        assert '"type" and "severity"' in CODE_REVIEWER_SYSTEM_PROMPT
+        assert "SEPARATE fields" in CODE_REVIEWER_SYSTEM_PROMPT
+
+    def test_names_the_four_valid_types_and_excludes_severity_words_from_them(self):
+        for finding_type in ("issue", "comment", "question", "good_point"):
+            assert f"`{finding_type}`" in CODE_REVIEWER_SYSTEM_PROMPT
+        assert "never `minor`, `medium`, `major`, or `critical`" in CODE_REVIEWER_SYSTEM_PROMPT
