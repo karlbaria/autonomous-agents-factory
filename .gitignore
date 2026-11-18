@@ -131,6 +131,7 @@ Plans/
 
 # Local secrets/real values for the software-factory lab (see docs/lab/FACTORY_PLAN.md)
 .local.env
+slack-setup-notes.md
 
 # ──────────────────────────────────────────────
 # Explicit keeps (override ignores above)

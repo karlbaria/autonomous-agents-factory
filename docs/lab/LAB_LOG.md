@@ -143,7 +143,7 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev-factory --re
 - ~~`docs/lab/FACTORY_TOUR.md` not yet written~~ — **done**, see `docs/lab/FACTORY_TOUR.md`.
 - ~~Demo run once, but the build gate was a false positive~~ — **rerun, with a real gate this time.** See Demo results (second run) below.
 - ~~X-Ray trace missing~~ — **root-caused and fixed.** `cdk/src/stacks/agent.ts`'s `agentcore.Runtime` never set `tracingEnabled` (defaults `false`); the account-level prerequisite the code's own comment worried about (`UpdateTraceSegmentDestination`) was already `ACTIVE`. Filed as #6, fixed in PR #7 (`autonomous-agents-factory`), merged and deployed. Confirmed working — see Demo results (second run).
-- **Slack, Jira, Linear left unconnected** until the demo works cleanly, then walked through separately with new apps scoped to this stack only — deferred to a new session.
+- ~~Slack, Jira, Linear left unconnected~~ — **Slack done**, see Task 2b below. **Jira and Linear remain deferred** — no new session scheduled yet; do the same new-app-per-stack pattern when picked up.
 - **`.github/workflows/` safe-to-enable-later classification** (none enabled this task):
 
   | Workflow | Verdict | Why |
@@ -206,3 +206,47 @@ After merging PR #9 (`test_subtract` fix) and PR #10 (`/divide`), submitted a fr
 This is intentional, not a bug: `agent/src/pipeline.py:664`'s `_apply_delivery_gate` forces any `new_task`/create-strategy coding task that reports `agent_status=success` but ships **no commit and no PR** into `overall_status="error"`, `deliverable=lost`. The docstring's own rationale: a silently-successful no-op is indistinguishable from the bug this gate was built to catch (a stacked sub-task that edited files in a nested working tree, so the platform reported success for work that no longer existed anywhere) — "a task that reports success but ships nothing must FAIL, or the platform reports success for work that no longer exists anywhere." The gate has no carve-out for "I checked and it was already correct": that outcome and the lost-work bug look identical from the pipeline's point of view, so both get the same loud, retryable FAILED. The sanctioned no-op exceptions are narrow and don't include this case: read-only/`pr_review` and artifact workflows (no PR expected by design), `pr_iteration`'s question-only "answered" path, and `clarify-and-hold`.
 
 Practical takeaway for this lab: before resubmitting a task against an issue, check whether it's already fixed on `main` — a correctly-behaving agent will still report FAILED, not a clean no-op success, and that's load-bearing behavior (it protects against silently losing real work), not something to "fix" by special-casing it away.
+
+## Task 2b: Connect Slack to `backgroundagent-dev-factory` only
+
+### 1. What was done, and where it differed from the plan
+
+- Ran `bgagent slack setup --stack-name backgroundagent-dev-factory` (explicit flag — the CLI's own default is `backgroundagent-dev`, the stock stack). This reads the manifest JSON and the three Slack secret ARNs from the **factory stack's own** CloudFormation outputs (`SlackAppManifestJson`, `SlackSigningSecretArn`, `SlackClientSecretArn`, `SlackClientIdSecretArn`) — confirmed distinct from the stock stack's by inspecting the outputs directly before starting.
+- **Created a brand-new Slack app, named "Jarvis," not "Shoof."** The stock stack's existing Slack app lives in the **same workspace**, so beyond just being a separate app, the default manifest-provided name (`"Shoof"`) and slash command (`/bgagent`) would have collided with it. Renamed before/after creation: app name, App Home bot display name, app icon, and the slash command (`/bgagent` → `/jarvis`) — each followed by **Reinstall to Workspace** so the rename actually took effect (a bot display-name change does not apply retroactively without reinstalling).
+- **App icon:** generated locally with PIL (no AI image model, no network) — a robot-coder glyph (`</>` badge on the chest) in the lab's existing cyan/navy palette, 512×512 PNG. Not committed to the repo; it's a one-off Slack-dashboard upload.
+- Verified Event Subscriptions (Retry → green checkmark → Save), installed via the wizard-printed OAuth URL (not the dashboard's "Install App" button, which doesn't connect to the backend), then `/jarvis link` in Slack + `node cli/lib/bin/bgagent.js slack link <code>` in the terminal — confirmed linked (`Workspace: T0CJ127D9J5`, `User: U0CHYVBNEAW`).
+- **Credential-entry step is inherently interactive** (pasting a signing secret, client secret, and client ID into a live wizard prompt after creating the app in a browser) — done by the account owner in their own terminal, not scripted or run on their behalf.
+
+### 2. Problems hit and how each was solved
+
+1. **Slack's "create app from manifest" flow skipped the expected manifest-review/edit screen** and went straight to an "App is ready!" screen showing a Bot token (`xoxb-...`) and an App token (`xapp-...`) — Socket Mode / Slack CLI credentials. These are **not** what ABCA's OAuth-based integration uses (the manifest requests `socket_mode_enabled: false`); ignored both tokens entirely and went to **App Settings → Basic Information → App Credentials** for the actual Signing Secret / Client ID / Client Secret the wizard needed.
+2. **Renaming the app name and icon (Basic Information) did not update the App Home bot display name** — Slack treats `display_information.name` and `bot_user.display_name` as separate fields; the mention picker kept showing "Shoof" until App Home's "App Display Name" was edited directly and the app reinstalled.
+3. **After that fix, the Slack client's mention-picker/search index still showed "Shoof" for a while.** Confirmed via the bot's profile card (which correctly showed "Jarvis") that this was Slack-side search-index cache lag, not a real misconfiguration — not blocking, and not something a reinstall forces to refresh sooner.
+4. **`/jarvis help` works; a plain `@Jarvis help` mention does not.** "help" and "link" are only recognized as keywords on the dedicated slash-command path (`cdk/src/handlers/slack-commands.ts`); a natural-language `@mention` or DM goes through the task-submission parser instead, which doesn't recognize "help" and falls back to "Please include a repo..." This is existing ABCA behavior, not specific to the rename.
+5. **Found real cross-cutting hardcoding: "Shoof" and `/bgagent` are baked into ABCA source, not derived from the installed Slack app's actual name.** The manifest itself (`cdk/src/stacks/agent.ts:1444-1446`) hardcodes `display_information.name`, `bot_user.display_name`, and the `/bgagent` command. Lambda reply text hardcodes "Shoof" independently of the Slack App's configured name, in three places: `cdk/src/handlers/slack-command-processor.ts` (lines 120, 128-132, 139, 219), `cdk/src/handlers/slack-commands.ts` (`HELP_TEXT`, lines 135-141), and a comment in `slack-events.ts:176`. This means every reply from the bot — `/jarvis help`, the "DM Shoof directly" text, the "Please include a repo" fallback — still says "Shoof" regardless of the Slack-side rename, because none of it is config-driven per stack. **Not fixed this session** — flagged as a follow-up issue (parameterize the bot name, or at minimum fix the copy), to be filed and approved through the normal issue-first flow ([AGENTS.md](../../AGENTS.md#boundaries)) rather than edited ad hoc.
+
+### 3. Demo result
+
+Filed a trivial feature issue on the already-onboarded sandbox repo — [factory-sandbox-py#11](https://github.com/karlbaria/factory-sandbox-py/issues/11), "Add `/power/{a}/{b}` endpoint" (same pattern as the existing `/multiply`, `/divide`) — then submitted it from Slack:
+
+```
+@Jarvis add the /power endpoint in karlbaria/factory-sandbox-py#11
+```
+
+| Metric | Value |
+|---|---|
+| Task ID | `01M7PERVVDSNC73DJAS09X2V8Y` |
+| Channel | `slack` (confirmed in `bgagent status` output — proves the Slack submission path end to end, not just a CLI/API submission) |
+| Status | `COMPLETED` |
+| Turns | 6 |
+| Duration | 49s |
+| Cost | $0.15 |
+| PR | [factory-sandbox-py#12](https://github.com/karlbaria/factory-sandbox-py/pull/12) |
+
+Reactions and thread messages (:eyes: → :hourglass_flowing_sand: → :white_check_mark: + View PR button) matched the guide's documented flow.
+
+### 4. Open items
+
+- **Jira and Linear remain deferred.** Both features are already deployed on `backgroundagent-dev-factory` (Task 2's all-features install), but no app/connection has been created for either. Same pattern applies when picked up: a new Jira/Linear app or webhook scoped to this stack only, never reusing the stock stack's.
+- **"Shoof"/`/bgagent` hardcoding (see Problems #5 above)** — real ABCA bug, not a lab-specific issue. Worth its own approved GitHub issue before editing; not done this session.
+- **Generated Slack app icon** is a local-only PNG (`/tmp/jarvis-icon/jarvis-icon-v2.png`), not committed anywhere — re-generate if needed, or save a copy outside `/tmp` if it should survive a reboot.
