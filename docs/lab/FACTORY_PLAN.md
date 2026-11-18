@@ -13,7 +13,15 @@
   - **Deployed features:** `backgroundagent-dev-factory` went up with every optional feature (Slack, Linear, Jira, deploy-preview screenshots, Agent Registry, Tool Gateway) via the interactive `bgagent setup` wizard, not the plan's `--features none`. Audited every new route this adds: each is either Cognito-authenticated or HMAC-verified in its Lambda handler (no gateway-level `NONE` auth without an in-handler signature check); see `docs/lab/LAB_LOG.md`'s Task 2 entry for the full table.
   - **CDKToolkit bootstrap:** the account's existing bootstrap is the vanilla default (CloudFormation execution role = `AdministratorAccess`), not ABCA's own least-privilege policy bundle (`cdk/src/bootstrap/policies/`). Reused as-is (matches the precedent already set by the stock `backgroundagent-dev` stack); a separately-qualified least-privilege bootstrap is deferred to the hardening backlog rather than done now, since it would be new, untested surface area for a single-task deploy.
   - **Idle cost:** roughly $149/month for the stack's always-on resources, ~90% of it the VPC NAT Gateway + 7 interface endpoints that AgentCore's private-networking design requires — not something this task's scope can reduce while keeping AgentCore and the current security posture.
-- **2026-11-18 (Planning):** Added Tasks 13–15 to the task breakdown — outbound Jira issue creation + auto-tracking (13), Confluence publishing for generated documentation (14), and a feature-planning workflow that decomposes an unscoped request into Jira stories/subtasks plus a Confluence doc (15) — after confirming during the Jira setup session (`docs/lab/LAB_LOG.md`'s Task 2b continued) that ABCA has zero outbound Jira/Linear issue-creation and zero Confluence integration today. Not yet scheduled for a specific session; priority among 3–15 (including whether to interleave with the already-planned verified-workflow tasks) is still to be decided.
+- **2026-11-18 (Planning):** Added Tasks 13–15 to the task breakdown — outbound Jira issue creation + auto-tracking (13), Confluence publishing for generated documentation (14), and a feature-planning workflow that decomposes an unscoped request into Jira stories/subtasks plus a Confluence doc (15) — after confirming during the Jira setup session (`docs/lab/LAB_LOG.md`'s Task 2b continued) that ABCA has zero outbound Jira/Linear issue-creation and zero Confluence integration today. **Decided order:** Track A (Task 3 → 4 → 5) runs first, then Track B (Task 13 → 14 → 15), one task at a time, never in parallel; Tasks 6–12 are deferred until both tracks are done.
+- **2026-11-18 (Planning, continued):**
+  - **Deferred tasks and order:** Tasks 6–12 are marked Deferred (later) in the task breakdown, content kept unchanged. Active sequence is Task 3 → 4 → 5 → 13 → 14 → 15, run sequentially, never in parallel.
+  - **Reviewer redesign (Tasks 4/5):** the coder writing both the code and its own tests is a conflict of interest, so the reviewer gets independent testing via probe tests instead of relying on the coder's. Two separate agent calls: Call 1 (probe writer) sees only the issue and the base-branch code, never the diff, and writes probes into a scratch directory outside the repo; a deterministic step (not an agent) runs those probes against the coder's version; Call 2 (code reviewer) sees the issue, the diff, and the probe results, and does the white-box review. Failing probes and evidence-backed findings both count toward the READY/NOT-READY verdict.
+  - **Probes are committed by a deterministic step, never by the reviewer:** before `ensure_pr`, the probes that pass on the final code are committed into `tests/review_probes/` as a separate commit; failing probes are listed as unresolved findings and never committed. The human decides at merge whether to keep them.
+  - **Confluence confirmed:** Confluence Cloud is on the same Atlassian site as Jira — no separate site/tenant onboarding needed for Task 14.
+  - **Jira orchestration confirmed:** `docs/guides/JIRA_SETUP_GUIDE.md`'s "Authored subtask orchestration" section is backed by real code (`jira-webhook-processor.ts`, `orchestration-channel-jira.ts`) and a passing test suite (`jira-webhook-processor-orchestration.test.ts`, 13/13) — not Linear-only documentation. Task 15 relies on this existing routing rather than building new orchestration logic.
+  - **Task 15 requires Slack approval before filing anything:** the proposed epic/stories, an estimated cost (from the Task 3 ledger averages), and a Confluence draft link are posted to Slack with Approve/Revise/Cancel buttons; only a Slack user linked to a factory Cognito user can approve; plans over a story-count or cost threshold need a second confirmation; unanswered plans expire with nothing filed; the approver and time are recorded on the Jira parent.
+  - **Fork-only scope:** All changes from Task 3 on are confined to this fork. Nothing is proposed or contributed upstream to `aws-samples`. ADRs are fork ADRs, titled "ADR-0NN (fork): …". ABCA's ADR-003 issue-approval rule applies within the fork: the owner adds the `approved` label to each issue before work starts. PRs always target the fork's `main`, never `aws-samples`. `LICENSE` and `NOTICE` are kept.
 
 ## How to use this plan with Claude Code
 
@@ -34,6 +42,7 @@ Build a software factory you can learn from piece by piece: orchestrator, determ
   - The existing stock clone at `kiro_projects/Autonomous agents/sample-autonomous-cloud-coding-agents` stays unchanged, for experimenting with ABCA as-is.
   - All factory work happens in a separate Claude Code project folder, holding a clone of your own GitHub fork of ABCA.
   - The fork is for your own use. It does not need to merge back upstream or follow ABCA V2. An `upstream` remote is optional, only for picking up specific fixes such as security patches.
+- **Fork-only scope:** All changes from Task 3 on are confined to this fork. Nothing is proposed or contributed upstream to `aws-samples`. ADRs are fork ADRs, titled "ADR-0NN (fork): …". ABCA's ADR-003 issue-approval rule applies within the fork: the owner adds the `approved` label to each issue before work starts. PRs always target the fork's `main`, never `aws-samples`. `LICENSE` and `NOTICE` are kept.
 - **Tools:** Claude Code builds the project. The factory's coder runs on the Claude Agent SDK on Amazon Bedrock. Kiro is not required.
 - **Budget:** no number fixed yet. The build produces cost data per task and per stage to inform that decision.
 - **Opt-in:** existing ABCA workflows stay unchanged. New behaviour lives in a new workflow, `coding/new-task-verified-v1`.
@@ -120,6 +129,10 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 
 ## Task breakdown
 
+### Active order
+
+Track A (Task 3 → 4 → 5) runs first, then Track B (Task 13 → 14 → 15) — one task at a time, never in parallel. Tasks 6–12 are marked **Deferred (later)** below and are not scheduled until both tracks are done; their content is kept unchanged for when priority is revisited.
+
 ### Task 1: Fork, fix local tooling, and run locally
 - Objective: a green fork, in its own Claude Code project folder, that runs a real task locally.
 - Guidance:
@@ -160,31 +173,46 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 - Demo: a normal task reports the same cost as before, and its trajectory shows a `coder` stage.
 
 ### Task 4: Reviewer step in advisory mode, with a pluggable backend
-- Objective: an independent reviewer runs inside the task and records findings.
+- Objective: an independent reviewer runs inside the task and records findings, with its own independent tests rather than relying solely on the coder's.
 - Guidance:
-  - Write ADR-025 (an addendum to ADR-014).
+  - Write ADR-025 (an addendum to ADR-014), documenting the two-call reviewer design below.
+  - **Conflict of interest:** the coder writes both the code and its own tests, which is a conflict of interest. The reviewer provides independent testing by writing probe tests.
+  - **The review runs in two separate agent calls**, using Task 3's multi-call support:
+    - **Call 1, the probe writer,** sees only the issue and the base-branch code, never the diff. If the issue doesn't name the interface to test, it also gets the names and signatures of new public functions or routes, without their code. It writes probe tests from the issue's requirements, in a scratch directory outside the repo.
+    - **A deterministic step (not an agent)** runs the probes against the coder's version and records each result.
+    - **Call 2, the code reviewer,** sees the issue, the diff and the probe results. It does the white-box review: security, error handling, design, and the quality of the coder's tests.
+  - Failing probes and evidence-backed code findings both count toward the READY or NOT-READY verdict.
+  - Add a narrow Cedar rule that lets Call 1 write only in its scratch directory, with tests proving repo writes stay blocked. Neither reviewer call ever edits repo files.
+  - Give the reviewer calls their own turn cap, separate from the coder's.
+  - **Probe visibility:** the PR review summary lists each probe, its intent, and its pass or fail result in each round. Before `ensure_pr`, a deterministic step commits the probes that pass on the final code into `tests/review_probes/`, as a separate commit. Failing probes are listed as unresolved findings and are not committed. The human decides at merge whether to keep the probes.
+  - Emit simple progress milestones, such as the probe results count, the review verdict and the findings count, so the stage shows in `bgagent watch`. Full observability is in deferred Task 6.
   - Add `agent/src/review/`:
     - a `ReviewerBackend` interface, with a Claude implementation that uses a copy of the config with `read_only=True` and a separate reviewer model and turn cap
     - the findings model and parser: a READY or NOT-READY line plus JSON findings that must cite evidence. Code assigns the IDs, and output that can't be parsed is treated as NOT-READY.
-    - the reviewer prompt: the `pr_review` taxonomy plus the refute posture. Its input is only the issue and the diff against `origin/<default_branch>`.
+    - the reviewer prompt: the `pr_review` taxonomy plus the refute posture. Call 2's input is the issue, the diff against `origin/<default_branch>`, and the probe results; Call 1's input is the issue and the base-branch code only.
   - Add the step kind `review_and_fix` (schema, `StepKind`, handler, validator sets, corpus fixtures) with `review_mode: advisory`.
   - Create the workflow `coding/new-task-verified-v1` and call the step inline from `pipeline.run_task`.
   - Record the reviewed commit SHA with each verdict, and put the review summary in the PR body.
 - Tests:
   - The parser handles valid, malformed and incomplete output.
   - The corpus fixtures are updated.
-  - The reviewer runs read-only, on its own model, without the coder's transcript, after the coder and before PR creation.
+  - Call 1 (probe writer) runs without ever seeing the diff; Call 2 (code reviewer) runs with the diff and the probe results; both run read-only, on their own model, after the coder and before PR creation.
+  - The deterministic probe-run step records each probe's pass/fail correctly against the coder's version.
+  - The Cedar scratch-directory rule: Call 1 can write there, and a test proves repo writes stay blocked for both calls.
+  - The probe-commit step commits only probes that pass on the final code, as a separate commit, before `ensure_pr`; failing probes are never committed.
   - `new-task-v1` behaves exactly as before.
-- Demo: a task on the new workflow shows the reviewer's findings in the PR, with coder and reviewer costs listed separately.
+- Demo: a task on the new workflow shows the probe writer's probes (intent plus pass/fail) and the code reviewer's findings in the PR, a separate commit containing the passing probes, and coder and reviewer costs listed separately.
 
 ### Task 5: Adversarial mode (the bounded fix loop)
 - Objective: findings that block send the work back to the coder.
 - Guidance:
   - Add these settings: `review_mode: adversarial | advisory | none`, `max_iterations` (default 2), `block_on_severity` (default `major`, with evidence required), and `on_unresolved: fail | pr_with_warning` (the warning option adds a `review:unresolved` label).
-  - The fixer gets the findings. Each re-review is a fresh reviewer session.
+  - **Each review round reruns the full sequence:** fresh probes (Call 1), the probe run (deterministic step), then a fresh code review (Call 2).
+  - The fixer gets the failing probes and findings as evidence. It must fix the code, and it can't edit or delete the probes.
   - A review that doesn't finish is retried once, then counts as NOT-READY.
   - A verdict is refused if the reviewed SHA no longer matches the code.
   - The loop stops when the budget runs out, and records why.
+  - Emit a milestone for each round: "review round N: verdict, findings count, probes failed".
 - Tests, with `run_agent` mocked:
   - clean on the first pass
   - fixed on the second pass
@@ -192,9 +220,11 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
   - a reviewer that doesn't finish
   - a stale SHA
   - budget exhausted partway through
-- Demo: a seeded flaw (for example, missing input validation) goes from review to fix to a clean review, and the PR shows two rounds.
+  - the fixer cannot edit or delete the probe files (a test proves it)
+  - each round reruns fresh probes rather than reusing the first round's
+- Demo: a seeded flaw (for example, missing input validation) goes from review to fix to a clean review, and the PR shows two rounds, each with its own fresh probes and its own round milestone.
 
-### Task 6: Observability for the new stages
+### Task 6: Observability for the new stages — Deferred (later)
 - Objective: the new stages are visible everywhere ABCA reports progress.
 - Guidance:
   - Add a `task_span` per stage and per round.
@@ -204,9 +234,10 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 - Tests: progress writer tests, `watch.ts` tests and a CDK snapshot test.
 - Demo: live rounds in `bgagent watch`, spans in X-Ray, and the new widgets on the dashboard.
 
-### Task 7: Test author step and hidden-test gate
+### Task 7: Test author step and hidden-test gate — Deferred (later)
 - Objective: one agent defines "done" and a different agent writes the code.
 - Guidance:
+  - **Note:** The Task 4 probe writer covers most of this for now. Task 7's test author writes tests before any code exists, which is more independent. Revisit if reviews miss defects.
   - Add the step `author_acceptance_tests`, which runs before the coder. It uses the reviewer backend interface with a separate model.
     - Input: the issue and the starting code.
     - Output: test files plus a short rationale, or a "not testable" verdict with a reason.
@@ -220,7 +251,7 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
   - The gate passes and fails correctly.
 - Demo: on a bug-report issue, the hidden test fails before the fix, the coder fixes the bug without seeing the test, and the gate passes.
 
-### Task 8: Coder eval
+### Task 8: Coder eval — Deferred (later)
 - Objective: score workflows on repeatable cases, without hand-writing them.
 - Guidance:
   - Add an `eval/coder/` package with `mise //eval:coder`. Each case is data: base commit, issue text and hidden tests.
@@ -233,7 +264,7 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 - Tests: unit tests for the generator validity checks, scoring and report, using recorded fixtures.
 - Demo: a `new-task-v1` vs `new-task-verified-v1` report on generated cases.
 
-### Task 9: Reviewer eval
+### Task 9: Reviewer eval — Deferred (later)
 - Objective: measure whether the reviewer catches real defects without raising false alarms.
 - Guidance:
   - Add an entry point that runs the reviewer step on its own: a diff and an issue in, a verdict out. Harbor calls it.
@@ -245,7 +276,7 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 - Tests: unit tests for the entry point and the scoring.
 - Demo: a reviewer scorecard per model and prompt version.
 
-### Task 10: A non-Claude backend for the reviewer and test author
+### Task 10: A non-Claude backend for the reviewer and test author — Deferred (later)
 - Objective: let a different model family serve as an independent checker.
 - Guidance:
   - Implement `ReviewerBackend` with the Bedrock Converse API, using models enabled in your Region.
@@ -255,7 +286,7 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 - Tests: the tool allowlist is enforced, the output contract matches the Claude backend, and contract tests are shared between both backends.
 - Demo: reviewer and coder eval results for the Claude tier vs the other family, with a model choice based on data.
 
-### Task 11: Enforce the promotion gate
+### Task 11: Enforce the promotion gate — Deferred (later)
 - Objective: no workflow is marked `production` without evals to back it.
 - Guidance:
   - Add a CI check. A `production` workflow with `requires: [eval:coder:<suite>, eval:reviewer:<suite>]` needs committed reports for its current `prompt_version` that meet its thresholds and don't regress against the baseline.
@@ -263,7 +294,7 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 - Tests: corpus cases for a missing report, a stale report, a result below threshold, and a pass.
 - Demo: changing a prompt fails CI until fresh eval reports are committed.
 
-### Task 12: Cost report and a backlog for team use
+### Task 12: Cost report and a backlog for team use — Deferred (later)
 - Objective: data for the budget decision, and a path to a team tool.
 - Guidance:
   - Add `mise //eval:cost-report`: cost by workflow, stage and model, projected across task volumes.
@@ -293,6 +324,7 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 ### Task 14: Confluence publishing for generated documentation
 - Objective: any generated write-up (ADR, PRD, epic doc, user story, research artifact) can be delivered to a Confluence page instead of, or in addition to, its current destination (S3, repo file).
 - Guidance:
+  - **Prerequisite confirmed:** Confluence Cloud is on the same Atlassian site as Jira.
   - A new Atlassian OAuth (3LO) integration with Confluence scopes (`read:confluence-space.summary`, `write:confluence-content`, etc.) — decide via ADR whether this extends the existing Jira OAuth app's scopes or stands alone.
   - A space + page mapping per repo, parallel to Jira's project mapping, stored the same way in DynamoDB.
   - A generic "publish artifact to Confluence" step/adapter that `knowledge/web-research-v1` (and Task 15) can call — content-agnostic: markdown-to-Confluence-storage-format conversion, then create or update a page under the mapped space.
@@ -300,12 +332,20 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 - Tests: the markdown-to-Confluence conversion round-trips known fixtures; publish is skipped gracefully when no space mapping exists; existing `web-research-v1` S3 delivery is unaffected when Confluence isn't configured.
 - Demo: a `knowledge/web-research-v1` task's write-up appears as a new or updated Confluence page under the mapped space, with a link back in the task's final summary.
 
-### Task 15: Feature-planning workflow (research → decompose → file Jira + Confluence)
-- Objective: an unscoped request ("I want to build a new feature") becomes a repo-aware research pass, a decompose-or-not judgment, and the matching Jira structure plus a planning doc in Confluence — without re-solving any code-writing, which the existing coding pipeline already does once a story is filed. Depends on Tasks 13 and 14.
+### Task 15: Feature-planning workflow (research → decompose → approve → file Jira + Confluence)
+- Objective: an unscoped request ("I want to build a new feature") becomes a repo-aware research pass, a decompose-or-not judgment, and — once the requester approves — the matching Jira structure plus a planning doc in Confluence, without re-solving any code-writing, which the existing coding pipeline already does once a story is filed. Depends on Tasks 13 and 14.
 - Guidance:
   - New workflow kind, e.g. `knowledge/feature-planning-v1`: repo-aware (unlike `web-research-v1`'s `requires_repo: false`), read-only tool allowlist (`Read, Glob, Grep, WebFetch` — no Bash/Write/Edit, no PR).
-  - The agent researches the existing repo (or confirms it's a fresh app), judges whether the request is one scoped unit or needs decomposition, and emits either (a) one Jira issue via Task 13's primitive, or (b) a parent issue plus Jira subtasks with `blocks`/`is blocked by` links via the same primitive — then applies the trigger label to the parent so ABCA's existing "authored subtask orchestration" (see [JIRA_SETUP_GUIDE.md](../guides/JIRA_SETUP_GUIDE.md#authored-subtask-orchestration)) takes over automatically. No new execution-side orchestration code is needed — this routing already exists.
+  - The agent researches the existing repo (or confirms it's a fresh app), and judges whether the request is one scoped unit or needs decomposition into a parent issue plus Jira subtasks with `blocks`/`is blocked by` links. **Confirmed:** `jira-webhook-processor.ts`, `orchestration-channel-jira.ts`, 13/13 tests passing — labelling the parent runs all subtasks in `blocks` order and produces one combined PR, via ABCA's existing "authored subtask orchestration" (see [JIRA_SETUP_GUIDE.md](../guides/JIRA_SETUP_GUIDE.md#authored-subtask-orchestration)). No new execution-side orchestration code is needed — this routing already exists.
+  - **Nothing is filed and no label is applied until the requester approves the breakdown in Slack.** Approval design:
+    - Jarvis replies in the Slack thread with the proposed epic and stories (scope, acceptance criteria, dependency order), an estimated cost from the Task 3 ledger averages, and a link to a Confluence draft planning doc, with **Approve**, **Revise**, and **Cancel** buttons.
+    - **Revise** loops for a few rounds at most.
+    - On **Approve**, the factory files the epic and subtasks with `blocks` links, finalises the Confluence doc, and applies the `bgagent` label to the parent only, which triggers the existing orchestration.
+    - Only Slack users linked to a factory Cognito user can approve.
+    - Plans over a story-count or cost threshold need a second confirmation.
+    - Unanswered plans expire with nothing filed.
+    - Record the approver and the time on the Jira parent.
   - Writes the planning doc (PRD, epic write-up, ADR — whichever fits the request) to Confluence via Task 14's publishing adapter, and links it from the filed Jira issue(s).
   - Entry point: a Slack conversational request (`@Jarvis I want to build X`), distinct from today's "repo + instruction" task-submission parser, which currently falls back to "please include a repo" for anything it doesn't recognize as a direct coding instruction.
-- Tests: decompose-vs-single judgment on corpus fixtures (clear single-story asks vs. clear multi-story asks); filed Jira structure is correct (flat vs. parent+subtasks with correct link direction); the Confluence doc link is attached; no code is written and no PR is opened by this workflow itself.
-- Demo: `@Jarvis I want to build a tagging feature for factory-sandbox-py` produces a Jira epic with 2-3 linked subtasks and a Confluence planning doc, and labeling the first subtask kicks off an ordinary coding task exactly like today.
+- Tests: decompose-vs-single judgment on corpus fixtures (clear single-story asks vs. clear multi-story asks); nothing is filed in Jira or Confluence before approval; the approve, revise, cancel, and expiry paths each behave correctly; filed Jira structure is correct (flat vs. parent+subtasks with correct link direction) only after approval; the Confluence doc link is attached; no code is written and no PR is opened by this workflow itself.
+- Demo: `@Jarvis I want to build a tagging feature for factory-sandbox-py` produces a Slack proposal with Approve/Revise/Cancel buttons; after the requester approves in Slack, the epic and linked subtasks appear in Jira, the parent is labelled, and the existing orchestration starts the subtasks in dependency order.
