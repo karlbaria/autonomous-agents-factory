@@ -14,7 +14,6 @@ error, never silently skipped.
 from __future__ import annotations
 
 import subprocess
-import sys
 import uuid
 from pathlib import Path
 
@@ -89,8 +88,13 @@ def run_probes(probes: list[Probe], repo_dir: str, *, timeout_s: int = 300) -> l
             probe_path = tmp_dir / probe.filename
             probe_path.write_text(probe.source, encoding="utf-8")
             try:
+                # Bare "pytest" (never sys.executable -m pytest): the agent's own
+                # venv has no dev deps in the production image (--no-dev), so
+                # sys.executable -m pytest always 404s there. PATH resolution
+                # finds the TARGET REPO's pytest instead — mise shims it after
+                # the repo's own build step installs it.
                 result = run_cmd(
-                    [sys.executable, "-m", "pytest", str(probe_path), "-q"],
+                    ["pytest", str(probe_path), "-q"],
                     label=f"review-probe:{probe.filename}",
                     cwd=repo_dir,
                     timeout=timeout_s,
