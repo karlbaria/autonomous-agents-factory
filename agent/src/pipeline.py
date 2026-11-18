@@ -32,7 +32,14 @@ from jira_reactions import (
     transition_task_started,
 )
 from linear_reactions import react_task_finished, react_task_started
-from models import AgentResult, HydratedContext, RepoSetup, TaskConfig, TaskResult
+from models import (
+    AgentInvocationLedger,
+    AgentResult,
+    HydratedContext,
+    RepoSetup,
+    TaskConfig,
+    TaskResult,
+)
 from observability import current_otel_trace_id, task_span
 from post_hooks import (
     _extract_agent_notes,
@@ -214,6 +221,7 @@ def _execute_agent_step(
     hydrated,
     trajectory,
     progress,
+    ledger: AgentInvocationLedger | None = None,
 ):
     """Run the agentic step through the workflow step runner.
 
@@ -223,6 +231,10 @@ def _execute_agent_step(
     while clone, context assembly, and post-hooks stay inline (moving the full
     step list onto the runner is a follow-up). The workflow is loaded from the
     resolved ``{id, version}`` pinned at the create-task boundary.
+
+    ``ledger`` (Task 3) is the caller's ``AgentInvocationLedger``, so it can read
+    ``ledger.total_cost_usd`` after this returns; a caller that doesn't need it
+    (e.g. the existing unit tests) gets a throwaway one.
 
     Returns the ``AgentResult`` so the surrounding pipeline (cancel short-circuit,
     post-hooks, result assembly) is unchanged.
@@ -244,6 +256,7 @@ def _execute_agent_step(
         setup=setup,
         system_prompt=system_prompt,
         user_prompt=prompt,
+        ledger=ledger if ledger is not None else AgentInvocationLedger(),
     )
     # Drive only the agentic step through the runner; clone, context assembly,
     # and post-hooks stay on the inline path. only_kinds keeps the runner from
@@ -400,7 +413,7 @@ def _run_repoless_task(
         agent_status=agent_result.status,
         pr_url=None,
         artifact_uri=artifact_uri,
-        cost_usd=agent_result.cost_usd,
+        cost_usd=ctx.ledger.total_cost_usd,
         turns=turns_attempted,
         turns_attempted=turns_attempted,
         turns_completed=_compute_turns_completed(
@@ -1236,6 +1249,11 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                     f"uvloop detected ({policy_name}) — this may cause subprocess "
                     f"SIGCHLD conflicts with the Claude Agent SDK",
                 )
+            # Accumulates every agent-SDK call this task makes (Task 3). One call
+            # today (the coder); Task 4's reviewer and Task 5's fix loop add more
+            # to the same ledger, which is why TaskResult.cost_usd below reads
+            # ledger.total_cost_usd rather than agent_result.cost_usd directly.
+            ledger = AgentInvocationLedger()
             with task_span("task.agent_execution") as agent_span:
                 try:
                     agent_result = _execute_agent_step(
@@ -1246,6 +1264,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                         hc,
                         trajectory,
                         progress,
+                        ledger=ledger,
                     )
                 except Exception as e:
                     # Fatal agent error: mirror to APPLICATION_LOGS so
@@ -1680,7 +1699,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 pr_url=pr_url,
                 build_passed=build_passed,
                 lint_passed=lint_passed,
-                cost_usd=agent_result.cost_usd,
+                cost_usd=ledger.total_cost_usd,
                 # Legacy field (= turns_attempted) kept for back-compat.
                 turns=turns_attempted,
                 turns_attempted=turns_attempted,

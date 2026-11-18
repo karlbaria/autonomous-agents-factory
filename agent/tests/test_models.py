@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from models import (
     SUPPORTED_HYDRATED_CONTEXT_VERSION,
+    AgentInvocationLedger,
     AgentResult,
     GitHubIssue,
     HydratedContext,
@@ -478,6 +479,66 @@ class TestAgentResult:
         r.usage = TokenUsage(input_tokens=1000)
         assert r.status == "success"
         assert r.usage.input_tokens == 1000
+
+
+class TestAgentInvocationLedger:
+    """Task 3: tracks every run_agent call so a task can make several."""
+
+    def test_empty_ledger_has_no_spend_and_no_total(self):
+        ledger = AgentInvocationLedger()
+        assert ledger.spent == 0.0
+        assert ledger.total_cost_usd is None
+        assert ledger.stage_costs() == {}
+
+    def test_record_appends_a_call(self):
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=0.01, turns=3, model="opus")
+        assert len(ledger.calls) == 1
+        call = ledger.calls[0]
+        assert (call.stage, call.cost_usd, call.turns, call.model) == ("coder", 0.01, 3, "opus")
+
+    def test_remaining_budget_is_none_when_unset(self):
+        # No max_budget_usd configured ⇒ the task is unbounded. Must stay None,
+        # never clamp to 0 — a caller that checks `remaining is not None` before
+        # gating on it would otherwise wrongly treat "no cap" as "no budget".
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=5.00, turns=10, model="opus")
+        assert ledger.remaining_budget(None) is None
+
+    def test_remaining_budget_subtracts_spent(self):
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=2.00, turns=5, model="opus")
+        assert ledger.remaining_budget(5.00) == 3.00
+
+    def test_remaining_budget_floors_at_zero(self):
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=6.00, turns=5, model="opus")
+        assert ledger.remaining_budget(5.00) == 0.0
+
+    def test_remaining_budget_with_no_calls_equals_max_budget(self):
+        ledger = AgentInvocationLedger()
+        assert ledger.remaining_budget(5.00) == 5.00
+
+    def test_total_cost_usd_sums_every_call(self):
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=0.01, turns=3, model="opus")
+        ledger.record(stage="code_reviewer", cost_usd=0.02, turns=1, model="sonnet")
+        assert ledger.total_cost_usd == pytest.approx(0.03)
+
+    def test_total_cost_usd_is_none_when_no_call_reported_a_cost(self):
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=None, turns=0, model="opus")
+        assert ledger.total_cost_usd is None
+
+    def test_stage_costs_groups_by_stage(self):
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=0.01, turns=3, model="opus")
+        ledger.record(stage="code_reviewer", cost_usd=0.02, turns=1, model="sonnet")
+        ledger.record(stage="code_reviewer", cost_usd=0.015, turns=1, model="sonnet")
+        assert ledger.stage_costs() == {
+            "coder": pytest.approx(0.01),
+            "code_reviewer": pytest.approx(0.035),
+        }
 
 
 class TestTaskResult:

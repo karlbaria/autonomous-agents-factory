@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
+from models import AgentResult
 from post_hooks import VerifyOutcome
 from workflow import Step, StepContext, StepOutcome, Workflow, run_workflow
 from workflow.runner import StepHandler, WorkflowCheckpoint, _step_key
@@ -44,13 +46,25 @@ def _workflow(steps: list[dict], *, primary: str = "pr_url", **over) -> Workflow
 
 
 class _RecordingProgress:
-    """Captures milestone strings so step-boundary emission can be asserted."""
+    """Captures milestone strings (+ details) so emission can be asserted."""
 
     def __init__(self) -> None:
         self.milestones: list[str] = []
+        self.details: list[str] = []
 
     def write_agent_milestone(self, milestone: str, details: str = "") -> None:
         self.milestones.append(milestone)
+        self.details.append(details)
+
+
+class _RecordingTrajectory:
+    """Captures write_stage_costs() calls so stage reporting can be asserted."""
+
+    def __init__(self) -> None:
+        self.stage_costs_calls: list[dict] = []
+
+    def write_stage_costs(self, stage_costs: dict) -> None:
+        self.stage_costs_calls.append(stage_costs)
 
 
 def _ctx(workflow: Workflow, progress=None) -> StepContext:
@@ -473,7 +487,7 @@ class TestGateStatus:
         )
 
 
-def _real_ctx(workflow: Workflow, **kw):
+def _real_ctx(workflow: Workflow, *, max_budget_usd: float | None = None, **kw):
     """A StepContext with a real (minimal) TaskConfig for handler tests."""
     from models import TaskConfig
 
@@ -483,6 +497,7 @@ def _real_ctx(workflow: Workflow, **kw):
         aws_region="us-east-1",
         task_id="task-1",
         max_turns=10,
+        max_budget_usd=max_budget_usd,
     )
     return StepContext(workflow=workflow, config=config, **kw)
 
@@ -656,3 +671,177 @@ class TestRunAgentHandler:
         assert result.failed_step is not None
         assert result.failed_step.name == "implement"
         assert "empty system prompt" in (result.failed_step.error or "")
+
+    def test_first_call_passes_the_full_budget_through_unchanged(self):
+        # Task 3, no-behaviour-change case: an empty ledger's remaining budget
+        # equals the task's own max_budget_usd, so the config run_agent sees is
+        # unchanged from today.
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf, system_prompt="go", max_budget_usd=5.00)
+        captured: dict = {}
+
+        async def fake_run_agent(_p, _s, config, cwd=None, trajectory=None):
+            captured["max_budget_usd"] = config.max_budget_usd
+            return AgentResult(status="success", cost_usd=0.01, num_turns=2)
+
+        with patch("runner.run_agent", side_effect=fake_run_agent):
+            _handle_run_agent(wf.steps[0], ctx)
+
+        assert captured["max_budget_usd"] == 5.00
+
+    def test_unbounded_budget_stays_none_through_the_call(self):
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf, system_prompt="go")  # max_budget_usd defaults to None
+        captured: dict = {}
+
+        async def fake_run_agent(_p, _s, config, cwd=None, trajectory=None):
+            captured["max_budget_usd"] = config.max_budget_usd
+            return AgentResult(status="success", cost_usd=0.01, num_turns=2)
+
+        with patch("runner.run_agent", side_effect=fake_run_agent):
+            _handle_run_agent(wf.steps[0], ctx)
+
+        assert captured["max_budget_usd"] is None
+
+    def test_remaining_budget_threaded_into_a_later_call(self):
+        # Not reachable yet in production (one run_agent step per workflow),
+        # but this is the primitive Task 4's reviewer and Task 5's fix loop
+        # build on: a call made after the ledger already has spend only gets
+        # what's left.
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf, system_prompt="go", max_budget_usd=5.00)
+        ctx.ledger.record(stage="coder", cost_usd=2.00, turns=4, model="opus")
+        captured: dict = {}
+
+        async def fake_run_agent(_p, _s, config, cwd=None, trajectory=None):
+            captured["max_budget_usd"] = config.max_budget_usd
+            return AgentResult(status="success", cost_usd=0.5, num_turns=2)
+
+        with patch("runner.run_agent", side_effect=fake_run_agent):
+            _handle_run_agent(wf.steps[0], ctx)
+
+        assert captured["max_budget_usd"] == 3.00
+
+    def test_successful_call_is_recorded_in_the_ledger(self):
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf, system_prompt="go")
+
+        async def fake_run_agent(_p, _s, _c, cwd=None, trajectory=None):
+            return AgentResult(status="success", cost_usd=0.0136, num_turns=5)
+
+        with patch("runner.run_agent", side_effect=fake_run_agent):
+            _handle_run_agent(wf.steps[0], ctx)
+
+        assert len(ctx.ledger.calls) == 1
+        call = ctx.ledger.calls[0]
+        assert call.stage == "coder"
+        assert call.cost_usd == 0.0136
+        assert call.turns == 5
+        assert ctx.ledger.total_cost_usd == 0.0136
+
+    def test_stage_costs_reported_to_trajectory_and_progress_milestone(self):
+        # No new progress event type — stage costs ride in the existing
+        # agent_milestone event's details, so bgagent watch / watch.ts need no
+        # changes. The trajectory gets a dedicated new field.
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        progress = _RecordingProgress()
+        trajectory = _RecordingTrajectory()
+        ctx = _real_ctx(wf, system_prompt="go", progress=progress, trajectory=trajectory)
+
+        async def fake_run_agent(_p, _s, _c, cwd=None, trajectory=None):
+            return AgentResult(status="success", cost_usd=0.02, num_turns=1)
+
+        with patch("runner.run_agent", side_effect=fake_run_agent):
+            _handle_run_agent(wf.steps[0], ctx)
+
+        assert trajectory.stage_costs_calls == [{"coder": 0.02}]
+        assert "stage_costs" in progress.milestones
+        details = progress.details[progress.milestones.index("stage_costs")]
+        assert json.loads(details) == {"coder": 0.02}
+
+    def test_budget_exhausted_skips_the_agent_call(self):
+        # Below the SDK's $0.01 minimum ⇒ don't even call run_agent.
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf, system_prompt="go", max_budget_usd=2.00)
+        ctx.ledger.record(stage="coder", cost_usd=1.995, turns=4, model="opus")
+
+        with patch("runner.run_agent") as mock_run_agent:
+            outcome = _handle_run_agent(wf.steps[0], ctx)
+
+        mock_run_agent.assert_not_called()
+        assert outcome.succeeded
+        assert ctx.agent_result is not None
+        assert ctx.agent_result.status == "error_budget_exhausted"
+        assert ctx.agent_result.error
+        # Recorded as a zero-cost call, not silently dropped from the ledger.
+        assert len(ctx.ledger.calls) == 2
+        assert ctx.ledger.calls[-1].cost_usd == 0.0
+        assert ctx.ledger.calls[-1].stage == "coder"
+
+    def test_exactly_the_minimum_budget_still_runs(self):
+        # $0.01 remaining is the SDK minimum, not "below" it — must still run.
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf, system_prompt="go", max_budget_usd=2.00)
+        ctx.ledger.record(stage="coder", cost_usd=1.99, turns=4, model="opus")
+
+        async def fake_run_agent(_p, _s, config, cwd=None, trajectory=None):
+            return AgentResult(status="success", cost_usd=0.01, num_turns=1)
+
+        with patch("runner.run_agent", side_effect=fake_run_agent) as mock_run_agent:
+            _handle_run_agent(wf.steps[0], ctx)
+
+        mock_run_agent.assert_called_once()
+
+    def test_env_vars_set_during_the_call_are_restored_after(self):
+        import os
+
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf, system_prompt="go")
+
+        async def fake_run_agent(_p, _s, _c, cwd=None, trajectory=None):
+            # Simulate runner._setup_agent_env's process-global mutation.
+            os.environ["_T3_PROBE"] = "set-during-call"
+            return AgentResult(status="success", cost_usd=0.01, num_turns=1)
+
+        assert "_T3_PROBE" not in os.environ
+        with patch("runner.run_agent", side_effect=fake_run_agent):
+            _handle_run_agent(wf.steps[0], ctx)
+
+        assert "_T3_PROBE" not in os.environ
+
+    def test_env_restored_even_when_the_call_raises(self):
+        import os
+
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf, system_prompt="go")
+
+        async def boom(_p, _s, _c, cwd=None, trajectory=None):
+            os.environ["_T3_PROBE"] = "set-during-call"
+            raise RuntimeError("SDK session expired")
+
+        assert "_T3_PROBE" not in os.environ
+        with (
+            patch("runner.run_agent", side_effect=boom),
+            pytest.raises(RuntimeError, match="SDK session expired"),
+        ):
+            _handle_run_agent(wf.steps[0], ctx)
+
+        assert "_T3_PROBE" not in os.environ
