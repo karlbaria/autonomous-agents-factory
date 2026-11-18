@@ -149,3 +149,29 @@ class TestParseReviewOutputMalformed:
         assert out.verdict == "NOT_READY"
         assert out.parse_error is not None
         assert "type" in out.parse_error
+
+    def test_severity_word_in_type_field_forces_not_ready(self):
+        """Regression: seen for real on factory-sandbox-py#32 (autonomous-agents-factory#19)
+        — the reviewer confused the `type` field (issue/comment/question/good_point)
+        with `severity` (minor/medium/major/critical) and wrote a third finding with
+        "type": "minor", so findings again failed to parse even though probes and the
+        cost split rendered correctly."""
+        text = (
+            "VERDICT: NOT-READY\n"
+            "FINDINGS:\n"
+            "```json\n"
+            "[\n"
+            '  {"type": "issue", "severity": "major", "title": "Missing input validation", '
+            '"description": "d1", "evidence": "handler.py:10"},\n'
+            '  {"type": "good_point", "title": "Clear naming", "description": "d2", '
+            '"evidence": "handler.py:20"},\n'
+            '  {"type": "minor", "title": "Inconsistent spacing", "description": "d3", '
+            '"evidence": "handler.py:30"}\n'
+            "]\n"
+            "```\n"
+        )
+        out = parse_review_output(text)
+        assert out.verdict == "NOT_READY"
+        assert out.findings == []
+        assert out.parse_error is not None
+        assert "finding 3 has unknown type 'minor'" in out.parse_error

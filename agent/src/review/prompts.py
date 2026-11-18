@@ -78,13 +78,16 @@ FINDINGS:
 ]
 ```
 
-Finding types: `issue` (severity required: minor|medium|major|critical), \
-`comment`, `question`, `good_point` (no severity on these three — but \
-"evidence" is still required on all four). Use NOT-READY when a failing \
-probe or an evidence-backed `issue` finding should block merge; otherwise \
-READY. If you have nothing to report, write `FINDINGS:` followed by an \
-empty JSON array (`[]`) in the same fenced block — never omit the FINDINGS \
-block entirely.
+"type" and "severity" are two SEPARATE fields — never write a severity \
+word into "type". "type" is always exactly one of: `issue`, `comment`, \
+`question`, `good_point` — never `minor`, `medium`, `major`, or `critical`. \
+"severity" holds those four words, and only on an `issue` finding; leave it \
+out (or null) on `comment`/`question`/`good_point`. "evidence" is required \
+on all four types regardless of "type" or "severity". Use NOT-READY when a \
+failing probe or an evidence-backed `issue` finding should block merge; \
+otherwise READY. If you have nothing to report, write `FINDINGS:` followed \
+by an empty JSON array (`[]`) in the same fenced block — never omit the \
+FINDINGS block entirely.
 """
 
 
