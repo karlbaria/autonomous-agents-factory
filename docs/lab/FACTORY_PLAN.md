@@ -22,6 +22,7 @@
   - **Jira orchestration confirmed:** `docs/guides/JIRA_SETUP_GUIDE.md`'s "Authored subtask orchestration" section is backed by real code (`jira-webhook-processor.ts`, `orchestration-channel-jira.ts`) and a passing test suite (`jira-webhook-processor-orchestration.test.ts`, 13/13) — not Linear-only documentation. Task 15 relies on this existing routing rather than building new orchestration logic.
   - **Task 15 requires Slack approval before filing anything:** the proposed epic/stories, an estimated cost (from the Task 3 ledger averages), and a Confluence draft link are posted to Slack with Approve/Revise/Cancel buttons; only a Slack user linked to a factory Cognito user can approve; plans over a story-count or cost threshold need a second confirmation; unanswered plans expire with nothing filed; the approver and time are recorded on the Jira parent.
   - **Fork-only scope:** All changes from Task 3 on are confined to this fork. Nothing is proposed or contributed upstream to `aws-samples`. ADRs are fork ADRs, titled "ADR-0NN (fork): …". ABCA's ADR-003 issue-approval rule applies within the fork: the owner adds the `approved` label to each issue before work starts. PRs always target the fork's `main`, never `aws-samples`. `LICENSE` and `NOTICE` are kept.
+- **2026-11-18 (Rollback and safety):** Rollback and safety checklist adopted; first known-good tag is `known-good-task2b`.
 
 ## How to use this plan with Claude Code
 
@@ -30,6 +31,40 @@
 - **Run the demo yourself.** Every task ends with a Demo line describing what you should see working. Follow the steps in the PR description and check the result with your own eyes; don't rely on Claude Code saying "done". If it doesn't behave as described, have Claude Code fix it before merging.
 - **Per-task loop (ABCA conventions):** open a GitHub issue in your fork → branch → `mise run build` → `/commit` → PR → `/review_pr` → run the demo → merge.
 - **From Task 3 onward** you can let the factory build parts of itself: `bgagent submit --issue N` on a well-written issue. Review those PRs closely.
+
+### Rollback and safety
+
+Follow this checklist in every task from now on.
+
+- **Known-good tags.** After each task's demo passes and its PR is merged, tag `main` as `known-good-taskN` (for example `known-good-task3`) and push the tag:
+  ```bash
+  git checkout main && git pull origin main
+  git tag known-good-taskN
+  git push origin known-good-taskN
+  ```
+- **Rollback.** If a deploy breaks the factory, check out the latest `known-good-*` tag, rerun the standard deploy command, then return to `main` and fix the problem on a branch:
+  ```bash
+  git checkout known-good-taskN
+
+  AWS_PROFILE=factory-base AWS_REGION=us-east-2 ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1 \
+    mise //cdk:deploy -- \
+    -c stackName=backgroundagent-dev-factory \
+    -c deploymentProfile=abca.deployment.backgroundagent-dev-factory.json \
+    --all --require-approval broadening --tags project=software-factory
+
+  git checkout main
+  git checkout -b fix/<issue-number>-<short-description>
+  ```
+- **Diff before deploy.** Before every deploy, run `mise //cdk:diff` with the same context and give a one-line summary:
+  ```bash
+  AWS_PROFILE=factory-base AWS_REGION=us-east-2 ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1 \
+    mise //cdk:diff -- \
+    -c stackName=backgroundagent-dev-factory \
+    -c deploymentProfile=abca.deployment.backgroundagent-dev-factory.json
+  ```
+  Stop and wait for approval only if the diff replaces or deletes a resource, or changes IAM or security groups. Otherwise, proceed.
+- **Smoke test after deploy.** After every deploy, submit one small task on `coding/new-task-v1` against `factory-sandbox-py` and confirm it opens a PR with `build_passed: true`. Only then test new workflows.
+- **Opt-in only.** New behaviour goes in new workflows such as `coding/new-task-verified-v1`. Never change `coding/new-task-v1` or the repo's default workflow without explicit approval.
 
 ## Problem statement
 
