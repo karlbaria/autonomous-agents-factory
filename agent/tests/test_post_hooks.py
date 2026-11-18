@@ -283,6 +283,41 @@ class TestEnsurePrCreate:
         assert "Independent review (advisory)" in body
         assert "**Verdict:** READY" in body
 
+    def test_appends_cost_breakdown_with_ledger_alone(self, monkeypatch):
+        from models import AgentInvocationLedger
+
+        def responder(cmd):
+            if "view" in cmd and "baseRefName" in cmd:
+                return _cp(returncode=0, stdout="main\n")
+            if "view" in cmd and "body" in cmd:
+                return _cp(returncode=0, stdout="## Summary\n\nOriginal coder body.\n")
+            if "view" in cmd:
+                return _cp(returncode=0, stdout="https://github.com/o/r/pull/1\n")
+            return _cp()
+
+        sub = _SubprocessRunRecorder(responder=responder)
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=0.10, turns=5, model="m")
+        ledger.record(stage="probe_writer", cost_usd=0.02, turns=2, model="r")
+        post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch="main"),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+            ledger=ledger,
+        )
+        edit_cmd = run_cmd.cmd_for("append-review-section")
+        assert edit_cmd is not None
+        body = edit_cmd[edit_cmd.index("--body") + 1]
+        assert "coder: $0.1000" in body
+        assert "probe_writer: $0.0200" in body
+        assert "Independent review" not in body
+
     def test_no_review_outcome_does_not_edit_existing_pr(self, monkeypatch):
         sub = _pr_view("https://github.com/o/r/pull/1", base="main")
         run_cmd = _RunCmdRecorder()

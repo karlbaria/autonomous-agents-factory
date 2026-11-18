@@ -631,16 +631,16 @@ def _review_section(review_outcome: dict | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _append_review_section_to_pr(repo_dir: str, repo_url: str, pr_url: str, section: str) -> None:
-    """Append the review section to a PR the coder's own turn already created.
+def _append_pr_appendix(repo_dir: str, repo_url: str, pr_url: str, appendix: str) -> None:
+    """Append the cost/review appendix to a PR the coder's own turn already created.
 
     The coder can (and often does) run its own ``git push`` + ``gh pr create``
     inside its Bash tool calls, finishing before ``review_and_fix`` even
     starts — so the "already exists" branch below never gets to compose the
-    review section into the body the normal create path builds. This edits
-    it in afterward; a failure here is non-fatal (advisory feature, logged
-    and swallowed) since the PR itself already exists and must not be lost
-    over a cosmetic body update.
+    cost line / review section into the body the normal create path builds.
+    This edits it in afterward; a failure here is non-fatal (advisory
+    feature, logged and swallowed) since the PR itself already exists and
+    must not be lost over a cosmetic body update.
     """
     try:
         current = subprocess.run(
@@ -653,7 +653,7 @@ def _append_review_section_to_pr(repo_dir: str, repo_url: str, pr_url: str, sect
         if current.returncode != 0:
             log("WARN", f"could not read PR body to append review section: {current.stderr}")
             return
-        new_body = f"{current.stdout}\n\n{section}"
+        new_body = f"{current.stdout}\n\n{appendix}"
         run_cmd(
             ["gh", "pr", "edit", pr_url, "--repo", repo_url, "--body", new_body],
             label="append-review-section",
@@ -779,9 +779,12 @@ def ensure_pr(
         # local. Push it now, or it is silently dropped when the container
         # exits (Task 4 — ADR-025 (fork)).
         ensure_pushed(repo_dir, branch)
-        review_section = _review_section(review_outcome)
-        if review_section:
-            _append_review_section_to_pr(repo_dir, config.repo_url, pr_url, review_section)
+        # Mirrors the fresh-create path's cost_line + review_section: the
+        # coder's own PR body never includes either (it has no ledger/review
+        # outcome to draw from), so append them here instead of losing them.
+        appendix = _cost_line(agent_result, ledger) + _review_section(review_outcome)
+        if appendix.strip():
+            _append_pr_appendix(repo_dir, config.repo_url, pr_url, appendix)
         return pr_url
 
     # Check if there are any commits on this branch beyond the default branch
