@@ -631,6 +631,42 @@ def _review_section(review_outcome: dict | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _append_review_section_to_pr(repo_dir: str, repo_url: str, pr_url: str, section: str) -> None:
+    """Append the review section to a PR the coder's own turn already created.
+
+    The coder can (and often does) run its own ``git push`` + ``gh pr create``
+    inside its Bash tool calls, finishing before ``review_and_fix`` even
+    starts — so the "already exists" branch below never gets to compose the
+    review section into the body the normal create path builds. This edits
+    it in afterward; a failure here is non-fatal (advisory feature, logged
+    and swallowed) since the PR itself already exists and must not be lost
+    over a cosmetic body update.
+    """
+    try:
+        current = subprocess.run(
+            ["gh", "pr", "view", pr_url, "--repo", repo_url, "--json", "body", "-q", ".body"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if current.returncode != 0:
+            log("WARN", f"could not read PR body to append review section: {current.stderr}")
+            return
+        new_body = f"{current.stdout}\n\n{section}"
+        run_cmd(
+            ["gh", "pr", "edit", pr_url, "--repo", repo_url, "--body", new_body],
+            label="append-review-section",
+            cwd=repo_dir,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        log(
+            "WARN",
+            f"failed to append review section to {pr_url} (non-fatal): {type(e).__name__}: {e}",
+        )
+
+
 def ensure_pr(
     config: TaskConfig,
     setup: RepoSetup,
@@ -737,6 +773,15 @@ def ensure_pr(
         # orchestrator-supplied / detected base if it disagrees (stacked-child
         # + root wrong-base fix).
         _reconcile_pr_base(repo_dir, branch, config, default_branch)
+        # The coder's own turn commonly pushes + creates this PR itself before
+        # post-hooks run (the branch this reaches at all) — so a commit made
+        # AFTER that by review_and_fix's probe-commit step is still only
+        # local. Push it now, or it is silently dropped when the container
+        # exits (Task 4 — ADR-025 (fork)).
+        ensure_pushed(repo_dir, branch)
+        review_section = _review_section(review_outcome)
+        if review_section:
+            _append_review_section_to_pr(repo_dir, config.repo_url, pr_url, review_section)
         return pr_url
 
     # Check if there are any commits on this branch beyond the default branch

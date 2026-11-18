@@ -213,6 +213,91 @@ class TestEnsurePrCreate:
         assert "create-pr" not in run_cmd.labels()
         assert "reconcile-pr-base" not in run_cmd.labels()
 
+    def test_pushes_pending_commits_before_returning_existing_pr(self, monkeypatch):
+        """Task 4 (ADR-025 (fork)): the coder can push + create the PR itself
+        before post-hooks run; a later commit (review_and_fix's probe commit)
+        must still reach the remote, not be silently dropped."""
+
+        def responder(cmd):
+            if "view" in cmd and "baseRefName" in cmd:
+                return _cp(returncode=0, stdout="main\n")
+            if "view" in cmd:
+                return _cp(returncode=0, stdout="https://github.com/o/r/pull/1\n")
+            if "log" in cmd:
+                # Unpushed commit exists beyond origin/<branch>.
+                return _cp(returncode=0, stdout="abc1234 test: add review probes\n")
+            return _cp()
+
+        sub = _SubprocessRunRecorder(responder=responder)
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        url = post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch="main"),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+        )
+        assert url == "https://github.com/o/r/pull/1"
+        assert "push" in run_cmd.labels()
+
+    def test_appends_review_section_to_existing_pr(self, monkeypatch):
+        def responder(cmd):
+            if "view" in cmd and "baseRefName" in cmd:
+                return _cp(returncode=0, stdout="main\n")
+            if "view" in cmd and "body" in cmd:
+                return _cp(returncode=0, stdout="## Summary\n\nOriginal coder body.\n")
+            if "view" in cmd:
+                return _cp(returncode=0, stdout="https://github.com/o/r/pull/1\n")
+            return _cp()
+
+        sub = _SubprocessRunRecorder(responder=responder)
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        review_outcome = {
+            "ran": True,
+            "verdict": "READY",
+            "reviewed_sha": "abc123",
+            "probe_results": [],
+            "committed_probe_paths": [],
+            "findings": [],
+            "parse_error": None,
+        }
+        url = post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch="main"),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+            review_outcome=review_outcome,
+        )
+        assert url == "https://github.com/o/r/pull/1"
+        edit_cmd = run_cmd.cmd_for("append-review-section")
+        assert edit_cmd is not None
+        body = edit_cmd[edit_cmd.index("--body") + 1]
+        assert "Original coder body." in body
+        assert "Independent review (advisory)" in body
+        assert "**Verdict:** READY" in body
+
+    def test_no_review_outcome_does_not_edit_existing_pr(self, monkeypatch):
+        sub = _pr_view("https://github.com/o/r/pull/1", base="main")
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch="main"),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+        )
+        assert "append-review-section" not in run_cmd.labels()
+
     def test_no_commits_means_no_pr(self, monkeypatch):
         # pr view -> empty (no existing PR); git log diff -> empty (no commits).
         def responder(cmd):
