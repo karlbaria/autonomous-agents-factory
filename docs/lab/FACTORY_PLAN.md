@@ -68,7 +68,7 @@ Follow this checklist in every task from now on.
     -c stackName=backgroundagent-dev-factory \
     -c deploymentProfile=abca.deployment.backgroundagent-dev-factory.json
   ```
-  Stop and wait for approval only if the diff replaces or deletes a resource, or changes IAM or security groups. Otherwise, proceed.
+  Stop and wait for approval only if the diff replaces or deletes a resource, or changes IAM or security groups. Otherwise, proceed. Version resources (`Lambda::Version`, `GuardrailVersion`) and timestamp-only `Custom::AWS` replacements don't trigger the stop rule; tables, user pools, secrets, VPC/network resources, functions and buckets do.
 - **Smoke test after deploy.** After every deploy, submit one small task on `coding/new-task-v1` against `factory-sandbox-py` and confirm it opens a PR with `build_passed: true`. Only then test new workflows.
 - **Opt-in only.** New behaviour goes in new workflows such as `coding/new-task-verified-v1`. Never change `coding/new-task-v1` or the repo's default workflow without explicit approval.
 
