@@ -338,9 +338,19 @@ Filed [factory-sandbox-py#14](https://github.com/karlbaria/factory-sandbox-py/is
 
 - `METRICS_REPORT`'s `cost_usd` matches the `stage_costs` line's `coder` total exactly on both the second and third runs — confirms `TaskResult.cost_usd` sums the ledger and reports the same number the pre-Task-3 code would have, for today's single-call path, independent of which credentials ran it.
 - The third run's `AWS:` log line confirms the fix: `resolving credentials via AWS CLI (profile 'factory-bedrock')...`, vs. the first two runs' `resolving credentials via AWS CLI...` with no profile named.
-- None of the sandbox PRs (#15, #16, #17) merged — left as lab demo artifacts, same pattern as Task 1/2's unmerged demo PRs.
+- [factory-sandbox-py#15](https://github.com/karlbaria/factory-sandbox-py/pull/15) (the corrected-credentials run) was merged by the owner; #16 and #17 (the two mis-credentialed runs, same `/gcd` issue) were closed unmerged.
 
-### 4. Open items
+### 4. Post-merge deploy, smoke test, and known-good tag
 
-- **Not yet done:** post-merge deploy to `backgroundagent-dev-factory` via the Rollback and safety checklist (`cdk:diff` summary review, deploy, smoke test on `coding/new-task-v1`), then tag `known-good-task3`. Scheduled for after PR #12 merges.
-- **Three demo PRs left open** on `factory-sandbox-py` (#15, #16, #17) for the same `/gcd` issue — harmless (lab sandbox, not reviewed code), but worth merging one and closing the other two next time that repo is touched.
+PR #12 merged. Followed the Rollback and safety checklist:
+
+- **`cdk:diff`** against `backgroundagent-dev-factory` showed two `destroy`+create pairs (`AWS::Bedrock::GuardrailVersion`, `AWS::Lambda::Version` on `TaskOrchestrator/OrchestratorFn` — CDK logged *"Modifying an existing lambda to use durability will trigger a resource replacement"*) and one `Custom::AWS` "may be replaced" (a timestamp embedded in `AgentPluginsBlueprint/RepoConfigCR`'s payload differs every synth). No IAM Statement Changes or Security Group Changes sections at all. None of this traces to the Task 3 PR itself (agent-only Python change, no CDK touched) — it's drift from other already-merged CDK changes since this stack's last deploy. The owner confirmed version resources and timestamp-only `Custom::AWS` replacements are expected churn, not real infra replacements, and the Rollback and safety checklist in `FACTORY_PLAN.md` was updated accordingly (that exemption is scoped to version resources specifically — tables, user pools, secrets, VPC/network resources, functions and buckets still trigger the stop rule).
+- **Pre-deploy check:** `bgagent list --status <non-terminal statuses>` returned zero in-flight tasks before deploying.
+- **Deploy:** the owner ran the standard `mise //cdk:deploy` command themselves (266.65s); succeeded.
+- **Smoke test:** submitted [factory-sandbox-py#18](https://github.com/karlbaria/factory-sandbox-py/issues/18), "Add a GET `/lcm/{a}/{b}` endpoint", via `bgagent submit --workflow coding/new-task-v1 --wait`. Task `01M7QSTX4CW0GXJGTKWCJ1X46J` — `COMPLETED`, `build_passed: true`, 5 turns, $0.1552, PR [factory-sandbox-py#19](https://github.com/karlbaria/factory-sandbox-py/pull/19).
+- **Tagged and pushed `known-good-task3`.**
+
+### 5. Open items
+
+- **Demo/smoke-test PRs left open** on `factory-sandbox-py`: #19 (this session's smoke test) and the earlier credential-mistake artifacts #16/#17 (closed, not merged) — worth a cleanup pass next time that repo is touched.
+- [autonomous-agents-factory#13](https://github.com/karlbaria/autonomous-agents-factory/pull/13) (the Rollback-checklist version-resource exemption) is open but not yet merged — the exemption was already applied by eye for this deploy per the owner's explicit approval in conversation.
