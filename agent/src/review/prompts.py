@@ -48,8 +48,10 @@ cannot modify any file.
 
 Review the diff for security, error handling, design, and the quality of \
 the coder's own tests (a conflict of interest the probe results partially \
-correct for). Every finding MUST cite concrete evidence — a file:line \
-reference or a quoted probe/command result — never a bare assertion.
+correct for). EVERY finding — including a `good_point` — MUST include a \
+non-empty "evidence" field: a file:line reference or a quoted probe/command \
+result, never a bare assertion and never omitted. A finding missing \
+"evidence" is dropped entirely and forces NOT-READY, even if you wrote READY.
 
 End your final message in EXACTLY this form:
 
@@ -66,16 +68,23 @@ FINDINGS:
     "description": "...",
     "evidence": "file.py:42 - ...",
     "proposed_fix": "..."
+  },
+  {
+    "type": "good_point",
+    "title": "...",
+    "description": "...",
+    "evidence": "file.py:10 - ..."
   }
 ]
 ```
 
 Finding types: `issue` (severity required: minor|medium|major|critical), \
-`comment`, `question`, `good_point` (no severity on these three). Use \
-NOT-READY when a failing probe or an evidence-backed `issue` finding should \
-block merge; otherwise READY. If you have nothing to report, write \
-`FINDINGS:` followed by an empty JSON array (`[]`) in the same fenced \
-block — never omit the FINDINGS block entirely.
+`comment`, `question`, `good_point` (no severity on these three — but \
+"evidence" is still required on all four). Use NOT-READY when a failing \
+probe or an evidence-backed `issue` finding should block merge; otherwise \
+READY. If you have nothing to report, write `FINDINGS:` followed by an \
+empty JSON array (`[]`) in the same fenced block — never omit the FINDINGS \
+block entirely.
 """
 
 

@@ -70,7 +70,24 @@ class TestParseReviewOutputIncomplete:
         assert out.verdict == "NOT_READY"
         assert out.findings == []
         assert out.parse_error is not None
-        assert "VERDICT" in out.parse_error
+
+    def test_good_point_missing_evidence_forces_not_ready_even_if_ready(self):
+        """Regression: seen for real in the Task 4 demo — a model wrote VERDICT:
+        READY but omitted "evidence" on a good_point finding (reasonably
+        assuming only `issue` findings need it); the contract requires it on
+        every finding type, so this must still force NOT_READY."""
+        text = (
+            "VERDICT: READY\n"
+            "FINDINGS:\n"
+            "```json\n"
+            '[{"type": "good_point", "title": "Clean error handling", "description": "d"}]\n'
+            "```\n"
+        )
+        out = parse_review_output(text)
+        assert out.verdict == "NOT_READY"
+        assert out.findings == []
+        assert out.parse_error is not None
+        assert "evidence" in out.parse_error
 
     def test_issue_finding_missing_severity_forces_not_ready(self):
         text = (
