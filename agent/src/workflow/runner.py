@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, override
 
+from models import AgentInvocationLedger
 from shell import log
 
 from .models import Step, TerminalOutcomes, Workflow
@@ -160,6 +161,11 @@ class StepContext:
     agent_result: AgentResult | None = None
     outcomes: list[StepOutcome] = field(default_factory=list)
     artifacts: dict[str, Any] = field(default_factory=dict)
+    # Accumulates every run_agent call made for this task (Task 3). A fresh
+    # ledger per StepContext is correct today (one run_agent step per
+    # workflow); a multi-call step (Task 4's review_and_fix) shares one
+    # StepContext across its calls, so they land in the same ledger.
+    ledger: AgentInvocationLedger = field(default_factory=AgentInvocationLedger)
 
     def record(self, outcome: StepOutcome) -> None:
         self.outcomes.append(outcome)
@@ -443,16 +449,46 @@ def _handle_hydrate_context(step: Step, ctx: StepContext) -> StepOutcome:
     )
 
 
+#: The Claude Agent SDK's minimum ``max_budget_usd`` for a call. A remaining
+#: budget below this is not enough to start a new agent call (Tasks 4/5 need
+#: this for the reviewer / fix-loop calls that follow the coder in the same
+#: task).
+_MIN_CALL_BUDGET_USD = 0.01
+
+
+def _record_stage_cost(
+    ctx: StepContext, *, stage: str, cost_usd: float | None, turns: int, model: str
+) -> None:
+    """Record one call in the task's ledger and report the running stage totals.
+
+    Reporting only: the per-stage breakdown goes to the trajectory (a new
+    event) and to progress (the existing ``agent_milestone`` event's details,
+    not a new event type — ``bgagent watch``/``watch.ts`` need no changes).
+    ``TaskResult``/the TaskTable never see per-stage costs, only the summed
+    total (``ctx.ledger.total_cost_usd``).
+    """
+    ctx.ledger.record(stage=stage, cost_usd=cost_usd, turns=turns, model=model)
+    stage_costs = ctx.ledger.stage_costs()
+    log("AGENT", f"stage_costs={stage_costs}")
+    if ctx.trajectory is not None:
+        ctx.trajectory.write_stage_costs(stage_costs)
+    if ctx.progress is not None:
+        ctx.progress.write_agent_milestone("stage_costs", json.dumps(stage_costs))
+
+
 def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
-    """Run the one Claude Agent SDK loop for this workflow.
+    """Run one Claude Agent SDK loop for this workflow.
 
     ``run_agent`` is async; the runner is sync (matching ``pipeline.run_task``),
     so the loop is driven via ``asyncio.run`` here exactly as the pipeline does
-    today.
+    today. Task 3: this call draws on the task's shared ``AgentInvocationLedger``
+    (``ctx.ledger``) so a later call in the same task (Task 4's reviewer, Task
+    5's fix loop) only gets the budget this one did not spend.
     """
     import asyncio
 
     from config import AGENT_WORKSPACE
+    from models import AgentResult
     from runner import run_agent
 
     # Fail loud rather than run an unguided agent: an empty system prompt means
@@ -467,17 +503,62 @@ def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
             "hydrate_context step (or caller) built ctx.system_prompt."
         )
 
-    cwd = ctx.setup.repo_dir if ctx.setup else AGENT_WORKSPACE
-    result = asyncio.run(
-        run_agent(
-            ctx.user_prompt,
-            ctx.system_prompt,
-            ctx.config,
-            cwd=cwd,
-            trajectory=ctx.trajectory,
+    remaining_budget = ctx.ledger.remaining_budget(ctx.config.max_budget_usd)
+    if remaining_budget is not None and remaining_budget < _MIN_CALL_BUDGET_USD:
+        error = (
+            f"Budget exhausted: ${remaining_budget:.4f} remaining is below the "
+            f"${_MIN_CALL_BUDGET_USD:.2f} SDK minimum for a new agent call."
         )
-    )
+        log("AGENT", error)
+        result = AgentResult(status="error_budget_exhausted", error=error)
+        ctx.agent_result = result
+        _record_stage_cost(
+            ctx, stage="coder", cost_usd=0.0, turns=0, model=ctx.config.anthropic_model
+        )
+        return StepOutcome(
+            kind=step.kind,
+            name=_step_key(step),
+            status="succeeded",
+            data={"agent_status": result.status, "session_id": ""},
+        )
+
+    # This call's own config, capped at what the task's budget has left —
+    # unchanged from ctx.config when this is the task's first/only call
+    # (remaining_budget == ctx.config.max_budget_usd, including the
+    # None/unbounded case).
+    call_config = ctx.config.model_copy(update={"max_budget_usd": remaining_budget})
+
+    cwd = ctx.setup.repo_dir if ctx.setup else AGENT_WORKSPACE
+
+    # Snapshot/restore os.environ around the whole call: run_agent mutates
+    # process-global env for the Claude Code CLI subprocess
+    # (runner._setup_agent_env) and never restores it, so one call's settings
+    # (model, Bedrock creds) must not leak into a later call in the same task
+    # (Task 4's reviewer, Task 5's fix loop) or into post-hook subprocesses
+    # (mise run build) that run after the agent step.
+    env_snapshot = dict(os.environ)
+    try:
+        result = asyncio.run(
+            run_agent(
+                ctx.user_prompt,
+                ctx.system_prompt,
+                call_config,
+                cwd=cwd,
+                trajectory=ctx.trajectory,
+            )
+        )
+    finally:
+        os.environ.clear()
+        os.environ.update(env_snapshot)
+
     ctx.agent_result = result
+    _record_stage_cost(
+        ctx,
+        stage="coder",
+        cost_usd=result.cost_usd,
+        turns=result.num_turns or result.turns,
+        model=call_config.anthropic_model,
+    )
     # The agent loop "failing" is not a step failure here: pipeline's
     # _resolve_overall_task_status owns success inference. The step succeeds if
     # the SDK ran; downstream steps and the terminal-outcome check decide done.

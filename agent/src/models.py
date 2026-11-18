@@ -380,6 +380,64 @@ class AgentResult(BaseModel):
     clarification_question: str = ""
 
 
+class AgentInvocationRecord(BaseModel):
+    """One ``run_agent`` call's accounting: cost, turns, model and stage.
+
+    ``stage`` names the role this call played (e.g. ``coder``; Task 4 adds
+    ``probe_writer``/``code_reviewer``) — purely descriptive, not a Cedar
+    principal or a workflow concept.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    stage: str
+    cost_usd: float | None = None
+    turns: int = 0
+    model: str = ""
+
+
+class AgentInvocationLedger(BaseModel):
+    """Accumulates every agent-SDK call made within one task.
+
+    Lets a task make several ``run_agent`` calls (Task 4's reviewer, Task 5's
+    fix loop) while still reporting one combined ``TaskResult.cost_usd`` and
+    handing each call only the budget earlier calls in the same task have not
+    already spent. ``stage_costs`` is for trajectory/progress reporting only —
+    it never reaches ``TaskResult`` or the TaskTable schema.
+    """
+
+    calls: list[AgentInvocationRecord] = Field(default_factory=list)
+
+    def record(self, *, stage: str, cost_usd: float | None, turns: int, model: str) -> None:
+        self.calls.append(
+            AgentInvocationRecord(stage=stage, cost_usd=cost_usd, turns=turns, model=model)
+        )
+
+    @property
+    def spent(self) -> float:
+        return sum(c.cost_usd for c in self.calls if c.cost_usd is not None)
+
+    def remaining_budget(self, max_budget_usd: float | None) -> float | None:
+        """The budget left for the next call. ``None`` means the task is unbounded."""
+        if max_budget_usd is None:
+            return None
+        return max(max_budget_usd - self.spent, 0.0)
+
+    @property
+    def total_cost_usd(self) -> float | None:
+        """The combined cost of every recorded call, or ``None`` if none reported a cost."""
+        if not any(c.cost_usd is not None for c in self.calls):
+            return None
+        return sum(c.cost_usd or 0.0 for c in self.calls)
+
+    def stage_costs(self) -> dict[str, float]:
+        """Per-stage cost totals, for trajectory/event reporting only (not persisted)."""
+        totals: dict[str, float] = {}
+        for c in self.calls:
+            totals[c.stage] = totals.get(c.stage, 0.0) + (c.cost_usd or 0.0)
+        return totals
+
+
 class TaskResult(BaseModel):
     status: str
     agent_status: str = "unknown"

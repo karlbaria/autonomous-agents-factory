@@ -344,6 +344,21 @@ class _TrajectoryWriter:
             }
         )
 
+    def write_stage_costs(self, stage_costs: dict[str, float]) -> None:
+        """Write a TRAJECTORY_STAGE_COSTS event with the task's per-stage cost totals.
+
+        Lets a trajectory viewer see which agent call (Task 4 adds
+        ``probe_writer``/``code_reviewer`` alongside ``coder``) produced which
+        cost — reporting only, never persisted on ``TaskResult``/the TaskTable.
+        """
+        self._put_event(
+            {
+                "event": "TRAJECTORY_STAGE_COSTS",
+                "task_id": self._task_id,
+                "stage_costs": stage_costs,
+            }
+        )
+
     def write_policy_decision(
         self, tool_name: str, allowed: bool, reason: str, duration_ms: float
     ) -> None:
