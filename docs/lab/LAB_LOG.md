@@ -321,22 +321,26 @@ Filed a new issue directly on the owner's existing "Software Factory Agents" Jir
 
 ### 3. Local demo (`run.sh` against `factory-sandbox-py`)
 
-Filed [factory-sandbox-py#14](https://github.com/karlbaria/factory-sandbox-py/issues/14), "Add a GET `/gcd/{a}/{b}` endpoint" (the next not-yet-implemented endpoint in the `/multiply`/`/divide`/`/power`/`/mod` series), and ran it twice — the second time with an extra instruction, both to force a real change and to confirm the new `stage_costs` stdout line after adding it.
+Filed [factory-sandbox-py#14](https://github.com/karlbaria/factory-sandbox-py/issues/14), "Add a GET `/gcd/{a}/{b}` endpoint" (the next not-yet-implemented endpoint in the `/multiply`/`/divide`/`/power`/`/mod` series), and ran it three times.
 
-| | First run | Second run (added the stdout log line) |
-|---|---|---|
-| Task ID | `e608d585bec5` | `48f7a75559db` |
-| PR | [factory-sandbox-py#15](https://github.com/karlbaria/factory-sandbox-py/pull/15) | [factory-sandbox-py#16](https://github.com/karlbaria/factory-sandbox-py/pull/16) |
-| Turns | 5 | 6 |
-| Cost | $0.1467 | $0.1126 |
-| `build_passed` | `True` | `True` |
-| `lint_passed` | `False` (inert — pre-existing gap, see Task 2b continued) | `False` |
-| stdout `stage_costs` line | absent (bug — fixed before the second run) | `[16:20:29] AGENT stage_costs={'coder': 0.11260500000000001}` |
+**Credential mistake on the first two runs, caught and fixed by the owner:** both ran with `GITHUB_TOKEN="$(gh auth token)"` and no `AWS_PROFILE`/`AWS_REGION=us-west-2` — `gh auth token` is the owner's personal OAuth token (`repo`-wide scope across every repo the owner can access), and with no profile set `run.sh` fell back to the ambient AWS CLI credential chain, which resolved to the broad `Admin` role (`arn:aws:sts::<lab-account-id>:assumed-role/Admin/<user>`). Task 1 (§4) already established the least-privilege convention for this lab — the Keychain PAT `factory-sandbox-pat` and `AWS_PROFILE=factory-bedrock`/`AWS_REGION=us-east-2` — documented in `FACTORY_PLAN.md` and Task 1 above, but it wasn't checked before running the first two demos. Fixed by rerunning with the correct credentials (a third run) and adding a standing rule to `CLAUDE.md` so this doesn't require re-discovering the convention in the docs each time.
 
-- `METRICS_REPORT`'s `cost_usd` on the second run (`0.11260500000000001`) matches the `stage_costs` line's `coder` total exactly — confirms `TaskResult.cost_usd` sums the ledger and reports the same number the pre-Task-3 code would have, for today's single-call path.
-- Neither sandbox PR (#15, #16) merged — left as lab demo artifacts, same pattern as Task 1/2's unmerged demo PRs.
+| | First run | Second run (added the stdout log line) | Third run (corrected credentials) |
+|---|---|---|---|
+| Credentials | `gh auth token` + ambient AWS (**wrong** — Admin role, us-west-2) | `gh auth token` + ambient AWS (**wrong**, same as first) | `factory-sandbox-pat` + `AWS_PROFILE=factory-bedrock`, `us-east-2` (**correct**) |
+| Task ID | `e608d585bec5` | `48f7a75559db` | `ae52cb098687` |
+| PR | [factory-sandbox-py#15](https://github.com/karlbaria/factory-sandbox-py/pull/15) | [factory-sandbox-py#16](https://github.com/karlbaria/factory-sandbox-py/pull/16) | [factory-sandbox-py#17](https://github.com/karlbaria/factory-sandbox-py/pull/17) |
+| Turns | 5 | 6 | 6 |
+| Cost | $0.1467 | $0.1126 | $0.1523 |
+| `build_passed` | `True` | `True` | `True` |
+| `lint_passed` | `False` (inert — pre-existing gap, see Task 2b continued) | `False` | `False` |
+| stdout `stage_costs` line | absent (bug — fixed before the second run) | `[16:20:29] AGENT stage_costs={'coder': 0.11260500000000001}` | `[16:36:00] AGENT stage_costs={'coder': 0.15234189999999997}` |
+
+- `METRICS_REPORT`'s `cost_usd` matches the `stage_costs` line's `coder` total exactly on both the second and third runs — confirms `TaskResult.cost_usd` sums the ledger and reports the same number the pre-Task-3 code would have, for today's single-call path, independent of which credentials ran it.
+- The third run's `AWS:` log line confirms the fix: `resolving credentials via AWS CLI (profile 'factory-bedrock')...`, vs. the first two runs' `resolving credentials via AWS CLI...` with no profile named.
+- None of the sandbox PRs (#15, #16, #17) merged — left as lab demo artifacts, same pattern as Task 1/2's unmerged demo PRs.
 
 ### 4. Open items
 
 - **Not yet done:** post-merge deploy to `backgroundagent-dev-factory` via the Rollback and safety checklist (`cdk:diff` summary review, deploy, smoke test on `coding/new-task-v1`), then tag `known-good-task3`. Scheduled for after PR #12 merges.
-- **Two demo PRs left open** on `factory-sandbox-py` (#15, #16) for the same `/gcd` issue — harmless (lab sandbox, not reviewed code), but worth closing/merging one and closing the other next time that repo is touched.
+- **Three demo PRs left open** on `factory-sandbox-py` (#15, #16, #17) for the same `/gcd` issue — harmless (lab sandbox, not reviewed code), but worth merging one and closing the other two next time that repo is touched.
