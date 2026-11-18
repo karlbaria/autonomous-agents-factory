@@ -298,3 +298,45 @@ Filed a new issue directly on the owner's existing "Software Factory Agents" Jir
 - **The stock `backgroundagent-dev` stack must never be connected to this Jira site (`karlvb.atlassian.net`, `cloud_id = 05c31df8-daa2-42f3-a976-d0d5037a2e42`).** The trigger label defaults to plain `bgagent` and is not stack-qualified — `bgagent jira map` lets the operator override it per project mapping, but nothing forces a different label across stacks, so a second stack mapped on this same site could trigger ambiguously or collide on a shared label. Separately, admin-console webhooks (the kind created here) carry no `cloudId` in their payload, and `bgagent jira setup` already refuses to configure a second *active* tenant through this flow for exactly that reason — but that refusal is a safety net, not a substitute for the rule itself: treat this Jira site as exclusively bound to `backgroundagent-dev-factory`, the same way Slack's workspace is shared but each stack got its own distinctly-named app (Task 2b above).
 - **Found another cross-cutting hardcoding bug, same category as #9 (Slack's "Shoof"):** the shared localhost OAuth callback page (`cli/src/oauth-callback-server.ts`) hardcodes "✓ Linear authorized" and "Re-run `bgagent linear setup`" regardless of which integration is actually running — so `bgagent jira setup`'s browser redirect showed "Linear authorized" instead of Jira. Cosmetic only; the actual OAuth capture worked correctly. Filed as [#10](https://github.com/karlbaria/autonomous-agents-factory/issues/10), not fixed this session per the issue-first flow.
 - **Emergency off-switch (manual, human only, never automated):** disable the Jarvis Slack app or remove the `bgagent` label in Jira.
+
+## Task 3: Safe multiple agent calls per task (refactor, no behaviour change)
+
+### 1. What was done, and where it differed from the plan
+
+- Filed [autonomous-agents-factory#11](https://github.com/karlbaria/autonomous-agents-factory/issues/11) quoting the Task 3 spec (plus four amendments agreed during planning — see below) as acceptance criteria; the owner added the `approved` label (which didn't exist in the repo yet, so it was created first: `gh label create approved`), self-assigned, then branched `feat/11-agent-invocation-ledger` and implemented with tests first.
+- **Differed from the original proposal in four ways, per the owner's review before implementation started:**
+  1. Environment snapshot/restore moved from inside `runner.py` to the call site in `workflow/runner.py`'s `_handle_run_agent` (`try`/`finally` around the whole `run_agent` call) — covers the full call including the message loop, and needed zero changes to `runner.py`.
+  2. `AgentInvocationLedger.remaining_budget(None)` returns `None` (no cap), never `0` — tested explicitly.
+  3. Added a minimum-call-budget check: a remaining budget below the Claude Agent SDK's `$0.01` minimum skips the call entirely and records a `error_budget_exhausted` result in the ledger, rather than attempting a call Tasks 4/5 would need anyway.
+  4. No new progress event type — the per-stage cost breakdown rides in the **existing** `agent_milestone` event's `details` (JSON-encoded), so `bgagent watch`/`watch.ts` need no changes. The trajectory got one new field/event (`TRAJECTORY_STAGE_COSTS`), which the owner explicitly allowed.
+- `AgentInvocationLedger`/`AgentInvocationRecord` added to `agent/src/models.py`; `StepContext` (`workflow/runner.py`) gained a `ledger` field (default-constructed, so every existing `StepContext(...)` call kept working); `pipeline.py`'s `_execute_agent_step` gained an optional `ledger` param (same reason) and both `TaskResult.cost_usd` sites now read `ledger.total_cost_usd` instead of `agent_result.cost_usd` directly.
+- Key design constraint discovered while implementing: `run_agent`'s call site is mocked directly in every pipeline/workflow-runner test with stub signatures that take no `**kwargs`, and `_execute_agent_step` is asserted to return the `AgentResult` **by identity** in `test_pipeline_workflow_seam.py`. So the ledger/budget/env-restore plumbing had to live entirely in `_handle_run_agent` around the call — `run_agent`'s own signature never changed, and the full existing suite passed unmodified.
+- Added a plain `log("AGENT", f"stage_costs={stage_costs}")` line (not in the original plan) after discovering the first local demo run produced no visible stage output: `_TrajectoryWriter`/`_ProgressWriter` are silent no-ops locally (no `LOG_GROUP_NAME`/`TASK_EVENTS_TABLE_NAME` set by `run.sh`), matching existing behavior for every other trajectory/progress event — so without this line there was nothing to show in the demo.
+
+### 2. Validation before the PR
+
+- `mise run build`: agent `2065/2065` passed (84%+ coverage, threshold 80%), `cli` `1242/1242`, `cdk` `6424/6424`, docs/web builds clean.
+- `mise run security`: bandit, semgrep SAST + masking, grype, zizmor, retire all clean. First run reported `agent:security:image ERROR task failed` — Docker Desktop wasn't running locally (`open -a Docker`, waited for the daemon, re-ran `mise run security:image`); not a finding, an environment gap. Clean on re-run (Trivy: 0 vulnerabilities).
+- Opened [autonomous-agents-factory#12](https://github.com/karlbaria/autonomous-agents-factory/pull/12).
+
+### 3. Local demo (`run.sh` against `factory-sandbox-py`)
+
+Filed [factory-sandbox-py#14](https://github.com/karlbaria/factory-sandbox-py/issues/14), "Add a GET `/gcd/{a}/{b}` endpoint" (the next not-yet-implemented endpoint in the `/multiply`/`/divide`/`/power`/`/mod` series), and ran it twice — the second time with an extra instruction, both to force a real change and to confirm the new `stage_costs` stdout line after adding it.
+
+| | First run | Second run (added the stdout log line) |
+|---|---|---|
+| Task ID | `e608d585bec5` | `48f7a75559db` |
+| PR | [factory-sandbox-py#15](https://github.com/karlbaria/factory-sandbox-py/pull/15) | [factory-sandbox-py#16](https://github.com/karlbaria/factory-sandbox-py/pull/16) |
+| Turns | 5 | 6 |
+| Cost | $0.1467 | $0.1126 |
+| `build_passed` | `True` | `True` |
+| `lint_passed` | `False` (inert — pre-existing gap, see Task 2b continued) | `False` |
+| stdout `stage_costs` line | absent (bug — fixed before the second run) | `[16:20:29] AGENT stage_costs={'coder': 0.11260500000000001}` |
+
+- `METRICS_REPORT`'s `cost_usd` on the second run (`0.11260500000000001`) matches the `stage_costs` line's `coder` total exactly — confirms `TaskResult.cost_usd` sums the ledger and reports the same number the pre-Task-3 code would have, for today's single-call path.
+- Neither sandbox PR (#15, #16) merged — left as lab demo artifacts, same pattern as Task 1/2's unmerged demo PRs.
+
+### 4. Open items
+
+- **Not yet done:** post-merge deploy to `backgroundagent-dev-factory` via the Rollback and safety checklist (`cdk:diff` summary review, deploy, smoke test on `coding/new-task-v1`), then tag `known-good-task3`. Scheduled for after PR #12 merges.
+- **Two demo PRs left open** on `factory-sandbox-py` (#15, #16) for the same `/gcd` issue — harmless (lab sandbox, not reviewed code), but worth closing/merging one and closing the other next time that repo is touched.
