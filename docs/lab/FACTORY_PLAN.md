@@ -29,6 +29,7 @@
   - **Tasks 16–17 target web-facing apps.** Frontend previews use AWS Amplify Hosting PR previews, which ABCA's deploy-preview screenshots support natively via Amplify `check_run` events, and Amplify deletes previews when a PR closes. Backend resources use AWS CDK, reusing the account's existing CDK bootstrap. No Terraform.
   - **GitHub Free plan:** Actions works on private repos (2,000 minutes a month), but required status checks can't block merges on private repos. So the factory, not GitHub, enforces "never merge red". Actions is enabled on target app repos only, never on the ABCA fork.
   - **Preview exposure decision:** previews are public so screenshots work. This is acceptable for the demo only because they contain demo data only (no real users, secrets or internal content) and are deleted when the PR closes. It's a knowing, documented exception to private-by-default, recorded in the Task 17 ADR.
+- **2026-11-18 (Planning: MVP is the delivery factory):** MVP is the delivery factory (ticket → verified PR → preview → auto-merge); planning (Confluence, feature planning) layers on after. **Reordered:** Track A (3 → 4 → 5), then the MVP delivery track (15.5 → 13 → 16 → 17), then Layer 2, the planning track (14 → 15). 15.5 moves before 13 so Jira auto-tracking is built on the repo the lab keeps, not on `factory-sandbox-py`, which 15.5 switches out. Task 15.5's new repo must be a web app with a testable backend or component layer, so reviewer probes (Tasks 4/5) stay meaningful against it.
 
 ## How to use this plan with Claude Code
 
@@ -173,7 +174,7 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 
 ### Active order
 
-Track A (Task 3 → 4 → 5) runs first, then Track B (Task 13 → 14 → 15 → 15.5 → 16 → 17) — one task at a time, never in parallel. Tasks 6–12 are marked **Deferred (later)** below and are not scheduled until both tracks are done; their content is kept unchanged for when priority is revisited.
+Track A (Task 3 → 4 → 5) runs first, then the MVP — the delivery factory (Task 15.5 → 13 → 16 → 17) — then Layer 2, the planning factory (Task 14 → 15) — one task at a time, never in parallel. Tasks 6–12 are marked **Deferred (later)** below and are not scheduled until all three groups are done; their content is kept unchanged for when priority is revisited.
 
 ### Task 1: Fork, fix local tooling, and run locally
 - Objective: a green fork, in its own Claude Code project folder, that runs a real task locally.
