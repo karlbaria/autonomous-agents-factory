@@ -778,6 +778,7 @@ class PolicyEngine:
         task_default_timeout_s: int = DEFAULT_TASK_TIMEOUT_S,
         allowed_read_roots: list[str] | None = None,
         scratch_write_root: str | None = None,
+        protected_write_roots: list[str] | None = None,
     ) -> None:
         self._task_type = task_type
         self._repo = repo
@@ -795,6 +796,15 @@ class PolicyEngine:
         )
         self._scratch_write_root = (
             os.path.normpath(scratch_write_root) if scratch_write_root else None
+        )
+        # Task 5 (ADR-026 (fork)): the fixer must not edit or delete the
+        # committed review probes. This is defense-in-depth only — the fixer
+        # has Bash, which this rule cannot see — the deterministic
+        # git-diff-and-revert step in review/backend.py is what actually
+        # enforces it. None for every other caller, which keeps
+        # `inside_protected_write_root` permanently False below.
+        self._protected_write_roots = (
+            [os.path.normpath(r) for r in protected_write_roots] if protected_write_roots else None
         )
 
         # Bounds check on approval_gate_cap (decision #13).
@@ -1191,6 +1201,18 @@ class PolicyEngine:
             return False
         return self._path_outside(file_path, self._allowed_read_roots)
 
+    def _inside_protected_write_root(self, file_path: str) -> bool:
+        """Whether a write targets inside a configured protected root (Task 5).
+
+        The inverse of ``_outside_scratch_dir``: there, a confined caller may
+        write ONLY inside one root; here, an otherwise-unconfined caller
+        (the fixer) may write ANYWHERE EXCEPT inside these roots. Always
+        ``False`` when no ``protected_write_roots`` was configured.
+        """
+        if self._protected_write_roots is None:
+            return False
+        return not self._path_outside(file_path, self._protected_write_roots)
+
     # ---- Three-outcome pipeline -------------------------------------------
 
     def evaluate_tool_use(self, tool_name: str, tool_input: dict) -> PolicyDecision:
@@ -1421,6 +1443,7 @@ class PolicyEngine:
                         **base_context,
                         "file_path": file_path,
                         "outside_scratch_dir": self._outside_scratch_dir(file_path),
+                        "inside_protected_write_root": self._inside_protected_write_root(file_path),
                     },
                 )
                 if write_decision == "deny":

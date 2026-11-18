@@ -42,6 +42,10 @@ class Call(NamedTuple):
     # None for every row except the two rows that exist for them.
     scratch_write_root: str | None = None
     allowed_read_roots: tuple[str, ...] | None = None
+    # Task 5 (ADR-026 (fork)): the fixer's protected-probes confinement rule
+    # keys off this PolicyEngine constructor option — None for every row
+    # except the one that exists for it.
+    protected_write_roots: tuple[str, ...] | None = None
 
 
 # rule id -> (tier, calls it must catch, a similar call it must leave alone)
@@ -174,6 +178,26 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
             allowed_read_roots=("/workspace/review_worktree", "/workspace/review_scratch"),
         ),
     ),
+    "review_fixer_write_protected_root": (
+        "hard",
+        [
+            Call(
+                "Write",
+                "/workspace/coder_repo/tests/review_probes/test_divide.py",
+                protected_write_roots=("/workspace/coder_repo/tests/review_probes",),
+            ),
+            Call(
+                "Edit",
+                "/workspace/coder_repo/tests/review_probes/test_edge_case.py",
+                protected_write_roots=("/workspace/coder_repo/tests/review_probes",),
+            ),
+        ],
+        Call(
+            "Write",
+            "/workspace/coder_repo/app/main.py",
+            protected_write_roots=("/workspace/coder_repo/tests/review_probes",),
+        ),
+    ),
 }
 
 # Every task type a workflow can run as: the Cedar principal. A built-in rule
@@ -194,6 +218,9 @@ def _decide(call: Call, task_type: str = "new_task") -> PolicyDecision:
         read_only=call.read_only,
         scratch_write_root=call.scratch_write_root,
         allowed_read_roots=list(call.allowed_read_roots) if call.allowed_read_roots else None,
+        protected_write_roots=(
+            list(call.protected_write_roots) if call.protected_write_roots else None
+        ),
     )
     key = "command" if call.tool == "Bash" else "file_path"
     return engine.evaluate_tool_use(call.tool, {key: call.target})

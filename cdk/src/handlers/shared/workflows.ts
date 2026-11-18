@@ -127,6 +127,17 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     readOnly: false,
     requiredInputs: { oneOf: ['issue_number', 'task_description'] },
   },
+  // Task 5 (ADR-026 (fork)): coding/new-task-v1 plus the bounded adversarial
+  // fix loop (review_and_fix, review_mode: adversarial). Same admission
+  // contract as new-task-v1/new-task-verified-v1 (writeable, repo-bound,
+  // issue_number/task_description).
+  'coding/new-task-adversarial-v1': {
+    id: 'coding/new-task-adversarial-v1',
+    version: '1.0.0',
+    requiresRepo: true,
+    readOnly: false,
+    requiredInputs: { oneOf: ['issue_number', 'task_description'] },
+  },
   'coding/pr-iteration-v1': {
     id: 'coding/pr-iteration-v1',
     version: '1.0.0',

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from models import AgentResult, RepoSetup, TaskConfig
 from pipeline import (
+    _apply_unresolved_review_failure,
     _chain_prior_agent_error,
     _resolve_overall_task_status,
     _should_post_start_comment,
@@ -48,6 +49,36 @@ class TestMainThreadsResolvedWorkflow:
         ):
             main()
         assert mock_run_task.call_args.kwargs["resolved_workflow"] is None
+
+
+class TestApplyUnresolvedReviewFailure:
+    """Task 5 (ADR-026 (fork)): review_mode: adversarial, on_unresolved: 'fail'
+    must fail the task even though the coder's own run_agent call succeeded —
+    review_and_fix's StepOutcome "failed" status alone never reaches here."""
+
+    def test_pr_with_warning_leaves_agent_result_unchanged(self):
+        agent_result = AgentResult(status="success", cost_usd=0.1)
+        review_outcome = {"should_fail_task": False, "verdict": "NOT_READY", "rounds": []}
+        assert _apply_unresolved_review_failure(agent_result, review_outcome) is agent_result
+
+    def test_empty_review_outcome_leaves_agent_result_unchanged(self):
+        """Every workflow but an adversarial review_and_fix one — review_outcome
+        is `{}` (review_and_fix never ran, or review_mode != adversarial)."""
+        agent_result = AgentResult(status="success")
+        assert _apply_unresolved_review_failure(agent_result, {}) is agent_result
+
+    def test_fail_mode_overrides_a_successful_agent_result(self):
+        agent_result = AgentResult(status="success", cost_usd=0.1)
+        review_outcome = {
+            "should_fail_task": True,
+            "verdict": "NOT_READY",
+            "rounds": [{"round_number": 1}, {"round_number": 2}],
+        }
+        result = _apply_unresolved_review_failure(agent_result, review_outcome)
+        assert result.status == "error"
+        assert result.error is not None
+        assert "2 round(s)" in result.error
+        assert "NOT_READY" in result.error
 
 
 class TestStartCommentPolicy:

@@ -1,16 +1,26 @@
-"""Orchestrates one round of the two-call independent review (Task 4).
+"""Orchestrates the independent review (Task 4 — advisory; Task 5 — the
+bounded adversarial fix loop).
 
-See the package docstring (``review/__init__.py``) for the design and
-ADR-025 (fork) for the full rationale. ``run_review_and_fix`` is what
-``workflow.runner._handle_review_and_fix`` wraps; it is also directly unit
-testable with ``runner.run_agent`` mocked (it never imports ``workflow.*``,
-so there is no import cycle: ``workflow.runner`` imports this module, not
-the other way around).
+See the package docstring (``review/__init__.py``) for the design, ADR-025
+(fork) for Task 4's rationale, and ADR-026 (fork) for Task 5's.
+``run_review_and_fix`` is what ``workflow.runner._handle_review_and_fix``
+wraps; it is also directly unit testable with ``runner.run_agent`` mocked (it
+never imports ``workflow.*``, so there is no import cycle: ``workflow.runner``
+imports this module, not the other way around).
 
-Advisory only (Task 4): a failure anywhere in this function is caught and
-turned into a neutral/NOT_READY result rather than raised — the coder's PR
-must ship regardless of whether the review itself could run. The bounded
-fix loop (``review_mode: adversarial``) is Task 5.
+Advisory mode (Task 4): a failure anywhere in a round is caught and turned
+into a neutral/NOT_READY result rather than raised — the coder's PR must
+ship regardless of whether the review itself could run.
+
+Adversarial mode (Task 5 — ADR-026 (fork)): the same round (fresh probes,
+the probe run, a fresh code review) repeats up to ``max_iterations`` times,
+with a fixer call between rounds that gets the failing probes and findings
+as evidence and must fix the code — it cannot edit or delete the probes
+(amendment 1: Cedar denies it as defense-in-depth; the deterministic
+snapshot/revert in this module is what actually enforces it). A round that
+reaches ``READY`` ends the loop early; a loop that exhausts
+``max_iterations`` still NOT_READY is "unresolved", handled per
+``on_unresolved``.
 """
 
 from __future__ import annotations
@@ -29,8 +39,10 @@ from .findings import Finding, ReviewOutcome, Verdict, parse_review_output
 from .probes import Probe, ProbeResult, collect_probes, run_probes
 from .prompts import (
     CODE_REVIEWER_SYSTEM_PROMPT,
+    FIXER_SYSTEM_PROMPT,
     PROBE_WRITER_SYSTEM_PROMPT,
     code_reviewer_user_prompt,
+    fixer_user_prompt,
     probe_writer_user_prompt,
 )
 from .signatures import extract_new_public_signatures, issue_names_interface
@@ -56,6 +68,11 @@ if TYPE_CHECKING:
 DEFAULT_REVIEWER_MODEL = "global.anthropic.claude-sonnet-4-6"
 DEFAULT_REVIEWER_MAX_TURNS = 15
 
+# Task 5 (ADR-026 (fork)) defaults — the base spec's Settings block.
+DEFAULT_MAX_ITERATIONS = 2
+DEFAULT_BLOCK_ON_SEVERITY = "major"
+DEFAULT_ON_UNRESOLVED = "pr_with_warning"
+
 # Duplicated from workflow/runner.py's _MIN_CALL_BUDGET_USD rather than
 # imported: workflow.runner imports this module (for _handle_review_and_fix),
 # so the reverse import would cycle. Keep the two values equal — both are the
@@ -66,12 +83,44 @@ _PROBES_COMMIT_DIR = "tests/review_probes"
 _PROBE_MANIFEST_LINE_RE = re.compile(r"^-\s*([A-Za-z0-9_.]+\.py)\s*:\s*(.+)\s*$", re.MULTILINE)
 
 
+class RoundOutcome(BaseModel):
+    """What one review round produced (Task 5 — ADR-026 (fork))."""
+
+    model_config = ConfigDict(frozen=True)
+
+    round_number: int
+    verdict: Verdict | None = None
+    findings: list[Finding] = Field(default_factory=list)
+    probe_results: list[ProbeResult] = Field(default_factory=list)
+    reviewed_sha: str = ""
+    committed_probe_paths: list[str] = Field(default_factory=list)
+    parse_error: str | None = None
+    # Amendment 2: filename -> Call 2's reasoning for marking that probe
+    # invalid (tests behavior the issue never asked for).
+    invalid_probes: dict[str, str] = Field(default_factory=dict)
+    # The reviewed SHA no longer matched HEAD when the verdict came back —
+    # the verdict is refused (forced NOT_READY) regardless of what Call 2 wrote.
+    stale_sha: bool = False
+    # Amendment 1: probe paths the fixer call just before this round touched,
+    # reverted before this round's review ran — defense-in-depth Cedar denies
+    # the fixer's Write/Edit into this path too, but the fixer has Bash,
+    # which that rule cannot see.
+    reverted_probe_paths: list[str] = Field(default_factory=list)
+
+
 class ReviewAndFixResult(BaseModel):
-    """What one round of the review produced, for the pipeline to report."""
+    """What the review produced, for the pipeline to report.
+
+    ``verdict``/``findings``/``probe_results``/``reviewed_sha``/
+    ``parse_error`` mirror the LAST round (Task 4's single advisory round, or
+    Task 5's final adversarial round) for backward compatibility with
+    existing callers; ``rounds`` carries the full per-round history.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     ran: bool
+    mode: str = "advisory"
     verdict: Verdict | None = None
     findings: list[Finding] = Field(default_factory=list)
     probe_results: list[ProbeResult] = Field(default_factory=list)
@@ -79,6 +128,20 @@ class ReviewAndFixResult(BaseModel):
     committed_probe_paths: list[str] = Field(default_factory=list)
     parse_error: str | None = None
     skipped_reason: str | None = None
+    # Task 5 (ADR-026 (fork)):
+    rounds: list[RoundOutcome] = Field(default_factory=list)
+    # True when the loop ran out of iterations (or budget) still NOT_READY.
+    unresolved: bool = False
+    # Why the loop stopped before a READY verdict: "max_iterations" |
+    # "budget_exhausted" | None (resolved, or never adversarial).
+    stopped_reason: str | None = None
+    on_unresolved: str = DEFAULT_ON_UNRESOLVED
+    # The caller (pipeline.py) should add the `review:unresolved` label to
+    # the PR — set only when unresolved and on_unresolved=="pr_with_warning".
+    needs_unresolved_label: bool = False
+    # The caller should fail the task instead of shipping a PR — set only
+    # when unresolved and on_unresolved=="fail".
+    should_fail_task: bool = False
 
 
 def _milestone(progress: _ProgressWriter | None, name: str, detail: str = "") -> None:
@@ -142,6 +205,73 @@ def _commit_passing_probes(repo_dir: str, probe_results: list[ProbeResult]) -> l
         cwd=repo_dir,
     )
     return committed
+
+
+def _merge_probes(fresh: list[Probe], carried: list[Probe]) -> list[Probe]:
+    """Fresh probes plus the previous round's carried-forward failing ones.
+
+    Amendment 4: each later round reruns the previous round's failing
+    probes alongside the fresh ones the probe writer just produced. Keyed
+    by filename so a fresh probe that happens to reuse a carried filename
+    wins (it's presumably a deliberate rewrite, not a collision).
+    """
+    merged = {p.filename: p for p in carried}
+    merged.update({p.filename: p for p in fresh})
+    return list(merged.values())
+
+
+def _snapshot_dir(path: Path) -> dict[str, bytes]:
+    """Every file under ``path``, repo-relative to it, for tamper detection."""
+    if not path.is_dir():
+        return {}
+    return {
+        str(p.relative_to(path)): p.read_bytes() for p in sorted(path.rglob("*")) if p.is_file()
+    }
+
+
+def _restore_and_diff(path: Path, snapshot: dict[str, bytes]) -> list[str]:
+    """Restore ``path`` to ``snapshot``; return the paths that had to change.
+
+    Amendment 1: the fixer must not edit or delete the committed probes.
+    This is the deterministic enforcement — a git-diff-and-revert step, not
+    just the Cedar rule (which cannot see a Bash-written file at all).
+    """
+    current = _snapshot_dir(path)
+    touched: set[str] = set()
+    for rel, content in snapshot.items():
+        if current.get(rel) != content:
+            touched.add(rel)
+            (path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (path / rel).write_bytes(content)
+    for rel in current:
+        if rel not in snapshot:
+            touched.add(rel)
+            (path / rel).unlink(missing_ok=True)
+    return sorted(f"{_PROBES_COMMIT_DIR}/{rel}" for rel in touched)
+
+
+def _commit_fixer_changes(repo_dir: str) -> None:
+    """Commit whatever the fixer (and any tamper revert) left in the tree.
+
+    A deterministic step, not left to the fixer's own turn: the next
+    round's diff (against the base branch) and reviewed-sha capture both
+    need the fix committed, the same way the coder's own turn commits
+    before the first round ever runs.
+    """
+    run_cmd(["git", "add", "-A"], label="review-fixer-add", cwd=repo_dir)
+    unchanged = run_cmd(
+        ["git", "diff", "--cached", "--quiet", "--exit-code"],
+        label="review-fixer-diff-check",
+        cwd=repo_dir,
+        check=False,
+    )
+    if unchanged.returncode == 0:
+        return  # fixer made no net change (e.g. a fully-reverted tamper attempt)
+    run_cmd(
+        ["git", "commit", "-m", "fix: address independent review findings"],
+        label="review-fixer-commit",
+        cwd=repo_dir,
+    )
 
 
 async def _call_agent(
@@ -217,6 +347,9 @@ def _run_probe_writer(
         return collect_probes(scratch_dir, intents=intents)
 
 
+_CODE_REVIEWER_ATTEMPTS = 2  # one retry: "a review that doesn't finish is retried once"
+
+
 def _run_code_reviewer(
     *,
     config: TaskConfig,
@@ -229,8 +362,15 @@ def _run_code_reviewer(
     issue_text: str,
     diff_text: str,
     probe_results: list[ProbeResult],
+    block_on_severity: str = DEFAULT_BLOCK_ON_SEVERITY,
 ) -> ReviewOutcome:
-    """Run Call 2 against the full repo; return the parsed verdict + findings."""
+    """Run Call 2 against the full repo; return the parsed verdict + findings.
+
+    A call that raises, or whose output doesn't fit the contract, is
+    retried once before counting as ``NOT_READY`` (Task 5's "a review that
+    doesn't finish" case) — each attempt that actually ran is billed to the
+    ledger regardless of outcome.
+    """
     remaining = ledger.remaining_budget(config.max_budget_usd)
     if remaining is not None and remaining < _MIN_CALL_BUDGET_USD:
         log("AGENT", "review_and_fix: skipping code-reviewer call — budget exhausted")
@@ -252,69 +392,133 @@ def _run_code_reviewer(
             "scratch_write_root": None,
         }
     )
-    user_prompt = code_reviewer_user_prompt(issue_text, diff_text, probe_results)
-    result = asyncio.run(
-        _call_agent(
-            CODE_REVIEWER_SYSTEM_PROMPT, user_prompt, call2_config, setup.repo_dir, trajectory
+    user_prompt = code_reviewer_user_prompt(
+        issue_text, diff_text, probe_results, block_on_severity=block_on_severity
+    )
+
+    outcome: ReviewOutcome | None = None
+    last_error = "code reviewer call did not run"
+    for attempt in range(1, _CODE_REVIEWER_ATTEMPTS + 1):
+        try:
+            result = asyncio.run(
+                _call_agent(
+                    CODE_REVIEWER_SYSTEM_PROMPT,
+                    user_prompt,
+                    call2_config,
+                    setup.repo_dir,
+                    trajectory,
+                )
+            )
+        except Exception as e:
+            last_error = f"code reviewer call failed: {e}"
+            log("WARN", f"review_and_fix: code-reviewer attempt {attempt} failed: {e}")
+            continue
+        ledger.record(
+            stage="code_reviewer",
+            cost_usd=result.cost_usd,
+            turns=result.num_turns or result.turns,
+            model=model,
         )
-    )
-    ledger.record(
-        stage="code_reviewer",
-        cost_usd=result.cost_usd,
-        turns=result.num_turns or result.turns,
-        model=model,
-    )
-    outcome = parse_review_output(result.result_text)
+        outcome = parse_review_output(result.result_text)
+        if outcome.parse_error is None:
+            break
+        last_error = outcome.parse_error
+        log(
+            "WARN",
+            f"review_and_fix: code-reviewer attempt {attempt} output unparseable: "
+            f"{outcome.parse_error}",
+        )
+
+    if outcome is None:
+        outcome = ReviewOutcome(verdict="NOT_READY", findings=[], parse_error=last_error)
     _milestone(
         progress, "review_verdict", f"verdict={outcome.verdict} findings={len(outcome.findings)}"
     )
     return outcome
 
 
-def run_review_and_fix(
+def _run_fixer(
     *,
     config: TaskConfig,
     setup: RepoSetup,
     ledger: AgentInvocationLedger,
-    progress: _ProgressWriter | None = None,
-    trajectory: Any = None,
-    review_mode: str = "advisory",
-    reviewer_model: str | None = None,
-    reviewer_max_turns: int | None = None,
-    workspace_base_dir: str,
-) -> ReviewAndFixResult:
-    """Run one round of the two-call review against the coder's current branch.
+    progress: _ProgressWriter | None,
+    trajectory: Any,
+    issue_text: str,
+    findings: list[Finding],
+    failing_probes: list[ProbeResult],
+    probes_dir: Path,
+) -> None:
+    """Run the fixer against the coder's checkout (Task 5 amendment 3).
 
-    Task 4 ships ``advisory`` (and, until Task 5's loop lands, treats
-    ``adversarial`` the same way — a single round, never gating). ``none``
-    skips the review entirely.
+    Full coder-shaped access (the same tools, the same model) to the same
+    ``setup.repo_dir`` — unlike the two reviewer calls, this one mutates the
+    code. ``protected_write_roots`` is the Cedar defense-in-depth layer
+    (amendment 1); the caller still snapshots/reverts ``probes_dir`` itself,
+    since a Bash-written file never reaches that rule at all.
     """
-    if review_mode == "none":
-        return ReviewAndFixResult(ran=False, skipped_reason="review_mode=none")
-    if review_mode == "adversarial":
-        log(
-            "WARN",
-            "review_and_fix: review_mode=adversarial has no fix loop yet (Task 5) — "
-            "running a single advisory round",
-        )
-
-    model = reviewer_model or DEFAULT_REVIEWER_MODEL
-    max_turns = reviewer_max_turns or DEFAULT_REVIEWER_MAX_TURNS
-
     remaining = ledger.remaining_budget(config.max_budget_usd)
     if remaining is not None and remaining < _MIN_CALL_BUDGET_USD:
-        log("AGENT", f"review_and_fix skipped: ${remaining:.4f} remaining is below the SDK minimum")
-        return ReviewAndFixResult(ran=False, skipped_reason="budget_exhausted")
+        log("AGENT", "review_and_fix: skipping fixer call — budget exhausted")
+        return
 
+    fixer_config = config.model_copy(
+        update={
+            "max_budget_usd": ledger.remaining_budget(config.max_budget_usd),
+            "read_only": False,
+            "allowed_tools": config.allowed_tools
+            or ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
+            "policy_principal": "fixer",
+            "allowed_read_roots": None,
+            "scratch_write_root": None,
+            "protected_write_roots": [str(probes_dir)],
+        }
+    )
+    user_prompt = fixer_user_prompt(issue_text, findings, failing_probes)
+    result = asyncio.run(
+        _call_agent(FIXER_SYSTEM_PROMPT, user_prompt, fixer_config, setup.repo_dir, trajectory)
+    )
+    ledger.record(
+        stage="fixer",
+        cost_usd=result.cost_usd,
+        turns=result.num_turns or result.turns,
+        model=fixer_config.anthropic_model,
+    )
+    _milestone(progress, "review_fixer_ran", f"status={result.status}")
+
+
+def _run_one_round(
+    *,
+    round_number: int,
+    config: TaskConfig,
+    setup: RepoSetup,
+    ledger: AgentInvocationLedger,
+    progress: _ProgressWriter | None,
+    trajectory: Any,
+    model: str,
+    max_turns: int,
+    issue_text: str,
+    block_on_severity: str,
+    carried_probes: list[Probe],
+    base_dir: str,
+    reverted_probe_paths: list[str],
+) -> RoundOutcome:
+    """Run one full round: fresh probes -> the probe run -> a fresh code review.
+
+    ``carried_probes`` (amendment 4) are the previous round's failing,
+    non-invalid probes, rerun alongside this round's fresh ones.
+    ``reverted_probe_paths`` (amendment 1) is what the caller's tamper
+    revert, just before this round, touched — carried through only for
+    reporting; it does not change this round's behavior.
+    """
     reviewed_sha = _git_output(setup.repo_dir, "rev-parse", "HEAD").strip()
     diff_text = _git_output(setup.repo_dir, "diff", f"origin/{setup.default_branch}...HEAD")
-    issue_text = _issue_text(config)
     signatures = extract_new_public_signatures(diff_text)
     signatures_for_call1 = [] if issue_names_interface(issue_text, signatures) else signatures
 
-    probes: list[Probe] = []
+    fresh_probes: list[Probe] = []
     try:
-        probes = _run_probe_writer(
+        fresh_probes = _run_probe_writer(
             config=config,
             setup=setup,
             ledger=ledger,
@@ -324,14 +528,16 @@ def run_review_and_fix(
             max_turns=max_turns,
             issue_text=issue_text,
             signatures_for_call1=signatures_for_call1,
-            base_dir=workspace_base_dir,
+            base_dir=base_dir,
         )
     except Exception as e:
         log(
             "WARN",
-            f"review_and_fix: probe-writer phase failed (advisory only): {type(e).__name__}: {e}",
+            f"review_and_fix: probe-writer phase failed (round {round_number}): "
+            f"{type(e).__name__}: {e}",
         )
 
+    probes = _merge_probes(fresh_probes, carried_probes)
     probe_results: list[ProbeResult] = []
     if probes:
         probe_results = run_probes(probes, setup.repo_dir)
@@ -350,25 +556,211 @@ def run_review_and_fix(
             issue_text=issue_text,
             diff_text=diff_text,
             probe_results=probe_results,
+            block_on_severity=block_on_severity,
         )
     except Exception as e:
         log(
             "WARN",
-            f"review_and_fix: code-reviewer phase failed (advisory only): {type(e).__name__}: {e}",
+            f"review_and_fix: code-reviewer phase failed (round {round_number}): "
+            f"{type(e).__name__}: {e}",
         )
         outcome = ReviewOutcome(
             verdict="NOT_READY", findings=[], parse_error=f"code reviewer call failed: {e}"
         )
 
-    committed_paths = _commit_passing_probes(setup.repo_dir, probe_results)
-    log("AGENT", f"review_and_fix stage_costs={ledger.stage_costs()}")
+    stale_sha = False
+    current_sha = _git_output(setup.repo_dir, "rev-parse", "HEAD").strip()
+    if current_sha and reviewed_sha and current_sha != reviewed_sha:
+        # The verdict is refused if the reviewed SHA no longer matches the
+        # code — something changed the repo mid-review, so nothing Call 2
+        # wrote can be trusted against what's actually there now.
+        stale_sha = True
+        outcome = ReviewOutcome(
+            verdict="NOT_READY",
+            findings=[],
+            parse_error=(
+                f"stale_sha: repo HEAD changed from {reviewed_sha[:12]} to "
+                f"{current_sha[:12]} during review — verdict refused"
+            ),
+        )
 
-    return ReviewAndFixResult(
-        ran=True,
+    committed_paths = _commit_passing_probes(setup.repo_dir, probe_results)
+
+    return RoundOutcome(
+        round_number=round_number,
         verdict=outcome.verdict,
         findings=outcome.findings,
         probe_results=probe_results,
         reviewed_sha=reviewed_sha,
         committed_probe_paths=committed_paths,
         parse_error=outcome.parse_error,
+        invalid_probes=outcome.invalid_probes,
+        stale_sha=stale_sha,
+        reverted_probe_paths=reverted_probe_paths,
+    )
+
+
+def run_review_and_fix(
+    *,
+    config: TaskConfig,
+    setup: RepoSetup,
+    ledger: AgentInvocationLedger,
+    progress: _ProgressWriter | None = None,
+    trajectory: Any = None,
+    review_mode: str = "advisory",
+    reviewer_model: str | None = None,
+    reviewer_max_turns: int | None = None,
+    workspace_base_dir: str,
+    max_iterations: int | None = None,
+    block_on_severity: str | None = None,
+    on_unresolved: str | None = None,
+) -> ReviewAndFixResult:
+    """Run the independent review against the coder's current branch.
+
+    ``advisory`` (Task 4) runs a single round, never gating. ``adversarial``
+    (Task 5 — ADR-026 (fork)) repeats the round — fresh probes, the probe
+    run, a fresh code review — up to ``max_iterations`` times, with a fixer
+    call between rounds, stopping early on a ``READY`` verdict. ``none``
+    skips the review entirely. ``max_iterations``/``block_on_severity``/
+    ``on_unresolved`` are ``None``-able the same way ``reviewer_model`` is —
+    a caller that omits them (or a workflow step that doesn't set them)
+    gets the Task 5 base-spec defaults below.
+    """
+    if review_mode == "none":
+        return ReviewAndFixResult(ran=False, skipped_reason="review_mode=none")
+
+    model = reviewer_model or DEFAULT_REVIEWER_MODEL
+    max_turns = reviewer_max_turns or DEFAULT_REVIEWER_MAX_TURNS
+    max_iterations = max_iterations or DEFAULT_MAX_ITERATIONS
+    block_on_severity = block_on_severity or DEFAULT_BLOCK_ON_SEVERITY
+    on_unresolved = on_unresolved or DEFAULT_ON_UNRESOLVED
+    issue_text = _issue_text(config)
+
+    remaining = ledger.remaining_budget(config.max_budget_usd)
+    if remaining is not None and remaining < _MIN_CALL_BUDGET_USD:
+        log("AGENT", f"review_and_fix skipped: ${remaining:.4f} remaining is below the SDK minimum")
+        return ReviewAndFixResult(ran=False, skipped_reason="budget_exhausted")
+
+    if review_mode != "adversarial":
+        round_outcome = _run_one_round(
+            round_number=1,
+            config=config,
+            setup=setup,
+            ledger=ledger,
+            progress=progress,
+            trajectory=trajectory,
+            model=model,
+            max_turns=max_turns,
+            issue_text=issue_text,
+            block_on_severity=block_on_severity,
+            carried_probes=[],
+            base_dir=workspace_base_dir,
+            reverted_probe_paths=[],
+        )
+        log("AGENT", f"review_and_fix stage_costs={ledger.stage_costs()}")
+        return ReviewAndFixResult(
+            ran=True,
+            mode="advisory",
+            rounds=[round_outcome],
+            verdict=round_outcome.verdict,
+            findings=round_outcome.findings,
+            probe_results=round_outcome.probe_results,
+            reviewed_sha=round_outcome.reviewed_sha,
+            committed_probe_paths=round_outcome.committed_probe_paths,
+            parse_error=round_outcome.parse_error,
+        )
+
+    probes_dir = Path(setup.repo_dir) / _PROBES_COMMIT_DIR
+    rounds: list[RoundOutcome] = []
+    carried_probes: list[Probe] = []
+    reverted_paths: list[str] = []
+    stopped_reason: str | None = None
+
+    for round_number in range(1, max_iterations + 1):
+        round_outcome = _run_one_round(
+            round_number=round_number,
+            config=config,
+            setup=setup,
+            ledger=ledger,
+            progress=progress,
+            trajectory=trajectory,
+            model=model,
+            max_turns=max_turns,
+            issue_text=issue_text,
+            block_on_severity=block_on_severity,
+            carried_probes=carried_probes,
+            base_dir=workspace_base_dir,
+            reverted_probe_paths=reverted_paths,
+        )
+        rounds.append(round_outcome)
+        reverted_paths = []
+        failed_count = sum(1 for r in round_outcome.probe_results if not r.passed)
+        _milestone(
+            progress,
+            "review_round",
+            f"round {round_number}: verdict={round_outcome.verdict} "
+            f"findings={len(round_outcome.findings)} probes_failed={failed_count}",
+        )
+
+        if round_outcome.verdict == "READY":
+            break
+        if round_number == max_iterations:
+            break
+
+        remaining = ledger.remaining_budget(config.max_budget_usd)
+        if remaining is not None and remaining < _MIN_CALL_BUDGET_USD:
+            stopped_reason = "budget_exhausted"
+            break
+
+        carried_probes = [
+            r.probe
+            for r in round_outcome.probe_results
+            if not r.passed and r.probe.filename not in round_outcome.invalid_probes
+        ]
+        failing_probes = [r for r in round_outcome.probe_results if not r.passed]
+        snapshot = _snapshot_dir(probes_dir)
+        try:
+            _run_fixer(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                progress=progress,
+                trajectory=trajectory,
+                issue_text=issue_text,
+                findings=round_outcome.findings,
+                failing_probes=failing_probes,
+                probes_dir=probes_dir,
+            )
+        except Exception as e:
+            log("WARN", f"review_and_fix: fixer phase failed (round {round_number}): {e}")
+        reverted_paths = _restore_and_diff(probes_dir, snapshot)
+        if reverted_paths:
+            log(
+                "WARN",
+                f"review_and_fix: fixer touched protected probes, reverted: {reverted_paths}",
+            )
+        _commit_fixer_changes(setup.repo_dir)
+
+    last = rounds[-1]
+    unresolved = last.verdict != "READY"
+    if unresolved and stopped_reason is None:
+        stopped_reason = "max_iterations"
+    all_committed = [p for r in rounds for p in r.committed_probe_paths]
+
+    log("AGENT", f"review_and_fix stage_costs={ledger.stage_costs()}")
+    return ReviewAndFixResult(
+        ran=True,
+        mode="adversarial",
+        rounds=rounds,
+        verdict=last.verdict,
+        findings=last.findings,
+        probe_results=last.probe_results,
+        reviewed_sha=last.reviewed_sha,
+        committed_probe_paths=all_committed,
+        parse_error=last.parse_error,
+        unresolved=unresolved,
+        stopped_reason=stopped_reason,
+        on_unresolved=on_unresolved,
+        needs_unresolved_label=unresolved and on_unresolved == "pr_with_warning",
+        should_fail_task=unresolved and on_unresolved == "fail",
     )

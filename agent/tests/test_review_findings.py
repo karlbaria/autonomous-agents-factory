@@ -1,4 +1,5 @@
-"""Tests for the reviewer findings parser (Task 4 — ADR-025 (fork))."""
+"""Tests for the reviewer findings parser (Task 4 — ADR-025 (fork);
+``INVALID_PROBES:`` parsing is Task 5 amendment 2 — ADR-026 (fork))."""
 
 from __future__ import annotations
 
@@ -175,3 +176,54 @@ class TestParseReviewOutputMalformed:
         assert out.findings == []
         assert out.parse_error is not None
         assert "finding 3 has unknown type 'minor'" in out.parse_error
+
+
+class TestParseReviewOutputInvalidProbes:
+    """Task 5 amendment 2: Call 2 may mark a probe invalid (e.g. it tests
+    behavior the issue never asked for), with its reasoning recorded
+    alongside that probe's result — blocking stays Call 2's verdict, not
+    raw probe failures."""
+
+    def test_no_invalid_probes_marker_is_valid_and_empty(self):
+        out = parse_review_output("VERDICT: READY\n")
+        assert out.invalid_probes == {}
+        assert out.parse_error is None
+
+    def test_invalid_probes_parsed_alongside_findings(self):
+        text = (
+            "VERDICT: READY\n"
+            "FINDINGS:\n"
+            "```json\n[]\n```\n"
+            "INVALID_PROBES:\n"
+            "```json\n"
+            '[{"filename": "test_extra.py", '
+            '"reason": "tests behavior the issue never asked for"}]\n'
+            "```\n"
+        )
+        out = parse_review_output(text)
+        assert out.verdict == "READY"
+        assert out.parse_error is None
+        assert out.invalid_probes == {"test_extra.py": "tests behavior the issue never asked for"}
+
+    def test_invalid_probes_without_findings_block(self):
+        text = (
+            "VERDICT: READY\n"
+            "INVALID_PROBES:\n"
+            '```json\n[{"filename": "test_extra.py", "reason": "out of scope"}]\n```\n'
+        )
+        out = parse_review_output(text)
+        assert out.verdict == "READY"
+        assert out.invalid_probes == {"test_extra.py": "out of scope"}
+
+    def test_malformed_invalid_probes_json_forces_not_ready(self):
+        text = "VERDICT: READY\nINVALID_PROBES:\n```json\n[{not valid json\n```\n"
+        out = parse_review_output(text)
+        assert out.verdict == "NOT_READY"
+        assert out.parse_error is not None
+        assert "INVALID_PROBES" in out.parse_error
+
+    def test_invalid_probes_entry_missing_reason_forces_not_ready(self):
+        text = 'VERDICT: READY\nINVALID_PROBES:\n```json\n[{"filename": "test_extra.py"}]\n```\n'
+        out = parse_review_output(text)
+        assert out.verdict == "NOT_READY"
+        assert out.parse_error is not None

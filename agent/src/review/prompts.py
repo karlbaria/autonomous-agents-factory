@@ -1,10 +1,12 @@
-"""Prompts for the two-call independent reviewer (Task 4 — ADR-025 (fork))."""
+"""Prompts for the two-call independent reviewer (Task 4 — ADR-025 (fork);
+the bounded adversarial fix loop is Task 5 — ADR-026 (fork))."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .findings import Finding
     from .probes import ProbeResult
     from .signatures import PublicSignature
 
@@ -88,6 +90,49 @@ failing probe or an evidence-backed `issue` finding should block merge; \
 otherwise READY. If you have nothing to report, write `FINDINGS:` followed \
 by an empty JSON array (`[]`) in the same fenced block — never omit the \
 FINDINGS block entirely.
+
+A probe can test behavior the task never actually asked for — the probe \
+writer never saw your diff and can misjudge scope. When a FAILING probe is \
+like that, mark it invalid instead of letting it force NOT-READY: after \
+FINDINGS:, add an INVALID_PROBES: block in the same fenced-JSON shape, one \
+object per invalid probe, each with "filename" (the probe's file name, \
+exactly as given in the probe results above) and "reason" (why it doesn't \
+reflect this task's actual requirements):
+
+INVALID_PROBES:
+```json
+[
+  {
+    "filename": "test_example.py",
+    "reason": "..."
+  }
+]
+```
+
+Omit the INVALID_PROBES: block entirely when every probe is in scope — it \
+is optional, unlike FINDINGS:. Blocking is still your verdict, never a raw \
+probe failure count: a probe you mark invalid here must not be why you \
+wrote NOT-READY.
+"""
+
+FIXER_SYSTEM_PROMPT = """\
+You are the fixer in a bounded adversarial review loop (Task 5 — ADR-026 \
+(fork)). An independent reviewer found this code NOT-READY. Fix the code \
+so it satisfies the task's actual requirements — do not just make the \
+findings or probes go away by weakening them.
+
+Rules:
+- Fix the real problem the findings and failing probes point at, in the \
+application code. Do not edit, delete, or weaken anything under \
+`tests/review_probes/` — those are the independent reviewer's probes, not \
+yours, and any change there is reverted before the next round even looks \
+at it.
+- A failing probe may be wrong (the reviewer can mark a probe invalid when \
+it tests something the task never asked for) — fix only what the \
+unresolved findings and probes genuinely call for, not every line a probe \
+happens to exercise.
+- You have the same tools as the original implementation: Bash, Read, \
+Write, Edit, Glob, Grep.
 """
 
 
@@ -109,9 +154,17 @@ def probe_writer_user_prompt(
 
 
 def code_reviewer_user_prompt(
-    issue_text: str, diff_text: str, probe_results: list[ProbeResult]
+    issue_text: str,
+    diff_text: str,
+    probe_results: list[ProbeResult],
+    block_on_severity: str = "major",
 ) -> str:
-    """Call 2's task-specific content: requirements, diff, probe results."""
+    """Call 2's task-specific content: requirements, diff, probe results.
+
+    ``block_on_severity`` (Task 5 — ADR-026 (fork)) names the floor this task
+    uses for NOT-READY: an evidence-backed `issue` finding below that
+    severity is informational only, same as a `comment`/`question`.
+    """
     if probe_results:
         probes_block = "\n".join(
             f"- `{r.probe.filename}` ({r.probe.intent}): "
@@ -124,5 +177,43 @@ def code_reviewer_user_prompt(
         f"## Task requirements\n\n{issue_text}\n\n"
         f"## Diff against the base branch\n\n```diff\n{diff_text}\n```\n\n"
         "## Probe results (written independently from the requirements, "
-        f"run deterministically against this code)\n\n{probes_block}\n"
+        f"run deterministically against this code)\n\n{probes_block}\n\n"
+        f"## Blocking threshold\n\nFor this task, write VERDICT: NOT-READY only for "
+        f"an evidence-backed `issue` finding at severity {block_on_severity} or above "
+        "(minor < medium < major < critical), or a failing probe that reflects the "
+        "task's actual requirements. A lower-severity issue is informational — report "
+        "it, but still write READY if nothing else blocks.\n"
     )
+
+
+def fixer_user_prompt(
+    issue_text: str, findings: list[Finding], failing_probes: list[ProbeResult]
+) -> str:
+    """The fixer's task-specific content (Task 5 amendment 3 — ADR-026 (fork)).
+
+    Includes the original issue (not just findings/probes) — the fixer needs
+    the same requirements Call 1 and Call 2 are grading against.
+    """
+    parts = [f"## Task requirements\n\n{issue_text}\n"]
+
+    if findings:
+        findings_block = "\n".join(
+            f"- **{f.type}" + (f" ({f.severity})" if f.severity else "") + f":** {f.title} — "
+            f"{f.description} _(evidence: {f.evidence})_"
+            for f in findings
+        )
+        parts.append(f"## Independent reviewer findings\n\n{findings_block}\n")
+
+    if failing_probes:
+        probes_block = "\n".join(
+            f"- `{r.probe.filename}` ({r.probe.intent}):\n"
+            f"  output: {r.output[-_OUTPUT_PREVIEW_CHARS:]}"
+            for r in failing_probes
+        )
+        parts.append(f"## Failing probes\n\n{probes_block}\n")
+
+    parts.append(
+        "## Off limits\n\nDo not edit, delete, or weaken any file under "
+        "`tests/review_probes/` — the independent reviewer's probes, not yours.\n"
+    )
+    return "\n".join(parts)

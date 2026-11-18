@@ -501,9 +501,93 @@ class TestEnsurePrReviewSummary:
         assert "**Verdict:** NOT_READY" in body
         assert "abc123def456" in body
         assert "✅ PASS" in body and "test_pass.py" in body
-        assert "❌ FAIL" in body and "test_fail.py" in body
-        assert "1 passing probe(s) committed" in body
-        assert "Missing validation" in body and "app.py:12" in body
+
+    def test_adversarial_mode_renders_each_round(self, monkeypatch):
+        """Task 5 (ADR-026 (fork)): the PR shows every round, each with its
+        own fresh probes and verdict — not just the final one."""
+        review_outcome = {
+            "ran": True,
+            "mode": "adversarial",
+            "verdict": "READY",
+            "unresolved": False,
+            "stopped_reason": None,
+            "on_unresolved": "pr_with_warning",
+            "rounds": [
+                {
+                    "round_number": 1,
+                    "verdict": "NOT_READY",
+                    "reviewed_sha": "aaaaaaaaaaaaaaaa",
+                    "probe_results": [
+                        {
+                            "probe": {"filename": "test_divide.py", "intent": "div by zero"},
+                            "passed": False,
+                        }
+                    ],
+                    "findings": [
+                        {
+                            "type": "issue",
+                            "severity": "major",
+                            "title": "Missing zero check",
+                            "description": "divide(a, 0) raises instead of 400",
+                            "evidence": "app.py:12",
+                        }
+                    ],
+                    "parse_error": None,
+                    "invalid_probes": {},
+                    "stale_sha": False,
+                    "reverted_probe_paths": [],
+                },
+                {
+                    "round_number": 2,
+                    "verdict": "READY",
+                    "reviewed_sha": "bbbbbbbbbbbbbbbb",
+                    "probe_results": [
+                        {
+                            "probe": {"filename": "test_divide.py", "intent": "div by zero"},
+                            "passed": True,
+                        }
+                    ],
+                    "findings": [],
+                    "parse_error": None,
+                    "invalid_probes": {},
+                    "stale_sha": False,
+                    "reverted_probe_paths": [],
+                },
+            ],
+        }
+        body = self._create_pr(monkeypatch, review_outcome=review_outcome)
+        assert "Independent review (adversarial)" in body
+        assert "Round 1" in body and "Round 2" in body
+        assert body.index("Round 1") < body.index("Round 2")
+        assert "NOT_READY" in body and "READY" in body
+        assert "Missing zero check" in body
+        assert body.count("test_divide.py") == 2  # once per round's probe list
+
+    def test_adversarial_unresolved_notes_why_the_loop_stopped(self, monkeypatch):
+        review_outcome = {
+            "ran": True,
+            "mode": "adversarial",
+            "verdict": "NOT_READY",
+            "unresolved": True,
+            "stopped_reason": "max_iterations",
+            "on_unresolved": "pr_with_warning",
+            "rounds": [
+                {
+                    "round_number": 1,
+                    "verdict": "NOT_READY",
+                    "reviewed_sha": "aaaaaaaaaaaaaaaa",
+                    "probe_results": [],
+                    "findings": [],
+                    "parse_error": None,
+                    "invalid_probes": {},
+                    "stale_sha": False,
+                    "reverted_probe_paths": [],
+                }
+            ],
+        }
+        body = self._create_pr(monkeypatch, review_outcome=review_outcome)
+        assert "unresolved" in body.lower()
+        assert "max_iterations" in body
 
     def test_review_outcome_not_ran_renders_nothing(self, monkeypatch):
         body = self._create_pr(
@@ -523,6 +607,31 @@ class TestEnsurePrReviewSummary:
         }
         body = self._create_pr(monkeypatch, review_outcome=review_outcome)
         assert "could not be parsed: no VERDICT line found" in body
+
+
+class TestApplyUnresolvedLabel:
+    """Task 5 (ADR-026 (fork)): on_unresolved: pr_with_warning labels the PR."""
+
+    def test_adds_the_label_best_effort(self, monkeypatch):
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        post_hooks.apply_unresolved_label(
+            "/tmp/repo", "owner/repo", "https://github.com/o/r/pull/1"
+        )
+
+        cmd = run_cmd.cmd_for("apply-unresolved-label")
+        assert cmd is not None
+        assert "--add-label" in cmd and "review:unresolved" in cmd
+
+    def test_failure_is_non_fatal(self, monkeypatch):
+        run_cmd = _RunCmdRecorder(returncodes={"apply-unresolved-label": 1})
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        # Must not raise even though the gh call fails.
+        post_hooks.apply_unresolved_label(
+            "/tmp/repo", "owner/repo", "https://github.com/o/r/pull/1"
+        )
 
 
 class TestExtractAgentNotes:

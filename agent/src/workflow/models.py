@@ -43,6 +43,12 @@ VerifyGate = Literal["strict", "regression_only", "informational"]
 # block). "adversarial" (the bounded fix loop) is Task 5; "none" disables the
 # step without removing it from the workflow file.
 ReviewMode = Literal["advisory", "adversarial", "none"]
+Severity = Literal["minor", "medium", "major", "critical"]
+# Task 5 (ADR-026 (fork)): what happens to a review_and_fix step's PR when
+# adversarial mode exhausts max_iterations still NOT_READY. "pr_with_warning"
+# (default) still opens the PR, with the `review:unresolved` label added;
+# "fail" fails the task instead of opening a PR.
+OnUnresolved = Literal["fail", "pr_with_warning"]
 # deliver_artifact target: an open string naming a registered deliverer
 # (workflow.deliverers / DELIVERERS), not a closed enum — a new delivery method
 # is a registered deliverer, not a model/schema change (ADR-014 addendum
@@ -156,6 +162,10 @@ class Step(BaseModel):
     review_mode: ReviewMode | None = None
     reviewer_model: str | None = None
     reviewer_max_turns: int | None = None
+    # review_and_fix, review_mode: adversarial only (Task 5 — ADR-026 (fork)):
+    max_iterations: int | None = None
+    block_on_severity: Severity | None = None
+    on_unresolved: OnUnresolved | None = None
 
 
 class TerminalOutcomes(BaseModel):

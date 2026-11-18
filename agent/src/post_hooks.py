@@ -578,25 +578,11 @@ def _cost_line(agent_result: AgentResult | None, ledger: AgentInvocationLedger |
     return ""
 
 
-def _review_section(review_outcome: dict | None) -> str:
-    """The PR body's independent-review section (Task 4 — ADR-025 (fork)).
-
-    ``review_outcome`` is ``review.backend.ReviewAndFixResult.model_dump()``;
-    empty/absent (every workflow but ``coding/new-task-verified-v1``, or a
-    round that was skipped — budget exhausted, ``review_mode: none``) means
-    no section at all, not an empty placeholder.
-    """
-    if not review_outcome or not review_outcome.get("ran"):
-        return ""
-
-    verdict = review_outcome.get("verdict")
-    lines = ["## Independent review (advisory)\n", f"**Verdict:** {verdict}\n"]
-
-    reviewed_sha = review_outcome.get("reviewed_sha") or ""
-    if reviewed_sha:
-        lines.append(f"Reviewed commit: `{reviewed_sha[:12]}`\n")
-
-    probe_results = review_outcome.get("probe_results") or []
+def _render_round_probes_and_findings(round_outcome: dict) -> list[str]:
+    """The probes/committed/findings/parse_error lines shared by a single
+    advisory round and a single round inside the adversarial table."""
+    lines: list[str] = []
+    probe_results = round_outcome.get("probe_results") or []
     if probe_results:
         lines.append(
             "**Probes** (written from the issue alone, before the probe writer "
@@ -608,14 +594,23 @@ def _review_section(review_outcome: dict | None) -> str:
             lines.append(f"- {mark} `{probe.get('filename')}` — {probe.get('intent')}")
         lines.append("")
 
-    committed = review_outcome.get("committed_probe_paths") or []
+    committed = round_outcome.get("committed_probe_paths") or []
     if committed:
         lines.append(
             f"{len(committed)} passing probe(s) committed to `tests/review_probes/` "
             "in a separate commit.\n"
         )
 
-    findings = review_outcome.get("findings") or []
+    # Task 5 amendment 1 (ADR-026 (fork)): the fixer tried to edit/delete a
+    # protected probe between the previous round and this one; reverted.
+    reverted = round_outcome.get("reverted_probe_paths") or []
+    if reverted:
+        touched = ", ".join(f"`{p}`" for p in reverted)
+        lines.append(
+            f"⚠️ The fixer touched protected probes — reverted before this review: {touched}\n"
+        )
+
+    findings = round_outcome.get("findings") or []
     if findings:
         lines.append("**Findings:**\n")
         for f in findings:
@@ -625,10 +620,86 @@ def _review_section(review_outcome: dict | None) -> str:
                 f"_(evidence: {f['evidence']})_"
             )
         lines.append("")
-    elif review_outcome.get("parse_error"):
-        lines.append(f"_Review output could not be parsed: {review_outcome['parse_error']}_\n")
+    elif round_outcome.get("parse_error"):
+        lines.append(f"_Review output could not be parsed: {round_outcome['parse_error']}_\n")
 
+    # Task 5 amendment 2: a probe Call 2 marked invalid (tests behavior the
+    # issue never asked for) — recorded, not silently dropped.
+    invalid_probes = round_outcome.get("invalid_probes") or {}
+    if invalid_probes:
+        lines.append("**Probes the reviewer marked invalid:**\n")
+        for filename, reason in invalid_probes.items():
+            lines.append(f"- `{filename}`: {reason}")
+        lines.append("")
+
+    return lines
+
+
+def _review_section(review_outcome: dict | None) -> str:
+    """The PR body's independent-review section (Task 4 — ADR-025 (fork);
+    the adversarial table is Task 5 — ADR-026 (fork)).
+
+    ``review_outcome`` is ``review.backend.ReviewAndFixResult.model_dump()``;
+    empty/absent (every workflow but ``coding/new-task-verified-v1``, or a
+    round that was skipped — budget exhausted, ``review_mode: none``) means
+    no section at all, not an empty placeholder.
+    """
+    if not review_outcome or not review_outcome.get("ran"):
+        return ""
+
+    rounds = review_outcome.get("rounds") or []
+    if review_outcome.get("mode") == "adversarial" and rounds:
+        lines = ["## Independent review (adversarial)\n"]
+        for round_outcome in rounds:
+            lines.append(
+                f"### Round {round_outcome.get('round_number')} — {round_outcome.get('verdict')}\n"
+            )
+            reviewed_sha = round_outcome.get("reviewed_sha") or ""
+            if reviewed_sha:
+                lines.append(f"Reviewed commit: `{reviewed_sha[:12]}`\n")
+            if round_outcome.get("stale_sha"):
+                lines.append(
+                    "⚠️ Verdict refused — the reviewed commit no longer matched the "
+                    "code by the time the review finished.\n"
+                )
+            lines.extend(_render_round_probes_and_findings(round_outcome))
+        if review_outcome.get("unresolved"):
+            lines.append(
+                f"**Unresolved** after {len(rounds)} round(s) "
+                f"(stopped: {review_outcome.get('stopped_reason')}) — "
+                f"on_unresolved: `{review_outcome.get('on_unresolved')}`.\n"
+            )
+        return "\n".join(lines) + "\n"
+
+    verdict = review_outcome.get("verdict")
+    lines = ["## Independent review (advisory)\n", f"**Verdict:** {verdict}\n"]
+    reviewed_sha = review_outcome.get("reviewed_sha") or ""
+    if reviewed_sha:
+        lines.append(f"Reviewed commit: `{reviewed_sha[:12]}`\n")
+    lines.extend(_render_round_probes_and_findings(review_outcome))
     return "\n".join(lines) + "\n"
+
+
+def apply_unresolved_label(repo_dir: str, repo_url: str, pr_url: str) -> None:
+    """Add the ``review:unresolved`` label (Task 5 — ADR-026 (fork)).
+
+    ``on_unresolved: pr_with_warning`` (the default) still ships the PR when
+    the adversarial loop exhausts ``max_iterations`` still NOT_READY — this
+    is the warning. Best-effort and non-fatal, same as the other PR-body
+    cosmetic steps: the PR itself must not be lost over a label.
+    """
+    result = run_cmd(
+        ["gh", "pr", "edit", pr_url, "--repo", repo_url, "--add-label", "review:unresolved"],
+        label="apply-unresolved-label",
+        cwd=repo_dir,
+        check=False,
+    )
+    if result.returncode != 0:
+        log(
+            "WARN",
+            f"failed to add review:unresolved label to {pr_url} (non-fatal, rc="
+            f"{result.returncode}): {result.stderr.strip() if result.stderr else '(no stderr)'}",
+        )
 
 
 def _append_pr_appendix(repo_dir: str, repo_url: str, pr_url: str, appendix: str) -> None:

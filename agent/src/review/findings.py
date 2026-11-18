@@ -7,6 +7,13 @@ finding's ``id``. Output that doesn't fit the contract is never silently
 dropped or guessed at: it is forced to ``NOT_READY`` with ``parse_error``
 explaining why, per the Task 4 spec ("output that can't be parsed is treated
 as NOT-READY").
+
+Task 5 (ADR-026 (fork)) amendment 2: Call 2 may also mark a probe invalid —
+testing behavior the issue never asked for — via an optional
+``INVALID_PROBES:`` JSON block, same fenced-or-bare shape and the same
+"doesn't fit the contract -> NOT_READY" rule as ``FINDINGS:``. Absent
+entirely, it is valid and empty: blocking stays Call 2's verdict, not raw
+probe failures, so a review that never needs this still reports normally.
 """
 
 from __future__ import annotations
@@ -30,6 +37,11 @@ _VERDICT_LINE_RE = re.compile(r"^\s*VERDICT:\s*(READY|NOT-READY)\s*$", re.MULTIL
 # array (no fence) is accepted too, for a model that drops the fence.
 _FENCED_FINDINGS_RE = re.compile(r"FINDINGS:\s*```(?:json)?\s*(\[.*?\])\s*```", re.DOTALL)
 _BARE_FINDINGS_RE = re.compile(r"FINDINGS:\s*(\[.*\])", re.DOTALL)
+# Task 5 amendment 2: same fenced-or-bare shape, under its own marker.
+_FENCED_INVALID_PROBES_RE = re.compile(
+    r"INVALID_PROBES:\s*```(?:json)?\s*(\[.*?\])\s*```", re.DOTALL
+)
+_BARE_INVALID_PROBES_RE = re.compile(r"INVALID_PROBES:\s*(\[.*\])", re.DOTALL)
 
 
 class Finding(BaseModel):
@@ -56,6 +68,10 @@ class ReviewOutcome(BaseModel):
     # Set only when the raw text didn't fit the contract — `verdict` is then
     # always NOT_READY regardless of what the model wrote.
     parse_error: str | None = None
+    # Task 5 amendment 2: filename -> Call 2's reasoning for marking that
+    # probe invalid (tests behavior the issue never asked for). Empty when
+    # Call 2 never wrote an INVALID_PROBES: block.
+    invalid_probes: dict[str, str] = Field(default_factory=dict)
 
 
 def _not_ready(reason: str) -> ReviewOutcome:
@@ -89,6 +105,43 @@ def _parse_finding(raw: Any, index: int) -> Finding | str:
     )
 
 
+def _parse_invalid_probes(text: str) -> dict[str, str] | str:
+    """Return the ``INVALID_PROBES:`` map, or a string describing why it's invalid.
+
+    Absent entirely is valid and empty — this block is optional (Task 5
+    amendment 2), unlike ``FINDINGS:`` which must be present once the
+    ``FINDINGS:`` marker itself appears.
+    """
+    if "INVALID_PROBES:" not in text:
+        return {}
+
+    match = _FENCED_INVALID_PROBES_RE.search(text) or _BARE_INVALID_PROBES_RE.search(text)
+    if match is None:
+        return "INVALID_PROBES: present but no JSON array found"
+
+    try:
+        raw = json.loads(match.group(1))
+    except json.JSONDecodeError as e:
+        return f"INVALID_PROBES JSON did not parse: {e}"
+    if not isinstance(raw, list):
+        return "INVALID_PROBES JSON was not a list"
+
+    invalid_probes: dict[str, str] = {}
+    for i, entry in enumerate(raw, start=1):
+        if not isinstance(entry, dict):
+            return f"INVALID_PROBES entry {i} was not an object"
+        filename, reason = entry.get("filename"), entry.get("reason")
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or not isinstance(reason, str)
+            or not reason
+        ):
+            return f"INVALID_PROBES entry {i} missing required field(s): filename, reason"
+        invalid_probes[filename] = reason
+    return invalid_probes
+
+
 def parse_review_output(text: str) -> ReviewOutcome:
     """Parse Call 2's raw text into a verdict plus evidence-citing findings."""
     verdict_match = _VERDICT_LINE_RE.search(text)
@@ -96,9 +149,13 @@ def parse_review_output(text: str) -> ReviewOutcome:
         return _not_ready("no 'VERDICT: READY' or 'VERDICT: NOT-READY' line found")
     verdict: Verdict = "READY" if verdict_match.group(1) == "READY" else "NOT_READY"
 
+    invalid_probes = _parse_invalid_probes(text)
+    if isinstance(invalid_probes, str):
+        return _not_ready(invalid_probes)
+
     if "FINDINGS:" not in text:
         # No FINDINGS marker at all is valid — nothing to report.
-        return ReviewOutcome(verdict=verdict, findings=[])
+        return ReviewOutcome(verdict=verdict, findings=[], invalid_probes=invalid_probes)
 
     findings_match = _FENCED_FINDINGS_RE.search(text) or _BARE_FINDINGS_RE.search(text)
     if findings_match is None:
@@ -117,4 +174,4 @@ def parse_review_output(text: str) -> ReviewOutcome:
         if isinstance(parsed, str):
             return _not_ready(parsed)
         findings.append(parsed)
-    return ReviewOutcome(verdict=verdict, findings=findings)
+    return ReviewOutcome(verdict=verdict, findings=findings, invalid_probes=invalid_probes)

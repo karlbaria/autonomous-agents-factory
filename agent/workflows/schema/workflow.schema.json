@@ -228,6 +228,21 @@
             "type": "integer",
             "description": "For review_and_fix: the turn cap for each reviewer call, separate from the coder's run_agent step limit.",
             "minimum": 1
+          },
+          "max_iterations": {
+            "type": "integer",
+            "description": "For review_and_fix, review_mode: adversarial (Task 5 — ADR-026 (fork)): the bounded fix loop's cap on review rounds. Defaults to 2 when omitted.",
+            "minimum": 1
+          },
+          "block_on_severity": {
+            "type": "string",
+            "description": "For review_and_fix, review_mode: adversarial (Task 5 — ADR-026 (fork)): the floor severity an evidence-backed `issue` finding needs to force NOT-READY. Defaults to 'major' when omitted.",
+            "enum": ["minor", "medium", "major", "critical"]
+          },
+          "on_unresolved": {
+            "type": "string",
+            "description": "For review_and_fix, review_mode: adversarial (Task 5 — ADR-026 (fork)): what happens when max_iterations is exhausted still NOT_READY. 'pr_with_warning' (default) still opens the PR with the review:unresolved label; 'fail' fails the task instead.",
+            "enum": ["fail", "pr_with_warning"]
           }
         }
       }
