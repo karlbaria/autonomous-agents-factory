@@ -769,6 +769,25 @@ class TestRunAgentHandler:
         details = progress.details[progress.milestones.index("stage_costs")]
         assert json.loads(details) == {"coder": 0.02}
 
+    def test_stage_costs_printed_to_stdout(self, capfd):
+        # Local runs (run.sh) have no LOG_GROUP_NAME/TASK_EVENTS_TABLE_NAME, so
+        # trajectory/progress are silent no-ops there — a plain log() line is
+        # what makes the stage visible in that path.
+        from workflow.runner import _handle_run_agent
+
+        wf = _workflow([{"kind": "run_agent"}])
+        ctx = _real_ctx(wf, system_prompt="go")
+
+        async def fake_run_agent(_p, _s, _c, cwd=None, trajectory=None):
+            return AgentResult(status="success", cost_usd=0.0136, num_turns=5)
+
+        with patch("runner.run_agent", side_effect=fake_run_agent):
+            _handle_run_agent(wf.steps[0], ctx)
+
+        out = capfd.readouterr().out
+        assert "stage_costs" in out
+        assert "coder" in out
+
     def test_budget_exhausted_skips_the_agent_call(self):
         # Below the SDK's $0.01 minimum ⇒ don't even call run_agent.
         from workflow.runner import _handle_run_agent

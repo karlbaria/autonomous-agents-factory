@@ -469,6 +469,7 @@ def _record_stage_cost(
     """
     ctx.ledger.record(stage=stage, cost_usd=cost_usd, turns=turns, model=model)
     stage_costs = ctx.ledger.stage_costs()
+    log("AGENT", f"stage_costs={stage_costs}")
     if ctx.trajectory is not None:
         ctx.trajectory.write_stage_costs(stage_costs)
     if ctx.progress is not None:
