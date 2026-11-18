@@ -55,6 +55,24 @@ when { context.file_path like ".git/*" };
 forbid (principal, action == Agent::Action::"write_file", resource)
 when { context.file_path like "*/.git/*" };
 
+// Task 4 (ADR-025 (fork)): the probe writer (Call 1) may write only inside
+// its scratch directory. `outside_scratch_dir` is computed by PolicyEngine
+// from `scratch_write_root` and is False for every caller that doesn't set
+// one, so this rule is dormant everywhere except the probe-writer call.
+@tier("hard")
+@rule_id("review_probe_writer_write_outside_scratch")
+forbid (principal, action == Agent::Action::"write_file", resource)
+when { context.outside_scratch_dir == true };
+
+// Task 4 (ADR-025 (fork)): the probe writer (Call 1) may read only inside
+// its base-branch worktree and its scratch directory.
+// `outside_allowed_read_roots` is computed by PolicyEngine from
+// `allowed_read_roots` and is False for every caller that doesn't set one.
+@tier("hard")
+@rule_id("review_probe_writer_read_outside_allowed_roots")
+forbid (principal, action == Agent::Action::"read_file", resource)
+when { context.outside_allowed_read_roots == true };
+
 // Reject any SQL DROP TABLE through Bash — agents should not be running
 // destructive DDL against production or dev databases without a human
 // in the loop. Hard-deny because even "just testing locally" is a common

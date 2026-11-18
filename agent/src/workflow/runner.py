@@ -735,6 +735,47 @@ def _handle_deliver_artifact(step: Step, ctx: StepContext) -> StepOutcome:
     )
 
 
+def _handle_review_and_fix(step: Step, ctx: StepContext) -> StepOutcome:
+    """Run one round of the independent two-call review (Task 4 — ADR-025 (fork)).
+
+    Thin wrapper over ``review.backend.run_review_and_fix``: it shares
+    ``ctx.ledger`` with the coder's ``run_agent`` call that already ran
+    earlier in this same ``StepContext`` (Task 3), so coder and reviewer
+    costs land in one ledger. Advisory only in Task 4 (``review_mode:
+    adversarial``'s fix loop is Task 5) — the review never fails this step;
+    the coder's PR must ship regardless of whether the review itself could
+    run.
+    """
+    from config import AGENT_WORKSPACE
+    from review import run_review_and_fix
+
+    if ctx.setup is None:
+        return StepOutcome(
+            kind=step.kind,
+            name=_step_key(step),
+            status="failed",
+            error="review_and_fix requires a cloned repo (no clone_repo step ran)",
+        )
+
+    result = run_review_and_fix(
+        config=ctx.config,
+        setup=ctx.setup,
+        ledger=ctx.ledger,
+        progress=ctx.progress,
+        trajectory=ctx.trajectory,
+        review_mode=step.review_mode or "advisory",
+        reviewer_model=step.reviewer_model,
+        reviewer_max_turns=step.reviewer_max_turns,
+        workspace_base_dir=AGENT_WORKSPACE,
+    )
+    return StepOutcome(
+        kind=step.kind,
+        name=_step_key(step),
+        status="succeeded",
+        data={"review_outcome": result.model_dump(mode="json")},
+    )
+
+
 STEP_HANDLERS: dict[str, StepHandler] = {
     "clone_repo": _handle_clone_repo,
     "hydrate_context": _handle_hydrate_context,
@@ -744,4 +785,5 @@ STEP_HANDLERS: dict[str, StepHandler] = {
     "ensure_pr": _handle_ensure_pr,
     "post_review": _handle_post_review,
     "deliver_artifact": _handle_deliver_artifact,
+    "review_and_fix": _handle_review_and_fix,
 }

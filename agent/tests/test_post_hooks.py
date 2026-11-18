@@ -291,6 +291,120 @@ class TestEnsurePrCreate:
         assert run_cmd.cmd_for("create-pr") is not None
 
 
+class TestEnsurePrReviewSummary:
+    """Task 4 (ADR-025 (fork)): the PR body's cost-breakdown + review section."""
+
+    def _create_pr(self, monkeypatch, **ensure_pr_kwargs):
+        def responder(cmd):
+            if "view" in cmd:
+                return _cp(returncode=1, stderr="no pr")
+            if "log" in cmd and "--reverse" in cmd:
+                return _cp(returncode=0, stdout="feat: do the thing\n")
+            if "log" in cmd:
+                return _cp(returncode=0, stdout="feat: do the thing\n\n---")
+            return _cp()
+
+        sub = _SubprocessRunRecorder(responder=responder)
+        run_cmd = _RunCmdRecorder(stdouts={"create-pr": "https://github.com/o/r/pull/42\n"})
+        monkeypatch.setattr(post_hooks, "ensure_pushed", lambda d, b: True)
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        post_hooks.ensure_pr(
+            _config(),
+            _setup(),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+            **ensure_pr_kwargs,
+        )
+        create_cmd = run_cmd.cmd_for("create-pr")
+        return create_cmd[create_cmd.index("--body") + 1]
+
+    def test_no_ledger_or_review_outcome_is_unchanged_from_pre_task_4(self, monkeypatch):
+        from models import AgentResult
+
+        body = self._create_pr(monkeypatch, agent_result=AgentResult(cost_usd=0.1523))
+        assert "Agent cost: **$0.1523**" in body
+        assert "Independent review" not in body
+
+    def test_ledger_with_only_coder_stage_shows_single_total(self, monkeypatch):
+        from models import AgentInvocationLedger
+
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=0.15, turns=5, model="m")
+        body = self._create_pr(monkeypatch, ledger=ledger)
+        assert "Agent cost: **$0.1500**" in body
+        assert "coder: $" not in body  # no breakdown with only one stage
+        assert "Independent review" not in body
+
+    def test_ledger_with_reviewer_stages_shows_breakdown(self, monkeypatch):
+        from models import AgentInvocationLedger
+
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=0.10, turns=5, model="m")
+        ledger.record(stage="probe_writer", cost_usd=0.01, turns=2, model="r")
+        ledger.record(stage="code_reviewer", cost_usd=0.02, turns=3, model="r")
+        body = self._create_pr(monkeypatch, ledger=ledger)
+        assert "Agent cost: **$0.1300**" in body
+        assert "coder: $0.1000" in body
+        assert "probe_writer: $0.0100" in body
+        assert "code_reviewer: $0.0200" in body
+
+    def test_review_outcome_renders_probes_and_findings(self, monkeypatch):
+        from models import AgentInvocationLedger
+
+        ledger = AgentInvocationLedger()
+        ledger.record(stage="coder", cost_usd=0.10, turns=5, model="m")
+        review_outcome = {
+            "ran": True,
+            "verdict": "NOT_READY",
+            "reviewed_sha": "abc123def4567890",
+            "probe_results": [
+                {"probe": {"filename": "test_pass.py", "intent": "happy path"}, "passed": True},
+                {"probe": {"filename": "test_fail.py", "intent": "known gap"}, "passed": False},
+            ],
+            "committed_probe_paths": ["tests/review_probes/test_pass.py"],
+            "findings": [
+                {
+                    "type": "issue",
+                    "severity": "major",
+                    "title": "Missing validation",
+                    "description": "No bounds check.",
+                    "evidence": "app.py:12",
+                }
+            ],
+            "parse_error": None,
+        }
+        body = self._create_pr(monkeypatch, ledger=ledger, review_outcome=review_outcome)
+        assert "Independent review (advisory)" in body
+        assert "**Verdict:** NOT_READY" in body
+        assert "abc123def456" in body
+        assert "✅ PASS" in body and "test_pass.py" in body
+        assert "❌ FAIL" in body and "test_fail.py" in body
+        assert "1 passing probe(s) committed" in body
+        assert "Missing validation" in body and "app.py:12" in body
+
+    def test_review_outcome_not_ran_renders_nothing(self, monkeypatch):
+        body = self._create_pr(
+            monkeypatch, review_outcome={"ran": False, "skipped_reason": "budget_exhausted"}
+        )
+        assert "Independent review" not in body
+
+    def test_review_outcome_parse_error_surfaced_when_no_findings(self, monkeypatch):
+        review_outcome = {
+            "ran": True,
+            "verdict": "NOT_READY",
+            "reviewed_sha": "",
+            "probe_results": [],
+            "committed_probe_paths": [],
+            "findings": [],
+            "parse_error": "no VERDICT line found",
+        }
+        body = self._create_pr(monkeypatch, review_outcome=review_outcome)
+        assert "could not be parsed: no VERDICT line found" in body
+
+
 class TestExtractAgentNotes:
     """``_extract_agent_notes`` reads the "## Agent notes" section of the PR body."""
 

@@ -267,6 +267,12 @@ class TaskConfig(BaseModel):
     # Attachments from the orchestrator payload. Validated as
     # AttachmentConfig models. Empty list for tasks without attachments.
     attachments: list[AttachmentConfig] = Field(default_factory=list)
+    # Task 4 (ADR-025 (fork)): set only for the probe writer's call
+    # (review/backend.py). Threaded straight through to PolicyEngine's
+    # ``allowed_read_roots``/``scratch_write_root`` (runner.py); None for
+    # every other call, which keeps the two confinement rules dormant.
+    allowed_read_roots: list[str] | None = None
+    scratch_write_root: str | None = None
 
     @model_validator(mode="after")
     def _validate_trace_requires_user_id(self) -> Self:

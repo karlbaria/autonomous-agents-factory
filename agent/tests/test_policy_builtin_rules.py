@@ -37,6 +37,11 @@ class Call(NamedTuple):
     tool: str
     target: str  # Bash: the command. Write and Edit: the file path.
     read_only: bool = False  # the task runs a read-only workflow
+    # Task 4 (ADR-025 (fork)): the probe-writer confinement rules key off
+    # these PolicyEngine constructor options, not off task_type/read_only —
+    # None for every row except the two rows that exist for them.
+    scratch_write_root: str | None = None
+    allowed_read_roots: tuple[str, ...] | None = None
 
 
 # rule id -> (tier, calls it must catch, a similar call it must leave alone)
@@ -129,6 +134,46 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
         [Call("Write", ".aws/credentials"), Call("Edit", "credentials.json")],
         Call("Write", "src/auth/login.py"),
     ),
+    "review_probe_writer_write_outside_scratch": (
+        "hard",
+        [
+            Call(
+                "Write",
+                "/workspace/review_worktree/app/main.py",
+                scratch_write_root="/workspace/review_scratch",
+            ),
+            Call(
+                "Edit",
+                "/workspace/coder_repo/app/main.py",
+                scratch_write_root="/workspace/review_scratch",
+            ),
+        ],
+        Call(
+            "Write",
+            "/workspace/review_scratch/test_probe.py",
+            scratch_write_root="/workspace/review_scratch",
+        ),
+    ),
+    "review_probe_writer_read_outside_allowed_roots": (
+        "hard",
+        [
+            Call(
+                "Read",
+                "/workspace/coder_repo/app/main.py",
+                allowed_read_roots=("/workspace/review_worktree", "/workspace/review_scratch"),
+            ),
+            Call(
+                "Grep",
+                "/etc/passwd",
+                allowed_read_roots=("/workspace/review_worktree", "/workspace/review_scratch"),
+            ),
+        ],
+        Call(
+            "Read",
+            "/workspace/review_worktree/app/main.py",
+            allowed_read_roots=("/workspace/review_worktree", "/workspace/review_scratch"),
+        ),
+    ),
 }
 
 # Every task type a workflow can run as: the Cedar principal. A built-in rule
@@ -143,7 +188,13 @@ _ON_PURPOSE = (
 
 
 def _decide(call: Call, task_type: str = "new_task") -> PolicyDecision:
-    engine = PolicyEngine(task_type=task_type, repo="owner/repo", read_only=call.read_only)
+    engine = PolicyEngine(
+        task_type=task_type,
+        repo="owner/repo",
+        read_only=call.read_only,
+        scratch_write_root=call.scratch_write_root,
+        allowed_read_roots=list(call.allowed_read_roots) if call.allowed_read_roots else None,
+    )
     key = "command" if call.tool == "Bash" else "file_path"
     return engine.evaluate_tool_use(call.tool, {key: call.target})
 

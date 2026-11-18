@@ -117,6 +117,16 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     readOnly: false,
     requiredInputs: { oneOf: ['issue_number', 'task_description'] },
   },
+  // Task 4 (ADR-025 (fork)): coding/new-task-v1 plus an advisory review_and_fix
+  // step between the coder and the build/PR gates. Same admission contract as
+  // new-task-v1 (writeable, repo-bound, issue_number/task_description).
+  'coding/new-task-verified-v1': {
+    id: 'coding/new-task-verified-v1',
+    version: '1.0.0',
+    requiresRepo: true,
+    readOnly: false,
+    requiredInputs: { oneOf: ['issue_number', 'task_description'] },
+  },
   'coding/pr-iteration-v1': {
     id: 'coding/pr-iteration-v1',
     version: '1.0.0',

@@ -288,6 +288,8 @@ def _initialize_policy_engine_and_hooks(
         repo=config.repo_url,
         read_only=config.read_only,
         extra_policies=cedar_policies or None,
+        allowed_read_roots=config.allowed_read_roots,
+        scratch_write_root=config.scratch_write_root,
         **engine_kwargs,
     )
     # Surface the resolved cap + its source so operators can distinguish a

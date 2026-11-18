@@ -36,6 +36,7 @@ NEEDS_INPUT_MARKER = "[[ABCA_NEEDS_INPUT]]"
 _KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(
     (
         "coding/new-task-v1",
+        "coding/new-task-verified-v1",
         "coding/pr-iteration-v1",
         "coding/restack-v1",
     )
