@@ -43,7 +43,17 @@ if TYPE_CHECKING:
 # Distinct from the coder's default model (models.TaskConfig.anthropic_model)
 # so a reviewer that doesn't override `reviewer_model` still gets a second,
 # independent opinion rather than the same model reviewing itself.
-DEFAULT_REVIEWER_MODEL = "global.anthropic.claude-sonnet-5-5"
+#
+# Must be one of `DEFAULT_BEDROCK_MODEL_IDS`
+# (cdk/src/handlers/shared/bedrock-model-constants.ts) — that list is what
+# `AgentSessionRole` and the runtime role actually grant `bedrock:InvokeModel*`
+# on. Sonnet 5.5 is deliberately NOT on that list (no `jp.` cross-Region
+# inference profile), so it was never invocable on a deployed stack: every
+# review call AccessDenied there, even though local runs (which use a
+# broader personal AWS profile, not the scoped AgentSessionRole) never saw
+# it. `claude-sonnet-4-6` is on the list and still distinct from the coder's
+# `claude-opus-5-5`.
+DEFAULT_REVIEWER_MODEL = "global.anthropic.claude-sonnet-4-6"
 DEFAULT_REVIEWER_MAX_TURNS = 15
 
 # Duplicated from workflow/runner.py's _MIN_CALL_BUDGET_USD rather than

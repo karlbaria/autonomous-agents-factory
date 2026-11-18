@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -341,3 +342,38 @@ class TestMalformedReviewOutputNeverBlocksDelivery:
         assert result.ran is True
         assert result.verdict == "NOT_READY"
         assert result.parse_error is not None
+
+
+class TestDefaultReviewerModelIsGranted:
+    """Regression test for #17: the default reviewer model must be one
+    `AgentSessionRole` actually grants `bedrock:InvokeModel*` on, or every
+    review call AccessDenies on a deployed stack (the coder's own model
+    never hits this because it's always a granted platform default).
+
+    This list can't import `DEFAULT_BEDROCK_MODEL_IDS`
+    (cdk/src/handlers/shared/bedrock-model-constants.ts) — it's a Python
+    package — so it's duplicated here as the bare model ids that file
+    grants today. Sonnet 5.5 is deliberately absent from both: it has no
+    `jp.` cross-Region inference profile.
+    """
+
+    _GRANTED_BARE_MODEL_IDS: ClassVar[set[str]] = {
+        "anthropic.claude-sonnet-4-6",
+        "anthropic.claude-opus-4-8",
+        "anthropic.claude-opus-5",
+        "anthropic.claude-haiku-4-5-20251001-v1:0",
+        "anthropic.claude-opus-5-5",
+        "anthropic.claude-haiku-5-5",
+    }
+
+    def test_default_reviewer_model_is_on_the_granted_list(self):
+        from review.backend import DEFAULT_REVIEWER_MODEL
+
+        bare_model_id = DEFAULT_REVIEWER_MODEL.removeprefix("global.")
+        assert bare_model_id in self._GRANTED_BARE_MODEL_IDS
+
+    def test_default_reviewer_model_is_not_sonnet_5_5(self):
+        """Sonnet 5.5 has no `jp.` profile and must never become the default again."""
+        from review.backend import DEFAULT_REVIEWER_MODEL
+
+        assert "claude-sonnet-5-5" not in DEFAULT_REVIEWER_MODEL
