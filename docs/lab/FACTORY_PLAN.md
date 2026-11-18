@@ -23,6 +23,12 @@
   - **Task 15 requires Slack approval before filing anything:** the proposed epic/stories, an estimated cost (from the Task 3 ledger averages), and a Confluence draft link are posted to Slack with Approve/Revise/Cancel buttons; only a Slack user linked to a factory Cognito user can approve; plans over a story-count or cost threshold need a second confirmation; unanswered plans expire with nothing filed; the approver and time are recorded on the Jira parent.
   - **Fork-only scope:** All changes from Task 3 on are confined to this fork. Nothing is proposed or contributed upstream to `aws-samples`. ADRs are fork ADRs, titled "ADR-0NN (fork): …". ABCA's ADR-003 issue-approval rule applies within the fork: the owner adds the `approved` label to each issue before work starts. PRs always target the fork's `main`, never `aws-samples`. `LICENSE` and `NOTICE` are kept.
 - **2026-11-18 (Rollback and safety):** Rollback and safety checklist adopted; first known-good tag is `known-good-task2b`.
+- **2026-11-18 (Planning: Tasks 15.5–17):** Added Task 15.5 (switch the target app repo), Task 16 (IaC and pipeline deploys for the target app repo), and Task 17 (preview smoke test and opt-in auto-merge on green) to Track B, after Task 15. **Decided order:** Track B is now 13 → 14 → 15 → 15.5 → 16 → 17.
+  - **Same AWS account as the factory** — a demo, not a multi-environment setup. App resources use their own stack names and the tag `project=factory-sandbox-app`.
+  - **Repo-agnostic design:** the "target app repo" is any repo onboarded to the factory. App-specific files (GitHub Actions workflows, CDK app, build command) live in each app repo. Factory-side settings are per repo in ABCA's repo config. Never hardcode a repo name.
+  - **Tasks 16–17 target web-facing apps.** Frontend previews use AWS Amplify Hosting PR previews, which ABCA's deploy-preview screenshots support natively via Amplify `check_run` events, and Amplify deletes previews when a PR closes. Backend resources use AWS CDK, reusing the account's existing CDK bootstrap. No Terraform.
+  - **GitHub Free plan:** Actions works on private repos (2,000 minutes a month), but required status checks can't block merges on private repos. So the factory, not GitHub, enforces "never merge red". Actions is enabled on target app repos only, never on the ABCA fork.
+  - **Preview exposure decision:** previews are public so screenshots work. This is acceptable for the demo only because they contain demo data only (no real users, secrets or internal content) and are deleted when the PR closes. It's a knowing, documented exception to private-by-default, recorded in the Task 17 ADR.
 
 ## How to use this plan with Claude Code
 
@@ -106,6 +112,7 @@ Build a software factory you can learn from piece by piece: orchestrator, determ
   - **Reviewer eval:** uses eval-harvester (aws-samples/sample-code-eval-harvester), plus seeded flaws and labels taken from coder eval results.
   - **Promotion gate:** CI requires both evals before a workflow can be marked `production`.
 - **Conventions:** follow ABCA's: an issue before each PR, mise tasks, tests in `agent/tests`, corpus fixtures, and an ADR for design changes.
+- **ADR policy:** write a fork ADR only for significant design decisions: the multi-call reviewer (Tasks 3–5), Confluence auth (14), feature planning and approval (15), IaC deploy policy (16), and auto-merge with public previews (17). Smaller tasks are recorded in their issue, PR and `LAB_LOG.md`.
 
 ## Background (from code research)
 
@@ -166,7 +173,7 @@ Choose a workflow per task with `--workflow`, or set a per-repo default. Compare
 
 ### Active order
 
-Track A (Task 3 → 4 → 5) runs first, then Track B (Task 13 → 14 → 15) — one task at a time, never in parallel. Tasks 6–12 are marked **Deferred (later)** below and are not scheduled until both tracks are done; their content is kept unchanged for when priority is revisited.
+Track A (Task 3 → 4 → 5) runs first, then Track B (Task 13 → 14 → 15 → 15.5 → 16 → 17) — one task at a time, never in parallel. Tasks 6–12 are marked **Deferred (later)** below and are not scheduled until both tracks are done; their content is kept unchanged for when priority is revisited.
 
 ### Task 1: Fork, fix local tooling, and run locally
 - Objective: a green fork, in its own Claude Code project folder, that runs a real task locally.
@@ -384,3 +391,36 @@ Track A (Task 3 → 4 → 5) runs first, then Track B (Task 13 → 14 → 15) �
   - Entry point: a Slack conversational request (`@Jarvis I want to build X`), distinct from today's "repo + instruction" task-submission parser, which currently falls back to "please include a repo" for anything it doesn't recognize as a direct coding instruction.
 - Tests: decompose-vs-single judgment on corpus fixtures (clear single-story asks vs. clear multi-story asks); nothing is filed in Jira or Confluence before approval; the approve, revise, cancel, and expiry paths each behave correctly; filed Jira structure is correct (flat vs. parent+subtasks with correct link direction) only after approval; the Confluence doc link is attached; no code is written and no PR is opened by this workflow itself.
 - Demo: `@Jarvis I want to build a tagging feature for factory-sandbox-py` produces a Slack proposal with Approve/Revise/Cancel buttons; after the requester approves in Slack, the epic and linked subtasks appear in Jira, the parent is labelled, and the existing orchestration starts the subtasks in dependency order.
+
+### Task 15.5: Switch the target app repo
+- Objective: replace `factory-sandbox-py` with a new web-facing app repo as the factory's target.
+- Guidance: create the new private web app repo with a simple frontend and a `mise run build` that runs its tests; scope the fine-grained PAT to it (or create a new one, stored in the Keychain); store it with `bgagent github set-token` against `backgroundagent-dev-factory`; `bgagent repo onboard` the new repo; update the Jira project mapping to point at it; optionally offboard `factory-sandbox-py`.
+- Demo: a small task submitted from the CLI opens a PR on the new repo with `build_passed: true`.
+
+### Task 16: IaC and pipeline deploys for the target app repo
+- Objective: the coding agent can write CDK for the app, which is checked automatically, and only a pipeline deploys it.
+- Guidance:
+  - Add a CDK app to the target app repo for its backend resources, and set up the Amplify Hosting app once (connected to the repo, PR previews on), by CDK or the console, documented.
+  - Add `cdk synth` and cdk-nag to the app repo's `mise run build`, so broken or insecure IaC fails the build gate.
+  - Add a GitHub Actions deploy workflow using **GitHub OIDC** (no stored AWS keys). Scope its role by **stack-name prefix**: CloudFormation actions only on `<app>-*` stacks, plus assuming the CDK bootstrap roles. No permission boundary, because the shared default bootstrap's CloudFormation role is Admin, so one can't be enforced. Add stronger scoping to the hardening backlog, alongside the least-privilege bootstrap. Document how to repeat this for a new app repo.
+  - The agent never deploys. Its credentials stay Bedrock-only.
+  - Add a Cedar soft-deny approval gate only for destructive IaC commands run by the agent (`cdk deploy`, `cdk destroy`). Routine IaC writes aren't gated by a human.
+  - Add to the reviewer's code-review guidance: flag risky IaC (public resources other than the documented Amplify previews, `*` IAM actions or resources, missing encryption) as major findings.
+  - Load the `builder-security` skill before designing anything reachable from the network.
+  - Write a fork ADR: "ADR-0NN (fork): agent writes IaC, the pipeline deploys it".
+- Tests: cdk-nag fails the build on a seeded insecure construct; the OIDC role can't act on factory stacks; the agent session can't call deploy APIs.
+- Demo: the agent adds a small infrastructure change in a PR; the build gate runs synth and cdk-nag; after merge, the pipeline deploys it.
+- Effort: about 2–3 sessions.
+
+### Task 17: Preview smoke test and auto-merge on green (opt-in)
+- Objective: each PR gets a live preview with a minimal automated check, and, when the opt-in is on, is merged automatically only if fully green.
+- Guidance:
+  - **Every gate is a GitHub commit status on the PR head SHA:** `factory/review` (posted by the factory reviewer: READY or NOT-READY), `factory/build`, and `factory/preview-smoke`. The only ABCA change in this task is that the reviewer posts `factory/review`.
+  - **Preview smoke test:** exactly **one** Playwright test (the preview page loads with HTTP 200 and a key element is visible), run in the app repo's GitHub Actions after the Amplify preview check succeeds. It posts `factory/preview-smoke`. No smoke-test suite. ABCA's existing deploy-preview screenshots run as well. Reviewer probes stay at the API and unit level.
+  - **The auto-merge watchdog is a reusable GitHub Actions workflow,** triggered on status events. If the repo's opt-in variable `FACTORY_AUTO_MERGE=true` is set and all three statuses are green on the head SHA, it merges. Off by default. GitHub's native auto-merge isn't used, because it needs branch protection, which Free private repos lack. It records who or what merged and when, on the PR and on the linked Jira issue.
+  - **If the branch is behind main,** v1 doesn't merge. It comments on the PR. Automatic update-and-recheck is a later improvement.
+  - No factory Lambdas for preview validation, watchdog or preview cleanup. Amplify handles cleanup.
+  - Merge stays human by default. Write a fork ADR: "ADR-0NN (fork): opt-in auto-merge on green and public demo previews", noting the departure from ABCA's VISION principle that merge authority stays human, and the public-preview exception, and why both are acceptable for this demo.
+- Tests: the watchdog merges only when all three statuses are green on the head SHA and the opt-in is on; it never merges red, missing or stale statuses, or a branch behind main; it does nothing when the opt-in is off; nothing references a hardcoded repo name.
+- Demo: with auto-merge on, a green factory PR merges itself after its preview smoke test passes. A PR with a failing check stays open, with the red status visible. Amplify removes the preview after the PR closes.
+- Effort: about 1.5–2 sessions.
