@@ -187,7 +187,7 @@
           "kind": {
             "type": "string",
             "description": "Dispatches to a registered step handler.",
-            "enum": ["clone_repo", "hydrate_context", "run_agent", "verify_build", "verify_lint", "ensure_pr", "post_review", "deliver_artifact"]
+            "enum": ["clone_repo", "hydrate_context", "run_agent", "verify_build", "verify_lint", "ensure_pr", "post_review", "deliver_artifact", "review_and_fix"]
           },
           "name": {
             "type": "string",
@@ -213,6 +213,21 @@
             "type": "string",
             "description": "For deliver_artifact: the name of a registered Python deliverer (workflow/deliverers.py / DELIVERERS) to route the produced output through. Open string, not a closed enum, so a new delivery method is a registered deliverer, not a schema change (ADR-014 addendum 2026-06-08). First-party names: s3, comment, s3_and_comment. Each deliverer declares the terminal outcomes it produces; validator rule 11 consults that registry.",
             "minLength": 1
+          },
+          "review_mode": {
+            "type": "string",
+            "description": "For review_and_fix: advisory (Task 4 — findings/probe failures are reported but never block the task) or adversarial (Task 5 — findings send the work back to the coder, bounded by max_iterations). 'none' disables the step without removing it.",
+            "enum": ["advisory", "adversarial", "none"]
+          },
+          "reviewer_model": {
+            "type": "string",
+            "description": "For review_and_fix: the Bedrock model id both reviewer calls (probe writer, code reviewer) use. Defaults to a model distinct from the coder's (see review/backend.py) when omitted.",
+            "minLength": 1
+          },
+          "reviewer_max_turns": {
+            "type": "integer",
+            "description": "For review_and_fix: the turn cap for each reviewer call, separate from the coder's run_agent step limit.",
+            "minimum": 1
           }
         }
       }
@@ -380,7 +395,7 @@
           "steps": {
             "items": {
               "properties": {
-                "kind": { "not": { "enum": ["clone_repo", "ensure_pr", "post_review", "verify_build", "verify_lint"] } }
+                "kind": { "not": { "enum": ["clone_repo", "ensure_pr", "post_review", "verify_build", "verify_lint", "review_and_fix"] } }
               }
             }
           },

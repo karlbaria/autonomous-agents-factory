@@ -37,11 +37,16 @@ _HANDLER_KINDS = frozenset(STEP_HANDLERS)
 
 # Steps that produce an external side effect — may not be marked on_failure:
 # continue (rule 12), and used by the repo-less shape check (rule 3).
-_SIDE_EFFECTING_KINDS = frozenset({"ensure_pr", "post_review", "deliver_artifact"})
+# review_and_fix is here because its final action — committing the probes
+# that pass on the final code (Task 4 — ADR-025 (fork)) — is a repo mutation,
+# even though the step is otherwise advisory and never gates the task.
+_SIDE_EFFECTING_KINDS = frozenset(
+    {"ensure_pr", "post_review", "deliver_artifact", "review_and_fix"}
+)
 
 # Steps that only make sense when a repo is cloned (rule 3 / rule 7).
 _REPO_ONLY_KINDS = frozenset(
-    {"clone_repo", "ensure_pr", "post_review", "verify_build", "verify_lint"}
+    {"clone_repo", "ensure_pr", "post_review", "verify_build", "verify_lint", "review_and_fix"}
 )
 
 # Built-in (Phase 1-3) policy modules / MCP servers. Registry refs (registry://)

@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
@@ -775,12 +776,26 @@ class PolicyEngine:
         approval_gate_cap: int = DEFAULT_APPROVAL_GATE_CAP,
         initial_approval_gate_count: int = 0,
         task_default_timeout_s: int = DEFAULT_TASK_TIMEOUT_S,
+        allowed_read_roots: list[str] | None = None,
+        scratch_write_root: str | None = None,
     ) -> None:
         self._task_type = task_type
         self._repo = repo
         self._read_only = read_only
         self._disabled = False
         self._task_default_timeout_s = task_default_timeout_s
+        # Task 4 (ADR-025 (fork)): the probe writer's call is confined to its
+        # base-branch worktree + scratch directory for reads, and to the
+        # scratch directory alone for writes. Both are None for every other
+        # caller, which keeps `outside_scratch_dir`/`outside_allowed_read_roots`
+        # permanently False below — the two new hard-deny rules are dormant
+        # for every workflow that doesn't set them.
+        self._allowed_read_roots = (
+            [os.path.normpath(r) for r in allowed_read_roots] if allowed_read_roots else None
+        )
+        self._scratch_write_root = (
+            os.path.normpath(scratch_write_root) if scratch_write_root else None
+        )
 
         # Bounds check on approval_gate_cap (decision #13).
         if not APPROVAL_GATE_CAP_MIN <= approval_gate_cap <= APPROVAL_GATE_CAP_MAX:
@@ -1148,6 +1163,34 @@ class PolicyEngine:
             return "no_decision", list(result.diagnostics.reasons)
         return decision, list(result.diagnostics.reasons)
 
+    # ---- Task 4 (ADR-025 (fork)): path confinement for the probe writer ----
+
+    @staticmethod
+    def _path_outside(path: str, roots: list[str]) -> bool:
+        """Whether ``path`` is not under any of ``roots`` (normalized prefix match)."""
+        normalized = os.path.normpath(path)
+        return not any(normalized == root or normalized.startswith(root + os.sep) for root in roots)
+
+    def _outside_scratch_dir(self, file_path: str) -> bool:
+        """Whether a write targets outside the configured scratch directory.
+
+        Always ``False`` when no ``scratch_write_root`` was configured — this
+        is the dormant default for every workflow except Task 4's probe
+        writer.
+        """
+        if self._scratch_write_root is None:
+            return False
+        return self._path_outside(file_path, [self._scratch_write_root])
+
+    def _outside_allowed_read_roots(self, file_path: str) -> bool:
+        """Whether a read targets outside every configured allowed-read root.
+
+        Always ``False`` when no ``allowed_read_roots`` was configured.
+        """
+        if self._allowed_read_roots is None:
+            return False
+        return self._path_outside(file_path, self._allowed_read_roots)
+
     # ---- Three-outcome pipeline -------------------------------------------
 
     def evaluate_tool_use(self, tool_name: str, tool_input: dict) -> PolicyDecision:
@@ -1374,10 +1417,33 @@ class PolicyEngine:
                     "write_file",
                     "Agent::File",
                     "file",
-                    {**base_context, "file_path": file_path},
+                    {
+                        **base_context,
+                        "file_path": file_path,
+                        "outside_scratch_dir": self._outside_scratch_dir(file_path),
+                    },
                 )
                 if write_decision == "deny":
                     return ("deny", write_reasons)
+
+        # Read/Glob/Grep: evaluate read_file with file_path/path in context —
+        # a no-op (outside_allowed_read_roots always False) unless the caller
+        # set allowed_read_roots (Task 4's probe writer).
+        if tool_name in ("Read", "Glob", "Grep"):
+            read_path = tool_input.get("file_path") or tool_input.get("path", "")
+            if read_path:
+                read_decision, read_reasons = _run(
+                    "read_file",
+                    "Agent::File",
+                    "file",
+                    {
+                        **base_context,
+                        "file_path": read_path,
+                        "outside_allowed_read_roots": self._outside_allowed_read_roots(read_path),
+                    },
+                )
+                if read_decision == "deny":
+                    return ("deny", read_reasons)
 
         # Bash: evaluate execute_bash with command in context.
         if tool_name == "Bash":

@@ -222,19 +222,30 @@ def _execute_agent_step(
     trajectory,
     progress,
     ledger: AgentInvocationLedger | None = None,
+    review_outcome_out: dict | None = None,
 ):
-    """Run the agentic step through the workflow step runner.
+    """Run the agentic step (and, for a workflow that declares one, the review
+    step) through the workflow step runner.
 
-    Post-cutover (#248 task 8), the workflow runner is the sole path: the single
-    ``run_agent`` step is dispatched through ``workflow.run_workflow`` —
-    exercising the real handler registry, step milestones, and result threading —
-    while clone, context assembly, and post-hooks stay inline (moving the full
-    step list onto the runner is a follow-up). The workflow is loaded from the
-    resolved ``{id, version}`` pinned at the create-task boundary.
+    Post-cutover (#248 task 8), the workflow runner is the sole path: the
+    ``run_agent`` step — and, for ``coding/new-task-verified-v1`` (Task 4 —
+    ADR-025 (fork)), the ``review_and_fix`` step right after it — are
+    dispatched through ``workflow.run_workflow``, exercising the real handler
+    registry, step milestones, and result threading, while clone, context
+    assembly, and post-hooks stay inline (moving the full step list onto the
+    runner is a follow-up). The workflow is loaded from the resolved
+    ``{id, version}`` pinned at the create-task boundary. Both steps share one
+    ``StepContext``/``ledger`` so coder and reviewer costs land together.
 
     ``ledger`` (Task 3) is the caller's ``AgentInvocationLedger``, so it can read
     ``ledger.total_cost_usd`` after this returns; a caller that doesn't need it
     (e.g. the existing unit tests) gets a throwaway one.
+
+    ``review_outcome_out`` (Task 4), if given, is updated in place with the
+    ``review_and_fix`` step's result dict (``ctx.artifacts["review_outcome"]``)
+    when that step ran — mirrors the ``ledger`` by-reference pattern rather than
+    changing this function's return type, which several tests assert by
+    identity.
 
     Returns the ``AgentResult`` so the surrounding pipeline (cancel short-circuit,
     post-hooks, result assembly) is unchanged.
@@ -258,11 +269,11 @@ def _execute_agent_step(
         user_prompt=prompt,
         ledger=ledger if ledger is not None else AgentInvocationLedger(),
     )
-    # Drive only the agentic step through the runner; clone, context assembly,
-    # and post-hooks stay on the inline path. only_kinds keeps the runner from
-    # re-running the deterministic steps the pipeline already owns (double clone
-    # / double PR).
-    result = run_workflow(wf, ctx, only_kinds={"run_agent"})
+    # Drive the agentic step (and review_and_fix, when the workflow declares
+    # one) through the runner; clone, context assembly, and post-hooks stay on
+    # the inline path. only_kinds keeps the runner from re-running the
+    # deterministic steps the pipeline already owns (double clone / double PR).
+    result = run_workflow(wf, ctx, only_kinds={"run_agent", "review_and_fix"})
 
     if ctx.agent_result is None:
         # The run_agent step did not produce a result — i.e. its handler raised
@@ -276,6 +287,10 @@ def _execute_agent_step(
             else "run_agent step produced no result"
         )
         raise RuntimeError(f"Workflow run_agent step failed: {detail}")
+
+    if review_outcome_out is not None and "review_outcome" in ctx.artifacts:
+        review_outcome_out.update(ctx.artifacts["review_outcome"])
+
     return ctx.agent_result
 
 
@@ -1250,10 +1265,16 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                     f"SIGCHLD conflicts with the Claude Agent SDK",
                 )
             # Accumulates every agent-SDK call this task makes (Task 3). One call
-            # today (the coder); Task 4's reviewer and Task 5's fix loop add more
-            # to the same ledger, which is why TaskResult.cost_usd below reads
-            # ledger.total_cost_usd rather than agent_result.cost_usd directly.
+            # today (the coder) for most workflows; coding/new-task-verified-v1's
+            # review_and_fix step (Task 4) adds the probe-writer/code-reviewer
+            # calls to the SAME ledger, which is why TaskResult.cost_usd below
+            # reads ledger.total_cost_usd rather than agent_result.cost_usd
+            # directly.
             ledger = AgentInvocationLedger()
+            # Filled in place by _execute_agent_step when the resolved workflow
+            # declares a review_and_fix step (Task 4) — passed to ensure_pr below
+            # for the PR body's review summary.
+            review_outcome: dict = {}
             with task_span("task.agent_execution") as agent_span:
                 try:
                     agent_result = _execute_agent_step(
@@ -1265,6 +1286,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                         trajectory,
                         progress,
                         ledger=ledger,
+                        review_outcome_out=review_outcome,
                     )
                 except Exception as e:
                     # Fatal agent error: mirror to APPLICATION_LOGS so
@@ -1514,6 +1536,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                         lint_passed,
                         agent_result=agent_result,
                         strategy=ensure_pr_strategy,
+                        ledger=ledger,
+                        review_outcome=review_outcome or None,
                     )
                     post_span.set_attribute("build.passed", build_passed)
                     post_span.set_attribute("lint.passed", lint_passed)
@@ -1994,6 +2018,7 @@ def main():
         system_prompt_overrides=config.system_prompt_overrides,
         trace=config.trace,
         user_id=config.user_id,
+        resolved_workflow=config.resolved_workflow,
     )
 
     # Exit with error if agent failed

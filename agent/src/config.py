@@ -36,6 +36,7 @@ NEEDS_INPUT_MARKER = "[[ABCA_NEEDS_INPUT]]"
 _KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(
     (
         "coding/new-task-v1",
+        "coding/new-task-verified-v1",
         "coding/pr-iteration-v1",
         "coding/restack-v1",
     )
@@ -816,6 +817,11 @@ def build_config(
 
 def get_config() -> TaskConfig:
     """Parse configuration from environment variables (local batch mode)."""
+    # Local-only knob: the create-task boundary normally pins resolved_workflow;
+    # a local batch run has no boundary, so WORKFLOW_ID lets a developer exercise
+    # a non-default first-party workflow (e.g. coding/new-task-verified-v1) via
+    # run.sh. Unset keeps the pre-existing default (coding/new-task-v1).
+    workflow_id = os.environ.get("WORKFLOW_ID", "")
     try:
         return build_config(
             repo_url=os.environ.get("REPO_URL", ""),
@@ -827,6 +833,7 @@ def get_config() -> TaskConfig:
             max_budget_usd=float(os.environ.get("MAX_BUDGET_USD", "0")) or None,
             aws_region=os.environ.get("AWS_REGION", ""),
             dry_run=os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes"),
+            resolved_workflow={"id": workflow_id, "version": "1.0.0"} if workflow_id else None,
             # Local-batch ``--trace`` parity (design §10.1). Without
             # these env vars a developer running the agent outside
             # AgentCore could never exercise the trace path. Both are

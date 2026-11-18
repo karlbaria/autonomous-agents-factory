@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from shell import log, run_cmd
 
 if TYPE_CHECKING:
-    from models import AgentResult, RepoSetup, TaskConfig
+    from models import AgentInvocationLedger, AgentResult, RepoSetup, TaskConfig
 
 # Default verification commands. A repo that uses mise gets these for free; a
 # non-mise repo sets ``pipeline.buildCommand`` / ``lintCommand`` in its
@@ -562,6 +562,111 @@ def _reconcile_pr_base(repo_dir: str, branch: str, config: TaskConfig, expected_
         )
 
 
+def _cost_line(agent_result: AgentResult | None, ledger: AgentInvocationLedger | None) -> str:
+    """The PR body's cost line: a per-stage breakdown once a reviewer ran (Task 4)."""
+    if ledger is not None:
+        stage_costs = ledger.stage_costs()
+        total = ledger.total_cost_usd
+        if total is None:
+            return ""
+        if len(stage_costs) > 1:
+            breakdown = ", ".join(f"{stage}: ${cost:.4f}" for stage, cost in stage_costs.items())
+            return f"- Agent cost: **${total:.4f}** ({breakdown})\n"
+        return f"- Agent cost: **${total:.4f}**\n"
+    if agent_result and agent_result.cost_usd is not None:
+        return f"- Agent cost: **${agent_result.cost_usd:.4f}**\n"
+    return ""
+
+
+def _review_section(review_outcome: dict | None) -> str:
+    """The PR body's independent-review section (Task 4 — ADR-025 (fork)).
+
+    ``review_outcome`` is ``review.backend.ReviewAndFixResult.model_dump()``;
+    empty/absent (every workflow but ``coding/new-task-verified-v1``, or a
+    round that was skipped — budget exhausted, ``review_mode: none``) means
+    no section at all, not an empty placeholder.
+    """
+    if not review_outcome or not review_outcome.get("ran"):
+        return ""
+
+    verdict = review_outcome.get("verdict")
+    lines = ["## Independent review (advisory)\n", f"**Verdict:** {verdict}\n"]
+
+    reviewed_sha = review_outcome.get("reviewed_sha") or ""
+    if reviewed_sha:
+        lines.append(f"Reviewed commit: `{reviewed_sha[:12]}`\n")
+
+    probe_results = review_outcome.get("probe_results") or []
+    if probe_results:
+        lines.append(
+            "**Probes** (written from the issue alone, before the probe writer "
+            "ever saw this diff):\n"
+        )
+        for r in probe_results:
+            probe = r.get("probe", {})
+            mark = "✅ PASS" if r.get("passed") else "❌ FAIL"
+            lines.append(f"- {mark} `{probe.get('filename')}` — {probe.get('intent')}")
+        lines.append("")
+
+    committed = review_outcome.get("committed_probe_paths") or []
+    if committed:
+        lines.append(
+            f"{len(committed)} passing probe(s) committed to `tests/review_probes/` "
+            "in a separate commit.\n"
+        )
+
+    findings = review_outcome.get("findings") or []
+    if findings:
+        lines.append("**Findings:**\n")
+        for f in findings:
+            severity = f" ({f['severity']})" if f.get("severity") else ""
+            lines.append(
+                f"- **{f['type']}{severity}:** {f['title']} — {f['description']} "
+                f"_(evidence: {f['evidence']})_"
+            )
+        lines.append("")
+    elif review_outcome.get("parse_error"):
+        lines.append(f"_Review output could not be parsed: {review_outcome['parse_error']}_\n")
+
+    return "\n".join(lines) + "\n"
+
+
+def _append_pr_appendix(repo_dir: str, repo_url: str, pr_url: str, appendix: str) -> None:
+    """Append the cost/review appendix to a PR the coder's own turn already created.
+
+    The coder can (and often does) run its own ``git push`` + ``gh pr create``
+    inside its Bash tool calls, finishing before ``review_and_fix`` even
+    starts — so the "already exists" branch below never gets to compose the
+    cost line / review section into the body the normal create path builds.
+    This edits it in afterward; a failure here is non-fatal (advisory
+    feature, logged and swallowed) since the PR itself already exists and
+    must not be lost over a cosmetic body update.
+    """
+    try:
+        current = subprocess.run(
+            ["gh", "pr", "view", pr_url, "--repo", repo_url, "--json", "body", "-q", ".body"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if current.returncode != 0:
+            log("WARN", f"could not read PR body to append review section: {current.stderr}")
+            return
+        new_body = f"{current.stdout}\n\n{appendix}"
+        run_cmd(
+            ["gh", "pr", "edit", pr_url, "--repo", repo_url, "--body", new_body],
+            label="append-review-section",
+            cwd=repo_dir,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        log(
+            "WARN",
+            f"failed to append review section to {pr_url} (non-fatal): {type(e).__name__}: {e}",
+        )
+
+
 def ensure_pr(
     config: TaskConfig,
     setup: RepoSetup,
@@ -569,6 +674,8 @@ def ensure_pr(
     lint_passed: bool,
     agent_result: AgentResult | None = None,
     strategy: str = "create",
+    ledger: AgentInvocationLedger | None = None,
+    review_outcome: dict | None = None,
 ) -> str | None:
     """Realize the PR per the workflow's ``ensure_pr`` strategy.
 
@@ -584,6 +691,13 @@ def ensure_pr(
     Returns the PR URL, or None if there are no commits beyond the default
     branch or PR creation failed. ``build_passed`` and ``lint_passed`` control
     the verification status shown in the PR body.
+
+    ``ledger`` (Task 3) and ``review_outcome`` (Task 4 — ADR-025 (fork),
+    ``review.backend.ReviewAndFixResult.model_dump()``) are both optional: a
+    caller with neither (every workflow but ``coding/new-task-verified-v1``)
+    gets the pre-Task-4 PR body unchanged. ``ledger`` present but
+    ``review_outcome`` absent/empty still reports a single total cost line
+    (the ledger's one coder call), not a per-stage breakdown.
     """
     repo_dir = setup.repo_dir
     branch = setup.branch
@@ -659,6 +773,18 @@ def ensure_pr(
         # orchestrator-supplied / detected base if it disagrees (stacked-child
         # + root wrong-base fix).
         _reconcile_pr_base(repo_dir, branch, config, default_branch)
+        # The coder's own turn commonly pushes + creates this PR itself before
+        # post-hooks run (the branch this reaches at all) — so a commit made
+        # AFTER that by review_and_fix's probe-commit step is still only
+        # local. Push it now, or it is silently dropped when the container
+        # exits (Task 4 — ADR-025 (fork)).
+        ensure_pushed(repo_dir, branch)
+        # Mirrors the fresh-create path's cost_line + review_section: the
+        # coder's own PR body never includes either (it has no ledger/review
+        # outcome to draw from), so append them here instead of losing them.
+        appendix = _cost_line(agent_result, ledger) + _review_section(review_outcome)
+        if appendix.strip():
+            _append_pr_appendix(repo_dir, config.repo_url, pr_url, appendix)
         return pr_url
 
     # Check if there are any commits on this branch beyond the default branch
@@ -713,9 +839,7 @@ def ensure_pr(
     build_label = (config.build_command or DEFAULT_BUILD_COMMAND).strip()
     lint_label = (config.lint_command or DEFAULT_LINT_COMMAND).strip()
 
-    cost_line = ""
-    if agent_result and agent_result.cost_usd is not None:
-        cost_line = f"- Agent cost: **${agent_result.cost_usd:.4f}**\n"
+    cost_line = _cost_line(agent_result, ledger)
 
     # When build-regression gating is inert (no runnable build command, none
     # configured), say so plainly — otherwise a green "build: PASS" misleads:
@@ -729,6 +853,8 @@ def ensure_pr(
             "`pipeline.buildCommand` in this repo's ABCA blueprint (e.g. `npm run build`).\n\n"
         )
 
+    review_section = _review_section(review_outcome)
+
     pr_body = (
         f"## Summary\n\n"
         f"{task_source}"
@@ -739,6 +865,7 @@ def ensure_pr(
         f"- `{build_label}` (post-agent): **{build_status}**\n"
         f"- `{lint_label}` (post-agent): **{lint_status}**\n"
         f"{cost_line}\n"
+        f"{review_section}"
         f"---\n\n"
         f"By submitting this pull request, I confirm that you can use, modify, copy, "
         f"and redistribute this contribution, under the terms of the [project license](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/LICENSE)."

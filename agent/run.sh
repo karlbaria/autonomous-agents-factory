@@ -32,6 +32,8 @@ Environment variables (required):
 
 Environment variables (optional):
   ANTHROPIC_MODEL   Model to use (unset: defer to the agent runtime default)
+  WORKFLOW_ID       First-party workflow id to run (unset: coding/new-task-v1).
+                    E.g. coding/new-task-verified-v1 for the advisory reviewer.
   DRY_RUN           Set to 1 to validate config and print prompt without running the agent
   MAX_TURNS         Max agent turns (default: 100)
 
@@ -215,6 +217,7 @@ DOCKER_ARGS=(
 # unset variable leaves the agent runtime's own default (agent/src/config.py) intact
 # instead of being shadowed by a second default defined here.
 [[ -n "${ANTHROPIC_MODEL:-}" ]] && DOCKER_ARGS+=(-e "ANTHROPIC_MODEL=${ANTHROPIC_MODEL}")
+[[ -n "${WORKFLOW_ID:-}" ]] && DOCKER_ARGS+=(-e "WORKFLOW_ID=${WORKFLOW_ID}")
 [[ -n "${ISSUE_NUMBER}" ]] && DOCKER_ARGS+=(-e "ISSUE_NUMBER=${ISSUE_NUMBER}")
 [[ -n "${TASK_DESCRIPTION}" ]] && DOCKER_ARGS+=(-e "TASK_DESCRIPTION=${TASK_DESCRIPTION}")
 [[ -n "${DRY_RUN:-}" ]] && DOCKER_ARGS+=(-e "DRY_RUN=${DRY_RUN}")

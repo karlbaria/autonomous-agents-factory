@@ -10,6 +10,7 @@ from config import (
     PR_WORKFLOW_IDS,
     build_config,
     clear_jira_task_credentials,
+    get_config,
     resolve_jira_oauth_token,
     resolve_linear_api_token,
 )
@@ -20,6 +21,32 @@ from models import TaskConfig
 # (ruff FURB162's unsafe fix) the first raises TypeError out of the resolver and the
 # second is trusted until 2099.
 _MALFORMED_EXPIRES_AT = ["this is not a date", "2099-01-01Z00:00:00", "2099-01-01Z00:00:00+00:00"]
+
+
+class TestGetConfigWorkflowId:
+    """Task 4 (ADR-025 (fork)): WORKFLOW_ID lets a local batch run pick a
+    non-default first-party workflow (e.g. coding/new-task-verified-v1)."""
+
+    def _set_required_env(self, monkeypatch):
+        monkeypatch.setenv("REPO_URL", "owner/repo")
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("TASK_DESCRIPTION", "Add a gcd endpoint")
+
+    def test_unset_defaults_to_coding_new_task_v1(self, monkeypatch):
+        self._set_required_env(monkeypatch)
+        monkeypatch.delenv("WORKFLOW_ID", raising=False)
+        config = get_config()
+        assert config.resolved_workflow == {"id": "coding/new-task-v1", "version": "1.0.0"}
+
+    def test_set_selects_the_named_workflow(self, monkeypatch):
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("WORKFLOW_ID", "coding/new-task-verified-v1")
+        config = get_config()
+        assert config.resolved_workflow == {
+            "id": "coding/new-task-verified-v1",
+            "version": "1.0.0",
+        }
 
 
 class TestAgentWorkspaceConstant:

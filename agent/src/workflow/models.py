@@ -34,10 +34,15 @@ StepKind = Literal[
     "ensure_pr",
     "post_review",
     "deliver_artifact",
+    "review_and_fix",
 ]
 OnFailure = Literal["fail", "continue", "skip_remaining"]
 EnsurePrStrategy = Literal["create", "push_resolve", "resolve"]
 VerifyGate = Literal["strict", "regression_only", "informational"]
+# Task 4 ships "advisory" only (findings/probe failures are reported, never
+# block). "adversarial" (the bounded fix loop) is Task 5; "none" disables the
+# step without removing it from the workflow file.
+ReviewMode = Literal["advisory", "adversarial", "none"]
 # deliver_artifact target: an open string naming a registered deliverer
 # (workflow.deliverers / DELIVERERS), not a closed enum — a new delivery method
 # is a registered deliverer, not a model/schema change (ADR-014 addendum
@@ -147,6 +152,10 @@ class Step(BaseModel):
     strategy: EnsurePrStrategy | None = None
     gate: VerifyGate | None = None
     target: DeliverTarget | None = None
+    # review_and_fix (Task 4 — ADR-025 (fork)):
+    review_mode: ReviewMode | None = None
+    reviewer_model: str | None = None
+    reviewer_max_turns: int | None = None
 
 
 class TerminalOutcomes(BaseModel):

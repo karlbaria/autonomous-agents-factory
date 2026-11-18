@@ -1,0 +1,57 @@
+# Task 4 (ADR-025 (fork)): coding/new-task-v1 plus an independent two-call
+# reviewer (review_and_fix) between the coder and the build/PR gates. The
+# coder writes both the code and its own tests, which is a conflict of
+# interest; this workflow adds a probe writer (sees only the issue and the
+# base-branch code, never the diff) plus a code reviewer (sees the diff and
+# the deterministic probe results) as an independent second opinion.
+# review_mode: advisory — findings and failing probes are reported in the PR,
+# never block it. coding/new-task-v1 itself is unchanged by this workflow's
+# existence.
+id: coding/new-task-verified-v1
+version: 1.0.0
+domain: coding
+description: Implement a GitHub issue or free-text task, get an independent advisory review, and open a pull request.
+requires_repo: true
+read_only: false
+prompt:
+  # Same coder prompt as coding/new-task-v1 — the review step runs its own,
+  # separate prompts (agent/src/review/prompts.py), not this one.
+  template: registry://prompt/coding-new-task-workflow
+  placeholders:
+    - repo_url
+    - task_id
+    - workspace
+    - branch_name
+    - default_branch
+    - max_turns
+    - setup_notes
+    - memory_context
+hydration:
+  sources: [issue, memory, task_description]
+agent_config:
+  tier: standard
+  allowed_tools: [Bash, Read, Write, Edit, Glob, Grep, WebFetch]
+  cedar_policy_modules: [builtin/hard_deny, builtin/soft_deny]
+repo_config:
+  provider: github
+  discover: true
+required_inputs:
+  one_of: [issue_number, task_description]
+steps:
+  - { kind: clone_repo,      name: setup }
+  - { kind: hydrate_context, name: context }
+  - { kind: run_agent,       name: implement }
+  - { kind: review_and_fix,  name: review, review_mode: advisory }
+  - { kind: verify_build,    name: build, gate: regression_only }
+  - { kind: ensure_pr,       name: open_pr, strategy: create }
+terminal_outcomes:
+  primary: pr_url
+convergence:
+  mode: test_gated
+  required_sensors: [verify_build]
+  terminal_outcomes: [pr_opened]
+limits:
+  max_turns: 100
+promotion_gate:
+  requires: [tests:agent/review_and_fix]
+status: production

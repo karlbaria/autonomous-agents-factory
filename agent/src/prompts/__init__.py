@@ -25,6 +25,10 @@ REPO_LESS_DEFAULT_WORKFLOW_ID = "default/agent-v1"
 
 _PROMPTS = {
     "coding/new-task-v1": BASE_PROMPT.replace("{workflow}", NEW_TASK_WORKFLOW),
+    # Task 4 (ADR-025 (fork)): same coder prompt as new-task-v1 — the
+    # review_and_fix step runs its own, separate prompts
+    # (agent/src/review/prompts.py), not this one.
+    "coding/new-task-verified-v1": BASE_PROMPT.replace("{workflow}", NEW_TASK_WORKFLOW),
     "coding/pr-iteration-v1": BASE_PROMPT.replace("{workflow}", PR_ITERATION_WORKFLOW),
     "coding/pr-review-v1": BASE_PROMPT.replace("{workflow}", PR_REVIEW_WORKFLOW),
     # Re-stack: re-merge a changed predecessor branch into an existing
