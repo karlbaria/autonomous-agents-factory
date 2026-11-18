@@ -2018,6 +2018,7 @@ def main():
         system_prompt_overrides=config.system_prompt_overrides,
         trace=config.trace,
         user_id=config.user_id,
+        resolved_workflow=config.resolved_workflow,
     )
 
     # Exit with error if agent failed

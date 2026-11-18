@@ -11,11 +11,43 @@ from pipeline import (
     _chain_prior_agent_error,
     _resolve_overall_task_status,
     _should_post_start_comment,
+    main,
 )
 from post_hooks import VerifyOutcome
 
 # Minimal Linear channel metadata for the early-ACK ordering tests.
 _LINEAR_META = {"issue_id": "ABCA-1", "workspace_id": "ws-1"}
+
+
+class TestMainThreadsResolvedWorkflow:
+    """Task 4 (ADR-025 (fork)): local batch mode's WORKFLOW_ID knob only works if
+    main() forwards get_config()'s resolved_workflow into run_task() — it was
+    read but silently dropped before this test existed."""
+
+    def test_resolved_workflow_passed_to_run_task(self):
+        config = TaskConfig(
+            aws_region="us-east-1",
+            repo_url="owner/repo",
+            resolved_workflow={"id": "coding/new-task-verified-v1", "version": "1.0.0"},
+        )
+        with (
+            patch("pipeline.get_config", return_value=config),
+            patch("pipeline.run_task", return_value={"status": "success"}) as mock_run_task,
+        ):
+            main()
+        assert mock_run_task.call_args.kwargs["resolved_workflow"] == {
+            "id": "coding/new-task-verified-v1",
+            "version": "1.0.0",
+        }
+
+    def test_unset_resolved_workflow_passed_through_as_none(self):
+        config = TaskConfig(aws_region="us-east-1", repo_url="owner/repo")
+        with (
+            patch("pipeline.get_config", return_value=config),
+            patch("pipeline.run_task", return_value={"status": "success"}) as mock_run_task,
+        ):
+            main()
+        assert mock_run_task.call_args.kwargs["resolved_workflow"] is None
 
 
 class TestStartCommentPolicy:

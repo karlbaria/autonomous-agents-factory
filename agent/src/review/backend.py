@@ -72,6 +72,10 @@ class ReviewAndFixResult(BaseModel):
 
 
 def _milestone(progress: _ProgressWriter | None, name: str, detail: str = "") -> None:
+    # Always echo to stdout too: _ProgressWriter is a silent no-op locally (no
+    # TASK_EVENTS_TABLE_NAME set by run.sh), matching workflow.runner's
+    # stage_costs line — without this a local run shows no review output at all.
+    log("AGENT", f"{name}: {detail}" if detail else name)
     if progress is None:
         return
     try:
@@ -347,6 +351,7 @@ def run_review_and_fix(
         )
 
     committed_paths = _commit_passing_probes(setup.repo_dir, probe_results)
+    log("AGENT", f"review_and_fix stage_costs={ledger.stage_costs()}")
 
     return ReviewAndFixResult(
         ran=True,
