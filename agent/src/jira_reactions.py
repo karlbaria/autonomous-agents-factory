@@ -1,4 +1,4 @@
-"""Jira issue-comment and workflow-transition helpers for Jira-origin tasks.
+"""Jira issue-comment and workflow-transition helpers for Jira-linked tasks.
 
 Posts a "starting" comment on the originating Jira issue at task start — the
 Jira analogue of ``linear_reactions`` (Linear uses emoji reactions; Jira's
@@ -28,10 +28,14 @@ uses ``api.asApp().requestJira`` so Jira attributes writes to the app account.
 Tenants without Forge configuration retain the user-delegated OAuth REST path
 as an explicit migration fallback.
 
-Gating: every function is a no-op unless ``channel_source == 'jira'`` and the
-issue key + cloud id are present in ``channel_metadata``. All network / auth
-errors are logged and swallowed — a transient Jira API failure must never fail
-the task itself (comments are advisory UX, not load-bearing).
+Gating: every function is a no-op unless the issue key + cloud id are present
+in ``channel_metadata`` — regardless of ``channel_source`` (issue #32). A
+Jira-origin task always carries both; an auto-tracked Slack/API task (Task 13
+PR 2, ``bgagent jira map ... --auto-track``) carries them too, once the
+outbound "create issue" call succeeds, so it gets the same comments and board
+transitions a Jira-originated task does. All network / auth errors are logged
+and swallowed — a transient Jira API failure must never fail the task itself
+(comments are advisory UX, not load-bearing).
 
 See: ``agent/src/channel_mcp.py`` for the (non-functional) MCP gate, and
 ``agent/src/linear_reactions.py`` for the parallel Linear shim.
@@ -135,17 +139,18 @@ def _note_auth_status(status_code: int) -> None:
 
 
 def _enabled(
-    channel_source: str,
+    _channel_source: str,
     channel_metadata: dict[str, str] | None,
 ) -> tuple[str, str] | None:
     """Return ``(cloud_id, issue_key)`` if comments should fire, else None.
 
-    Gating mirrors ``channel_mcp.configure_channel_mcp`` — the same
-    ``channel_source == 'jira'`` check, plus a metadata presence check so we
-    don't fire REST calls we can't address.
+    ``_channel_source`` is accepted for parity with the call sites' signature
+    but is NOT part of the gate (issue #32): gating is purely on whether
+    ``channel_metadata`` carries a Jira link, so an auto-tracked Slack/API
+    task (``channel_source`` other than ``'jira'``) gets the same comments
+    and transitions a Jira-origin task does once its outbound issue has been
+    created.
     """
-    if channel_source != "jira":
-        return None
     if not channel_metadata:
         return None
     cloud_id = channel_metadata.get("jira_cloud_id")
@@ -348,7 +353,10 @@ def comment_task_started(
     channel_source: str,
     channel_metadata: dict[str, str] | None,
 ) -> None:
-    """Post a "starting" comment on the Jira issue. No-op for non-Jira tasks."""
+    """Post a "starting" comment on the Jira issue.
+
+    No-op for a task with no Jira link in ``channel_metadata``.
+    """
     target = _enabled(channel_source, channel_metadata)
     if not target:
         return
@@ -695,7 +703,7 @@ def transition_task_started(
     Resolution: ``jira_status_on_start`` override → a destination named
     ``In Progress`` → any ``indeterminate``-category destination. Skips if the
     issue is already In Progress or later (won't move a card backward).
-    Best-effort; no-op for non-Jira tasks.
+    Best-effort; no-op for a task with no Jira link in ``channel_metadata``.
     """
     override = (channel_metadata or {}).get("jira_status_on_start")
     _transition(
@@ -721,7 +729,8 @@ def transition_pr_opened(
     ``In Review`` (or a common review-column synonym) → any
     ``indeterminate``-category destination (Linear's In Review→In Progress
     fallback, so a stock board isn't silently skipped, #605). Skips only if the
-    issue is already Done. Best-effort; no-op for non-Jira tasks.
+    issue is already Done. Best-effort; no-op for a task with no Jira link in
+    ``channel_metadata``.
     """
     override = (channel_metadata or {}).get("jira_status_on_pr")
     _transition(

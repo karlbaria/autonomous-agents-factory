@@ -265,16 +265,10 @@ describe('createTaskCore', () => {
     expect(taskPut![0].input.Item.jira_issue_identity).toBe('cloud-1#ENG-42');
   });
 
-  test('does not hoist Jira issue identity for incomplete or non-Jira metadata', async () => {
+  test('does not hoist Jira issue identity when there is no Jira link at all', async () => {
     await createTaskCore(
       { repo: 'org/repo', task_description: 'Regular task' },
-      makeContext({
-        channelSource: 'api',
-        channelMetadata: {
-          jira_cloud_id: 'cloud-1',
-          jira_issue_key: 'ENG-42',
-        },
-      }),
+      makeContext({ channelSource: 'api' }),
       'req-no-jira-identity',
     );
 
@@ -282,6 +276,45 @@ describe('createTaskCore', () => {
       ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
     );
     expect(taskPut![0].input.Item).not.toHaveProperty('jira_issue_identity');
+  });
+
+  test('does not hoist Jira issue identity for incomplete metadata (missing issue key)', async () => {
+    await createTaskCore(
+      { repo: 'org/repo', task_description: 'Regular task' },
+      makeContext({
+        channelSource: 'jira',
+        channelMetadata: { jira_cloud_id: 'cloud-1' },
+      }),
+      'req-incomplete-jira-identity',
+    );
+
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item).not.toHaveProperty('jira_issue_identity');
+  });
+
+  test('hoists Jira issue identity for an auto-tracked task (channel_source slack/api), same as Jira-origin (#32)', async () => {
+    // resolveJiraAutoTrack is mocked to pass channelMetadata through
+    // unchanged (see beforeEach) — simulating it having already merged in
+    // jira_cloud_id/jira_issue_key for an opted-in auto-track mapping.
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Submitted from Slack' },
+      makeContext({
+        channelSource: 'slack',
+        channelMetadata: {
+          jira_cloud_id: 'cloud-1',
+          jira_issue_key: 'SHOP-1',
+        },
+      }),
+      'req-auto-tracked-jira-identity',
+    );
+
+    expect(result.statusCode).toBe(201);
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item.jira_issue_identity).toBe('cloud-1#SHOP-1');
   });
 
   test('accepts an initial_approvals pattern whose value contains a colon', async () => {

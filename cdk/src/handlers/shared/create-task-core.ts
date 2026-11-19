@@ -819,13 +819,15 @@ export async function createTaskCore(
     }),
     // DynamoDB GSIs cannot key on nested map values. Hoist the tenant-scoped
     // Jira issue identity so JiraIssueIndex can resolve comment triggers back
-    // to the newest PR-producing task.
-    ...(context.channelSource === 'jira'
-      && context.channelMetadata?.jira_cloud_id
-      && context.channelMetadata?.jira_issue_key
+    // to the newest PR-producing task. Read from the auto-track-merged
+    // metadata (not context.channelMetadata) and gate on the link itself,
+    // not channelSource === 'jira' (issue #32), so an auto-tracked task
+    // (Task 13 PR 2) is indexed the same way a Jira-origin task is.
+    ...(jiraAutoTrack.channelMetadata?.jira_cloud_id
+      && jiraAutoTrack.channelMetadata?.jira_issue_key
       && {
         jira_issue_identity:
-          `${context.channelMetadata.jira_cloud_id}#${context.channelMetadata.jira_issue_key}`,
+          `${jiraAutoTrack.channelMetadata.jira_cloud_id}#${jiraAutoTrack.channelMetadata.jira_issue_key}`,
       }),
     ...(attachmentRecords.length > 0 && { attachments: attachmentRecords }),
     status_created_at: `${initialStatus}#${now}`,

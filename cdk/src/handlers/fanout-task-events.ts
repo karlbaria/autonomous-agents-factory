@@ -1554,19 +1554,24 @@ export { renderJiraFinalStatusComment };
 
 /**
  * Jira dispatcher — posts a deterministic final-status comment when a
- * Jira-origin task reaches a terminal event. The Jira analogue of
+ * Jira-linked task reaches a terminal event. The Jira analogue of
  * ``dispatchToLinear``; structurally identical:
  *
  *   1. Guard on ``JIRA_WORKSPACE_REGISTRY_TABLE_NAME`` (deploy-misconfig).
  *   2. Load TaskRecord. Skip if missing (TTL eviction race).
- *   3. Gate on ``channel_source === 'jira'`` so non-Jira tasks short-circuit
- *      after one DDB Get.
- *   4. Read ``jira_cloud_id`` + ``jira_issue_key`` from ``channel_metadata``.
- *      Skip if either is missing — defensive; shouldn't happen for a
- *      properly-admitted Jira task.
- *   5. Idempotency: skip if the ``jira_final_comment_event_id`` marker is set.
- *   6. Render ADF + post via ``postIssueCommentAdf`` (which owns the
+ *   3. Read ``jira_cloud_id`` + ``jira_issue_key`` from ``channel_metadata``.
+ *      Skip (silently, for most tasks — see below) if either is missing.
+ *   4. Idempotency: skip if the ``jira_final_comment_event_id`` marker is set.
+ *   5. Render ADF + post via ``postIssueCommentAdf`` (which owns the
  *      OAuth-refresh-and-retry-once behaviour), then persist the marker.
+ *
+ * Gating is on the Jira link itself, not ``channel_source === 'jira'``
+ * (issue #32): an auto-tracked Slack/API task (Task 13 PR 2) carries the same
+ * ``jira_cloud_id``/``jira_issue_key`` once its outbound issue is created, and
+ * gets the same final comment a Jira-origin task does. Most tasks have no
+ * Jira link at all and skip step 3 with no log; only a task that claims Jira
+ * origin but is missing the metadata (shouldn't happen for a properly-admitted
+ * Jira task) warns.
  *
  * Failure handling matches Linear: terminal failures log-and-resolve (a
  * retry cannot fix a revoked tenant or bad issue key); retryable failures
@@ -1598,20 +1603,19 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     return;
   }
 
-  // channel_source gate — short-circuit non-Jira tasks after one DDB Get.
-  if (task.channel_source !== 'jira') {
-    return;
-  }
-
   const cloudId = task.channel_metadata?.jira_cloud_id;
   const issueKey = task.channel_metadata?.jira_issue_key;
   if (!cloudId || !issueKey) {
-    logger.warn('[fanout/jira] task missing jira_cloud_id or jira_issue_key — skipping', {
-      event: 'fanout.jira.metadata_missing',
-      task_id: event.task_id,
-      has_cloud_id: Boolean(cloudId),
-      has_issue_key: Boolean(issueKey),
-    });
+    // Most tasks simply have no Jira link — only warn when the task claims
+    // Jira origin but is missing the metadata it should always carry.
+    if (task.channel_source === 'jira') {
+      logger.warn('[fanout/jira] task missing jira_cloud_id or jira_issue_key — skipping', {
+        event: 'fanout.jira.metadata_missing',
+        task_id: event.task_id,
+        has_cloud_id: Boolean(cloudId),
+        has_issue_key: Boolean(issueKey),
+      });
+    }
     return;
   }
 
