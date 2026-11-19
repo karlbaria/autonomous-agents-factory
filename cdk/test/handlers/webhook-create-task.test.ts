@@ -240,6 +240,60 @@ describe('webhook-create-task handler', () => {
     expect(taskPut.input.Item.channel_metadata.webhook_id).toBe('wh-123');
   });
 
+  // Task 13 (fork): a repo-bound webhook task with no workflow_ref now pins
+  // the coding workflow (or the repo's own default_workflow) instead of
+  // falling through to the repo-less default/agent-v1 — a deliberate
+  // behavior change from before this PR.
+  test('pins coding/new-task-v1 when the caller sends no workflow_ref and the repo has no default_workflow', async () => {
+    await handler(makeEvent());
+    const taskPut = mockSend.mock.calls[0][0];
+    expect(taskPut.input.Item.resolved_workflow.id).toBe('coding/new-task-v1');
+  });
+
+  test("pins the repo's default_workflow when the repo config has one", async () => {
+    const original = process.env.REPO_TABLE_NAME;
+    process.env.REPO_TABLE_NAME = 'RepoTable';
+    try {
+      mockSend.mockResolvedValue({
+        Item: { repo: 'org/repo', status: 'active', default_workflow: 'coding/new-task-adversarial-v1' },
+      });
+      await handler(makeEvent());
+      const taskPut = mockSend.mock.calls.find(
+        ([cmd]) => cmd.input.Item?.resolved_workflow,
+      )?.[0];
+      expect(taskPut.input.Item.resolved_workflow.id).toBe('coding/new-task-adversarial-v1');
+    } finally {
+      if (original === undefined) delete process.env.REPO_TABLE_NAME;
+      else process.env.REPO_TABLE_NAME = original;
+      mockSend.mockResolvedValue({});
+    }
+  });
+
+  test('leaves an explicit workflow_ref untouched even when the repo has a default_workflow', async () => {
+    const original = process.env.REPO_TABLE_NAME;
+    process.env.REPO_TABLE_NAME = 'RepoTable';
+    try {
+      mockSend.mockResolvedValue({
+        Item: { repo: 'org/repo', status: 'active', default_workflow: 'coding/new-task-adversarial-v1' },
+      });
+      const body = JSON.stringify({
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        workflow_ref: 'coding/new-task-v1',
+      });
+      const event = makeEvent({ body, headers: { 'X-Webhook-Signature': sign(body, TEST_SECRET) } });
+      await handler(event);
+      const taskPut = mockSend.mock.calls.find(
+        ([cmd]) => cmd.input.Item?.resolved_workflow,
+      )?.[0];
+      expect(taskPut.input.Item.resolved_workflow.id).toBe('coding/new-task-v1');
+    } finally {
+      if (original === undefined) delete process.env.REPO_TABLE_NAME;
+      else process.env.REPO_TABLE_NAME = original;
+      mockSend.mockResolvedValue({});
+    }
+  });
+
   test('returns 200 with Idempotent-Replay header for webhook replay', async () => {
     const existingItem = {
       task_id: 'existing-task',

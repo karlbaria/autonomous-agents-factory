@@ -36,6 +36,14 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
   createTaskCore: (...args: unknown[]) => createTaskCoreMock(...args),
 }));
 
+// Task 13 (fork): the repo's default_workflow lookup. Mocked as its own
+// module (not via ddbSend) so it doesn't shift the ddbSend call-order
+// sequencing every other test in this file depends on.
+const lookupRepoMock = jest.fn();
+jest.mock('../../src/handlers/shared/repo-config', () => ({
+  lookupRepo: (...args: unknown[]) => lookupRepoMock(...args),
+}));
+
 const fetchMock = jest.fn();
 (global as unknown as { fetch: unknown }).fetch = fetchMock;
 
@@ -89,6 +97,10 @@ describe('slack-command-processor handler', () => {
     smSend.mockReset();
     fetchMock.mockReset();
     createTaskCoreMock.mockReset();
+    // Default: no per-repo default_workflow — tasks pin CODING_WORKFLOW_ID,
+    // unchanged from before Task 13 (fork). Overridden per-case below.
+    lookupRepoMock.mockReset();
+    lookupRepoMock.mockResolvedValue({ onboarded: true, config: null });
     smSend.mockResolvedValue({ SecretString: 'xoxb-bot' });
     fetchMock.mockResolvedValue({
       ok: true,
@@ -218,6 +230,28 @@ describe('slack-command-processor handler', () => {
     expect(ctx.userId).toBe('cognito-1');
     // mention_thread_ts flows to channel_metadata
     expect(ctx.channelMetadata.slack_thread_ts).toBe('1000.0001');
+  });
+
+  // Task 13 (fork): the repo's own default_workflow wins over CODING_WORKFLOW_ID.
+  test('mention submit pins the repo default_workflow when the repo config has one', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active' } });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ ok: true, channel: { is_private: false, is_member: true } }),
+    });
+    lookupRepoMock.mockResolvedValueOnce({
+      onboarded: true,
+      config: { repo: 'org/repo', status: 'active', default_workflow: 'coding/new-task-adversarial-v1' },
+    });
+    createTaskCoreMock.mockResolvedValueOnce({
+      statusCode: 201,
+      body: JSON.stringify({ data: { task_id: 'TASK123', repo: 'org/repo', status: 'SUBMITTED' } }),
+    });
+    await handler(mention({ text: 'submit org/repo#42 add validation' }));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [reqBody] = createTaskCoreMock.mock.calls[0];
+    expect(reqBody.workflow_ref).toBe('coding/new-task-adversarial-v1');
   });
 
   test('mention submit in private channel bot is not in — replies with invite hint', async () => {

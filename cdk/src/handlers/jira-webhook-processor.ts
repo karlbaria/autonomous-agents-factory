@@ -69,10 +69,11 @@ import {
   setStatusCommentId,
   type OrchestrationReleaseContext,
 } from './shared/orchestration-store';
+import { lookupRepo } from './shared/repo-config';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
-import { CODING_WORKFLOW_ID } from './shared/workflows';
+import { resolveChannelDefaultWorkflow } from './shared/workflows';
 
 const ddb = makeDocClient();
 
@@ -769,14 +770,17 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   }
 
   const requestId = crypto.randomUUID();
+  // Explicit coding workflow: a label-triggered Jira task always targets a
+  // mapped repo, so it must not fall through the resolution ladder to the
+  // repo-less default/agent-v1 (which never commits or opens a PR). #546
+  // Task 13 (fork): the repo's own default_workflow wins when set, so a
+  // repo like factory-shop can default to the adversarial workflow instead.
+  const { config: jiraTaskRepoConfig } = await lookupRepo(repo);
   const result = await createTaskCore(
     {
       repo,
       task_description: taskDescription,
-      // Explicit coding workflow: a label-triggered Jira task always targets a
-      // mapped repo, so it must not fall through the resolution ladder to the
-      // repo-less default/agent-v1 (which never commits or opens a PR). #546
-      workflow_ref: CODING_WORKFLOW_ID,
+      workflow_ref: resolveChannelDefaultWorkflow(jiraTaskRepoConfig),
       ...(urlAttachments.length > 0 && { attachments: urlAttachments }),
     },
     {

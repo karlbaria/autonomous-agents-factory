@@ -196,6 +196,19 @@ export const DEFAULT_WORKFLOW_ID = 'default/agent-v1';
  */
 export const CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
+/**
+ * The workflow a repo-bound channel task (Jira/Slack/webhook/orchestration-
+ * release) runs when it names no ``workflow_ref`` of its own (Task 13
+ * (fork)): the repo's own ``RepoConfig.default_workflow`` when set, else
+ * {@link CODING_WORKFLOW_ID}. A standalone function (rather than inlining
+ * ``config?.default_workflow ?? CODING_WORKFLOW_ID`` at each call site) so
+ * the ``?.``/``??`` cyclomatic cost lands here, not inside the large
+ * handler functions that call it.
+ */
+export function resolveChannelDefaultWorkflow(repoConfig: { default_workflow?: string } | null): string {
+  return repoConfig?.default_workflow ?? CODING_WORKFLOW_ID;
+}
+
 // Fail at MODULE LOAD (deploy/import time), not at request time, if either
 // well-known id ever drifts out of DESCRIPTORS — e.g. a descriptor rename.
 // Without this a rename surfaces as an obscure runtime

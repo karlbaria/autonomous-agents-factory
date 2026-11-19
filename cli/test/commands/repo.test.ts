@@ -365,6 +365,24 @@ describe('repo command JSON output', () => {
     expect(onboardRepoMock).toHaveBeenCalled();
   });
 
+  // Task 13 (fork): --default-workflow is forwarded to onboardRepo.
+  test('onboard --default-workflow forwards the workflow id to onboardRepo', async () => {
+    onboardRepoMock.mockResolvedValue({
+      repo: 'acme/a',
+      status: 'active',
+      default_workflow: 'coding/new-task-adversarial-v1',
+    });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1',
+      '--default-workflow', 'coding/new-task-adversarial-v1',
+    ]);
+    expect(onboardRepoMock).toHaveBeenCalledWith(
+      'us-east-1', 'RepoTable-dev', 'acme/a',
+      expect.objectContaining({ defaultWorkflow: 'coding/new-task-adversarial-v1' }));
+  });
+
   test('repo offboard --output json redacts the per-repo secret ARN', async () => {
     offboardRepoMock.mockResolvedValue({
       repo: 'acme/a',

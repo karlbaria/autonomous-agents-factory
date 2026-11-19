@@ -56,9 +56,10 @@ import type {
   OrchestrationChildRow,
   OrchestrationReleaseContext,
 } from './orchestration-store';
+import { lookupRepo } from './repo-config';
 import type { AttachmentRecord, ChannelSource } from './types';
 import { MAX_ATTACHMENTS_PER_TASK } from './validation';
-import { CODING_WORKFLOW_ID } from './workflows';
+import { resolveChannelDefaultWorkflow } from './workflows';
 
 /**
  * The trigger channel an orchestration runs under. Defaults to ``'linear'``
@@ -469,6 +470,10 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     return { kind: 'error', message: err instanceof Error ? err.message : String(err) };
   }
 
+  // Task 13 (fork): the repo's own default_workflow wins when set (see the
+  // workflow_ref comment below), e.g. factory-shop's adversarial default.
+  const { config: childTaskRepoConfig } = await lookupRepo(row.repo);
+
   // Attachments a feature child receives: the PARENT epic's spec (inherited via
   // release_context) PLUS this sub-issue's OWN attachments (a mockup
   // attached to just this piece, hydrated at seed onto the child row). Merge both,
@@ -523,7 +528,7 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
         // node was handed two predecessor branches to merge, got a clean default
         // branch instead, and the agent hand-wrote an approximation of one arm.
         // The result looked plausible and silently dropped the other arm's work.
-        workflow_ref: CODING_WORKFLOW_ID,
+        workflow_ref: resolveChannelDefaultWorkflow(childTaskRepoConfig),
       },
       {
         userId: platformUserId,

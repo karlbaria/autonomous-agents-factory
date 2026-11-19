@@ -44,6 +44,7 @@ export interface OnboardRepoOptions {
   readonly maxTurns?: number;
   readonly githubTokenSecretArn?: string;
   readonly pollIntervalMs?: number;
+  readonly defaultWorkflow?: string;
 }
 
 export interface OnboardRepoDependencies {
@@ -115,6 +116,9 @@ export async function onboardRepo(
   if (options.pollIntervalMs !== undefined) {item.poll_interval_ms = options.pollIntervalMs;} else if (existing?.poll_interval_ms !== undefined) {
     item.poll_interval_ms = existing.poll_interval_ms;
   }
+
+  if (options.defaultWorkflow) item.default_workflow = options.defaultWorkflow;
+  else if (existing?.default_workflow) item.default_workflow = existing.default_workflow;
 
   if (existing?.system_prompt_overrides) {
     item.system_prompt_overrides = existing.system_prompt_overrides;

@@ -164,6 +164,11 @@ export function makeRepoCommand(): Command {
       .option('--token-secret-arn <arn>', 'Per-repo GitHub token Secrets Manager ARN')
       .option('--max-turns <n>', 'Default max turns for tasks', parseInt)
       .option('--poll-interval <ms>', 'Default agent poll interval in milliseconds', parseInt)
+      .option(
+        '--default-workflow <id>',
+        'Workflow a Jira/Slack/webhook task on this repo runs when it names none itself '
+          + '(e.g. coding/new-task-adversarial-v1). The CLI\'s own --workflow is unaffected.',
+      )
       .option('--output <format>', 'Output format: text or json', 'text')
       .action(async (repoId: string, opts) => {
         assertRepoFormat(repoId);
@@ -225,6 +230,7 @@ export function makeRepoCommand(): Command {
           githubTokenSecretArn: opts.tokenSecretArn,
           maxTurns: opts.maxTurns,
           pollIntervalMs: opts.pollInterval,
+          defaultWorkflow: opts.defaultWorkflow,
         });
         const notes = buildRepoOnboardNotes({
           config,

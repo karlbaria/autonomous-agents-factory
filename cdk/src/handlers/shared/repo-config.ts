@@ -62,6 +62,15 @@ export interface RepoConfig {
    */
   readonly approval_gate_cap?: number;
   /**
+   * Workflow a Jira/Slack/webhook-channel task on this repo runs when it
+   * doesn't name one itself (Task 13 (fork)). Read by each channel's
+   * ``createTaskCore`` call site, falling back to
+   * {@link import('./workflows').CODING_WORKFLOW_ID} when unset. The CLI's
+   * ``bgagent submit`` always sends an explicit ``workflow_ref`` and never
+   * consults this field.
+   */
+  readonly default_workflow?: string;
+  /**
    * Registry (#246) ``registry://`` refs for MCP servers pinned by the
    * blueprint. Resolved by the orchestrator at task start and merged into the
    * agent's ``.mcp.json``.
