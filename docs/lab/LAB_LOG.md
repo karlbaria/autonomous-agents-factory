@@ -462,3 +462,33 @@ PR [autonomous-agents-factory#23](https://github.com/karlbaria/autonomous-agents
 - [autonomous-agents-factory#22](https://github.com/karlbaria/autonomous-agents-factory/issues/22) — `ensure_pr`'s "already exists" lookup doesn't check PR state before appending to a closed PR — open, not fixed this session.
 - `on_unresolved: fail` is tested at the `review.backend`/`pipeline._apply_unresolved_review_failure`/`workflow.runner._handle_review_and_fix` levels (run_agent mocked throughout) but not demonstrated live — the local demo's seeded flaw resolved within `max_iterations: 2`, so the unresolved path never ran for real.
 - Task 5's demo needed a hand-seeded flaw rather than an organic one: six attempts at genuinely hard, novel numeric edge cases (including one with an explicit buggy-shortcut instruction) all came back correct from the coder on the first pass. Worth remembering for Task 8 (coder eval) — this lab's coder model is a high bar to trip up organically.
+
+## Task 15.5: Add a second target app repo, `factory-shop`
+
+### 1. What was done, and where it differed from the plan
+
+- Filed [autonomous-agents-factory#24](https://github.com/karlbaria/autonomous-agents-factory/issues/24) proposing the scope below; owner added the `approved` label.
+- **Scoped down from the plan doc before implementation, with the owner's approval:** no `autonomous-agents-factory` application code change. `build_command`/`lint_command` are already optional per-repo `RepoConfig` fields that default to `mise run build`/`mise run lint`, so `factory-shop` gets build/lint gating for free from its own `mise.toml` — no CDK change needed. A real per-repo `default_workflow` field was considered and **deferred to Task 13** (new guidance bullet added there), since Jira/Slack/webhook channels are the ones that actually need it; the CLI keeps explicit `--workflow` for both repos. "Auto-merge opt-in" is a GitHub Actions repo variable (Task 17's concern), not an ABCA field — `factory-shop` simply has no Actions workflow yet.
+- Scaffolded `karlbaria/factory-shop` (private, new repo) directly — not through the fork's issue/PR loop, same precedent as `factory-sandbox-py`: a FastAPI backend (`backend/app/main.py`: `/health`, `/api/products`, cart get/add, a mock `/api/checkout` — in-memory, demo data only) with `pytest` tests, and a Vite + React frontend (`frontend/src/App.jsx`: product list, cart, a "Checkout (demo only)" button) with `vitest` tests. One root `mise.toml` with a `build` task (both suites) and a `lint` task (`ruff` for the backend, `eslint` + `eslint-plugin-react` for the frontend). 9 app files total, validated locally (6 backend + 3 frontend tests, both lints clean) before pushing.
+- Docs-only PR [autonomous-agents-factory#25](https://github.com/karlbaria/autonomous-agents-factory/pull/25) (closes #24) carries the `FACTORY_PLAN.md` scope-narrowing decision and the Task 13 guidance addition; this `LAB_LOG.md` section is a follow-up commit on the same branch.
+
+### 2. Operational steps (owner), and one sequencing correction
+
+- Owner created `karlbaria/factory-shop` (private, empty) and added it to the existing fine-grained PAT's repository access list (same Keychain entry, `factory-sandbox-pat` — token value unchanged).
+- **`bgagent github set-token` skipped**, correctly: since the PAT's value didn't change, the stack's single shared GitHub token secret already matched — nothing to overwrite.
+- **Sequencing correction to the plan's guidance:** `bgagent repo onboard karlbaria/factory-shop` had to run **before** `bgagent jira map ... --repo karlbaria/factory-shop` — the mapping command needs the repo to already exist in `RepoTable`. The plan doc listed onboarding and the Jira mapping as parallel/either-order steps; they aren't.
+- Owner created the `SHOP` Jira project and granted the installed Forge app the same three permissions it has on `SCRUM` (Browse Projects, Add Comments, Transition Issues), then ran `bgagent jira map 05c31df8-daa2-42f3-a976-d0d5037a2e42 SHOP --repo karlbaria/factory-shop --region us-east-2 --stack-name backgroundagent-dev-factory`. The existing `SCRUM` → `factory-sandbox-py` mapping is untouched.
+- **Harness note:** `bgagent repo list`/`repo show` default to `--stack-name backgroundagent-dev` (the stock stack name), not `backgroundagent-dev-factory` — both reported "not onboarded" until the flag was passed explicitly. Easy to trip over; worth remembering for the next new repo.
+
+### 3. Demo
+
+Pre-check: `bgagent list` with every non-terminal status, filtered to each repo, returned zero in-flight tasks on both before submitting.
+
+- **`factory-shop`:** filed [factory-shop#1](https://github.com/karlbaria/factory-shop/issues/1), "Add a GET `/api/products/{product_id}` endpoint". `coding/new-task-v1`, task `01M7RWSTGHN4NET6MHYED7DW08` — `COMPLETED`, `build_passed: true`, `lint_passed: true`, 4 turns, $0.1338, PR [factory-shop#2](https://github.com/karlbaria/factory-shop/pull/2). Clean — first task ever run against this repo.
+- **`factory-sandbox-py`:** filed [factory-sandbox-py#57](https://github.com/karlbaria/factory-sandbox-py/issues/57), "Add a GET `/double/{n}` endpoint". `coding/new-task-v1`, task `01M7RWWTZNMN0CQJXW0EFQ7435` — `COMPLETED`, `build_passed: true`, `lint_passed: true`, 4 turns, $0.1093, PR [factory-sandbox-py#58](https://github.com/karlbaria/factory-sandbox-py/pull/58). Confirms the sandbox repo is unaffected by onboarding a second target repo.
+
+### 4. Open items
+
+- [factory-shop#2](https://github.com/karlbaria/factory-shop/pull/2) and [factory-sandbox-py#58](https://github.com/karlbaria/factory-sandbox-py/pull/58) (this session's demo PRs) are left open for the owner to review/merge.
+- `factory-shop` has no GitHub Actions workflow, CDK app, or Amplify Hosting preview yet — that's Task 16's job. No `FACTORY_AUTO_MERGE` variable either — Task 17's.
+- The real per-repo `default_workflow` field (Jira/Slack/webhook channels) is deferred to Task 13, not built here.
