@@ -143,7 +143,12 @@ describe('createAutoTrackedJiraIssue', () => {
 
       const result = await createAutoTrackedJiraIssue(PARAMS);
 
-      expect(result).toEqual({ kind: 'created', issueKey: 'SHOP-7' });
+      expect(result).toEqual({
+        kind: 'created',
+        issueKey: 'SHOP-7',
+        oauthSecretArn: 'arn:secret:acme',
+        siteUrl: 'https://acme.atlassian.net',
+      });
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(url).toBe('https://install.webtrigger.atlassian.app/public/trigger-id');
       expect(JSON.parse(init.body as string)).toMatchObject({
@@ -214,7 +219,12 @@ describe('createAutoTrackedJiraIssue', () => {
 
       const result = await createAutoTrackedJiraIssue(PARAMS);
 
-      expect(result).toEqual({ kind: 'created', issueKey: 'SHOP-9' });
+      expect(result).toEqual({
+        kind: 'created',
+        issueKey: 'SHOP-9',
+        oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:111:secret:bgagent-jira-oauth-cloud-1',
+        siteUrl: 'https://acme.atlassian.net',
+      });
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(url).toBe('https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/issue');
       expect((init.headers as Record<string, string>).Authorization).toBe('Bearer jira_oauth_token');
@@ -308,7 +318,7 @@ describe('resolveJiraAutoTrack', () => {
     expect(result).toEqual({ channelMetadata: BASE_PARAMS.channelMetadata });
   });
 
-  test('merges jira_cloud_id/jira_issue_key into channelMetadata on a successful create', async () => {
+  test('merges jira_cloud_id/jira_issue_key/jira_oauth_secret_arn/jira_site_url into channelMetadata on a successful create', async () => {
     ddbSend.mockResolvedValueOnce({
       Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }],
     });
@@ -321,8 +331,17 @@ describe('resolveJiraAutoTrack', () => {
       channelSource: 'slack',
     });
 
+    // Issue #34: the oauth secret ARN + site URL must be threaded through so
+    // the agent can resolve its own Jira credentials at task start — without
+    // them the task has a Jira link but no way to act on it.
     expect(result).toEqual({
-      channelMetadata: { slack_team_id: 'T1', jira_cloud_id: 'cloud-1', jira_issue_key: 'SHOP-7' },
+      channelMetadata: {
+        slack_team_id: 'T1',
+        jira_cloud_id: 'cloud-1',
+        jira_issue_key: 'SHOP-7',
+        jira_oauth_secret_arn: 'arn:secret:acme',
+        jira_site_url: 'https://acme.atlassian.net',
+      },
     });
     expect(ddbSend).toHaveBeenCalledTimes(1); // the Scan only — no event write on success
   });
