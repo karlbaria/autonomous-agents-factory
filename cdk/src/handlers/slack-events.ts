@@ -169,6 +169,13 @@ async function handleAppMention(
     return;
   }
 
+  // React with :eyes: immediately so the user knows the bot saw their message.
+  const mentionTs = threadTs ?? messageTs;
+  const botToken = mentionTs ? await getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`) : null;
+  if (botToken && mentionTs) {
+    await slackFetch(botToken, 'reactions.add', { channel: channelId, timestamp: mentionTs, name: 'eyes' });
+  }
+
   // Build a payload compatible with the command processor.
   // Use source: 'mention' so the processor knows there's no response_url —
   // it should use chat.postMessage with the bot token instead.
@@ -182,11 +189,33 @@ async function handleAppMention(
   // (`bgagent slack onboard-channel`), and only replies with guidance if no
   // default exists. Keeping that decision in one place (the processor) avoids
   // duplicating the channel-mapping lookup in the events handler.
-  const repoPattern = /\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:#\d+)?)\b/;
-  const repoMatch = text.match(repoPattern);
+  //
+  // `extractRepoCandidates` excludes a match that's actually a deeper segment
+  // of a longer path (e.g. "api/products" lifted out of the URL
+  // "/api/products/count") — see its doc comment. Two or more surviving
+  // candidates is genuine ambiguity (two real-looking repo names in one
+  // message): rather than guess, ask in-thread which one was meant and don't
+  // forward to the processor at all.
+  const repoCandidates = extractRepoCandidates(text);
+  if (repoCandidates.length > 1) {
+    if (botToken && mentionTs) {
+      await slackFetch(botToken, 'chat.postMessage', {
+        channel: channelId,
+        thread_ts: mentionTs,
+        text: `:thinking_face: I see more than one repo-looking name in that message — which did you mean? ${repoCandidates.map((c) => `\`${c}\``).join(', ')}\nReply with \`@Shoof submit <owner/repo> <description>\` to be explicit.`,
+      });
+    }
+    logger.info('app_mention has ambiguous repo candidates — asked for clarification instead of guessing', {
+      team_id: teamId,
+      channel_id: channelId,
+      candidates: repoCandidates,
+    });
+    return;
+  }
+
   let commandText: string;
-  if (repoMatch) {
-    const repo = repoMatch[0];
+  if (repoCandidates.length === 1) {
+    const repo = repoCandidates[0];
     const description = text.replace(repo, '').replace(/\s+/g, ' ').trim();
     commandText = `submit ${repo} ${description}`.trim();
   } else {
@@ -213,18 +242,9 @@ async function handleAppMention(
     team_id: teamId,
     channel_id: channelId,
     source: 'mention',
-    mention_thread_ts: threadTs ?? messageTs,
+    mention_thread_ts: mentionTs,
     ...(files.length > 0 && { files }),
   };
-
-  // React with :eyes: immediately so the user knows the bot saw their message.
-  const mentionTs = threadTs ?? messageTs;
-  if (mentionTs) {
-    const botToken = await getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`);
-    if (botToken) {
-      await slackFetch(botToken, 'reactions.add', { channel: channelId, timestamp: mentionTs, name: 'eyes' });
-    }
-  }
 
   try {
     await lambdaClient.send(new InvokeCommand({
@@ -244,7 +264,6 @@ async function handleAppMention(
     });
     // Mirror the no-repo-found failure UX: swap :eyes: to :x: and reply in thread
     // so the user isn't left staring at a stuck :eyes: reaction forever.
-    const botToken = await getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`);
     if (botToken && mentionTs) {
       await slackFetch(botToken, 'reactions.remove', { channel: channelId, timestamp: mentionTs, name: 'eyes' });
       await slackFetch(botToken, 'reactions.add', { channel: channelId, timestamp: mentionTs, name: 'x' });
@@ -255,6 +274,31 @@ async function handleAppMention(
       });
     }
   }
+}
+
+/** Pattern for an "owner/repo" or "owner/repo#N" candidate inside free text. */
+const REPO_CANDIDATE_PATTERN = /\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:#\d+)?)\b/g;
+
+/**
+ * Candidate "owner/repo[#N]" tokens found in free text, in order of first
+ * appearance, de-duplicated. Excludes a match that's actually a deeper
+ * segment of a longer path rather than a real repo mention — e.g.
+ * "api/products" lifted out of the URL path "/api/products/count" — detected
+ * by the character immediately before the match being a "/".
+ */
+function extractRepoCandidates(text: string): string[] {
+  const pattern = new RegExp(REPO_CANDIDATE_PATTERN);
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (text[match.index - 1] === '/') continue;
+    const token = match[1];
+    if (seen.has(token)) continue;
+    seen.add(token);
+    candidates.push(token);
+  }
+  return candidates;
 }
 
 async function revokeInstallation(teamId: string): Promise<void> {

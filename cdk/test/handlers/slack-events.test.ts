@@ -231,6 +231,104 @@ describe('slack-events handler', () => {
     expect(reactionCall).toBeTruthy();
   });
 
+  // Regression: the repo-extraction regex was unanchored and first-match-wins,
+  // so it lifted "api/products" out of the URL path "/api/products/count"
+  // instead of reaching "karlbaria/factory-shop" later in the message.
+  test('picks the real repo, not a URL path segment that looks like one', async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    lambdaSend.mockResolvedValueOnce({});
+    smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+      if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
+        return Promise.resolve({ SecretString: SIGNING_SECRET });
+      }
+      return Promise.resolve({ SecretString: 'xoxb-bot' });
+    });
+
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: {
+        type: 'app_mention',
+        user: 'U1',
+        channel: 'C1',
+        text: '<@BOT> add a GET /api/products/count endpoint in karlbaria/factory-shop',
+        ts: '1234.0002',
+      },
+    });
+    const result = await handler(signedEvent(body));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).toHaveBeenCalledTimes(1);
+    const [invokeCmd] = lambdaSend.mock.calls[0];
+    const payload = JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload));
+    expect(payload.text).toBe('submit karlbaria/factory-shop add a GET /api/products/count endpoint in');
+  });
+
+  // Two real, non-URL-path candidates — don't guess; ask in-thread instead.
+  test('asks for clarification in-thread when more than one repo candidate remains, and does not forward', async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+      if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
+        return Promise.resolve({ SecretString: SIGNING_SECRET });
+      }
+      return Promise.resolve({ SecretString: 'xoxb-bot' });
+    });
+
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: {
+        type: 'app_mention',
+        user: 'U1',
+        channel: 'C1',
+        text: '<@BOT> port the fix from karlbaria/factory-sandbox-py to karlbaria/factory-shop',
+        ts: '1234.0003',
+      },
+    });
+    const result = await handler(signedEvent(body));
+    expect(result.statusCode).toBe(200);
+    // Not forwarded to the processor — the ambiguity is resolved (or not) in-thread.
+    expect(lambdaSend).not.toHaveBeenCalled();
+    const clarifyCall = fetchMock.mock.calls.find(
+      ([url, opts]) => String(url).includes('chat.postMessage')
+        && String((opts as { body: string }).body).includes('more than one repo-looking name'),
+    );
+    expect(clarifyCall).toBeTruthy();
+    const clarifyBody = JSON.parse((clarifyCall![1] as { body: string }).body);
+    expect(clarifyBody.text).toContain('karlbaria/factory-sandbox-py');
+    expect(clarifyBody.text).toContain('karlbaria/factory-shop');
+  });
+
+  // A URL path with no real repo mention — zero candidates after exclusion,
+  // same "forward the whole text" fallback as the no-repo case.
+  test('a message with only a URL path and no real repo falls back like the no-repo case', async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    lambdaSend.mockResolvedValueOnce({});
+    smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+      if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
+        return Promise.resolve({ SecretString: SIGNING_SECRET });
+      }
+      return Promise.resolve({ SecretString: 'xoxb-bot' });
+    });
+
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: {
+        type: 'app_mention',
+        user: 'U1',
+        channel: 'C1',
+        text: '<@BOT> fix the bug described at /api/products/count',
+        ts: '1234.0004',
+      },
+    });
+    const result = await handler(signedEvent(body));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).toHaveBeenCalledTimes(1);
+    const [invokeCmd] = lambdaSend.mock.calls[0];
+    const payload = JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload));
+    expect(payload.text).toBe('submit fix the bug described at /api/products/count');
+  });
+
   test('app_mention without repo is forwarded to the processor (channel-default fallback)', async () => {
     // The events handler no longer answers no-repo mentions inline — it forwards
     // them so the processor can apply the channel's onboarded default repo (and,
