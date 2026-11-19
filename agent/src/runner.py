@@ -290,6 +290,7 @@ def _initialize_policy_engine_and_hooks(
         extra_policies=cedar_policies or None,
         allowed_read_roots=config.allowed_read_roots,
         scratch_write_root=config.scratch_write_root,
+        protected_write_roots=config.protected_write_roots,
         **engine_kwargs,
     )
     # Surface the resolved cap + its source so operators can distinguish a

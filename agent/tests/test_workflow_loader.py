@@ -325,6 +325,25 @@ class TestLoadWorkflow:
         assert workflow.convergence.mode == mode
         assert workflow.convergence.terminal_outcomes == [outcome]
 
+    def test_adversarial_workflow_declares_the_bounded_fix_loop(self):
+        """Task 5 (ADR-026 (fork)): coding/new-task-adversarial-v1's
+        review_and_fix step sets review_mode: adversarial plus the base-spec
+        settings, distinct from coding/new-task-verified-v1's advisory step."""
+        workflow = load_workflow("coding/new-task-adversarial-v1")
+        review_step = next(s for s in workflow.steps if s.kind == "review_and_fix")
+        assert review_step.review_mode == "adversarial"
+        assert review_step.max_iterations == 2
+        assert review_step.block_on_severity == "major"
+        assert review_step.on_unresolved == "pr_with_warning"
+        # coding/new-task-v1 and coding/new-task-verified-v1 are unchanged.
+        assert load_workflow("coding/new-task-v1").id == "coding/new-task-v1"
+        verified_review_step = next(
+            s
+            for s in load_workflow("coding/new-task-verified-v1").steps
+            if s.kind == "review_and_fix"
+        )
+        assert verified_review_step.review_mode == "advisory"
+
     def test_missing_id_raises(self):
         with pytest.raises(WorkflowValidationError, match="not found"):
             load_workflow("coding/does-not-exist-v9")

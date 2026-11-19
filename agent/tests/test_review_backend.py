@@ -17,7 +17,11 @@ import pytest
 
 from models import AgentInvocationLedger, AgentResult, RepoSetup, TaskConfig
 from review.backend import run_review_and_fix
-from review.prompts import CODE_REVIEWER_SYSTEM_PROMPT, PROBE_WRITER_SYSTEM_PROMPT
+from review.prompts import (
+    CODE_REVIEWER_SYSTEM_PROMPT,
+    FIXER_SYSTEM_PROMPT,
+    PROBE_WRITER_SYSTEM_PROMPT,
+)
 
 _SCRATCH_RE = re.compile(r"into: `(.+)`")
 
@@ -377,3 +381,476 @@ class TestDefaultReviewerModelIsGranted:
         from review.backend import DEFAULT_REVIEWER_MODEL
 
         assert "claude-sonnet-5-5" not in DEFAULT_REVIEWER_MODEL
+
+
+# --- Task 5 (ADR-026 (fork)): the bounded adversarial fix loop ---------------
+
+
+def _probe_writer_fake(scratch_dir: str, probes: dict[str, str]) -> None:
+    """Write ``{filename: source}`` probes into ``scratch_dir`` for a fake Call 1."""
+    for filename, source in probes.items():
+        Path(scratch_dir, filename).write_text(source, encoding="utf-8")
+
+
+def _manifest(probes: dict[str, str]) -> str:
+    lines = "\n".join(f"- {name}: probe" for name in probes)
+    return f"Wrote probes.\n\nPROBES:\n{lines}\n"
+
+
+def _marker_probe_source(marker_path: Path) -> str:
+    """A probe that passes iff ``marker_path`` exists — the fixer creates it."""
+    return (
+        "from pathlib import Path\n\n\n"
+        f"def test_marker():\n    assert Path(r'{marker_path}').exists()\n"
+    )
+
+
+class TestAdversarialCleanOnFirstPass:
+    def test_ready_on_round_one_runs_no_fixer(self, config, setup, tmp_path):
+        probe_calls = 0
+
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            nonlocal probe_calls
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                probe_calls += 1
+                scratch_dir = _scratch_dir_from_prompt(user_prompt)
+                probes = {"test_pass.py": "def test_pass():\n    assert True\n"}
+                _probe_writer_fake(scratch_dir, probes)
+                return AgentResult(status="success", cost_usd=0.01, result_text=_manifest(probes))
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                raise AssertionError("fixer must not run when round one is READY")
+            return AgentResult(status="success", cost_usd=0.01, result_text="VERDICT: READY\n")
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert result.ran is True
+        assert result.mode == "adversarial"
+        assert result.verdict == "READY"
+        assert result.unresolved is False
+        assert len(result.rounds) == 1
+        assert probe_calls == 1
+
+
+class TestAdversarialFixedOnSecondPass:
+    def test_round_one_not_ready_fixer_runs_round_two_ready(self, config, setup, tmp_path):
+        marker = Path(setup.repo_dir) / "FIXED_MARKER"
+        calls: list[str] = []
+
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                calls.append("probe_writer")
+                scratch_dir = _scratch_dir_from_prompt(user_prompt)
+                round_num = sum(1 for c in calls if c == "probe_writer")
+                probes = {f"test_fresh_{round_num}.py": "def test_fresh():\n    assert True\n"}
+                if round_num == 1:
+                    probes["test_marker.py"] = _marker_probe_source(marker)
+                _probe_writer_fake(scratch_dir, probes)
+                return AgentResult(status="success", cost_usd=0.01, result_text=_manifest(probes))
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                calls.append("fixer")
+                marker.write_text("fixed", encoding="utf-8")
+                return AgentResult(status="success", cost_usd=0.02, result_text="Fixed it.")
+            calls.append("code_reviewer")
+            round_num = sum(1 for c in calls if c == "code_reviewer")
+            if round_num == 1:
+                return AgentResult(
+                    status="success",
+                    cost_usd=0.02,
+                    result_text=(
+                        "VERDICT: NOT-READY\nFINDINGS:\n```json\n"
+                        '[{"type": "issue", "severity": "major", "title": "Missing marker", '
+                        '"description": "x", "evidence": "app.py:1"}]\n```\n'
+                    ),
+                )
+            return AgentResult(status="success", cost_usd=0.02, result_text="VERDICT: READY\n")
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert result.verdict == "READY"
+        assert result.unresolved is False
+        assert len(result.rounds) == 2
+        assert result.rounds[0].verdict == "NOT_READY"
+        assert result.rounds[1].verdict == "READY"
+        assert calls == [
+            "probe_writer",
+            "code_reviewer",
+            "fixer",
+            "probe_writer",
+            "code_reviewer",
+        ]
+
+    def test_round_two_reruns_previous_failing_probe_alongside_fresh_one(
+        self, config, setup, tmp_path
+    ):
+        """Amendment 4: round 2 must rerun round 1's failing probe (now fixed)
+        alongside whatever fresh probe round 2's probe writer produces."""
+        marker = Path(setup.repo_dir) / "FIXED_MARKER"
+        probe_writer_calls = 0
+
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            nonlocal probe_writer_calls
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                probe_writer_calls += 1
+                scratch_dir = _scratch_dir_from_prompt(user_prompt)
+                if probe_writer_calls == 1:
+                    probes = {"test_marker.py": _marker_probe_source(marker)}
+                else:
+                    probes = {"test_fresh_round2.py": "def test_fresh():\n    assert True\n"}
+                _probe_writer_fake(scratch_dir, probes)
+                return AgentResult(status="success", cost_usd=0.01, result_text=_manifest(probes))
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                marker.write_text("fixed", encoding="utf-8")
+                return AgentResult(status="success", cost_usd=0.02, result_text="Fixed it.")
+            if "test_marker.py" in user_prompt and "FAIL" in user_prompt:
+                return AgentResult(
+                    status="success",
+                    cost_usd=0.02,
+                    result_text=(
+                        "VERDICT: NOT-READY\nFINDINGS:\n```json\n"
+                        '[{"type": "issue", "severity": "major", "title": "Missing marker", '
+                        '"description": "x", "evidence": "app.py:1"}]\n```\n'
+                    ),
+                )
+            return AgentResult(status="success", cost_usd=0.02, result_text="VERDICT: READY\n")
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert result.verdict == "READY"
+        round_two_filenames = {r.probe.filename for r in result.rounds[1].probe_results}
+        assert round_two_filenames == {"test_marker.py", "test_fresh_round2.py"}
+        assert all(r.passed for r in result.rounds[1].probe_results)
+
+
+class TestAdversarialStillBlockedAtCap:
+    def _not_ready_fake(self, calls: list[str]):
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                calls.append("probe_writer")
+                return AgentResult(status="success", cost_usd=0.01, result_text="PROBES:\n")
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                calls.append("fixer")
+                return AgentResult(status="success", cost_usd=0.02, result_text="Tried.")
+            calls.append("code_reviewer")
+            return AgentResult(
+                status="success",
+                cost_usd=0.02,
+                result_text=(
+                    "VERDICT: NOT-READY\nFINDINGS:\n```json\n"
+                    '[{"type": "issue", "severity": "major", "title": "Still broken", '
+                    '"description": "x", "evidence": "app.py:1"}]\n```\n'
+                ),
+            )
+
+        return fake
+
+    def test_pr_with_warning_mode_reports_unresolved_without_failing(self, config, setup, tmp_path):
+        calls: list[str] = []
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=self._not_ready_fake(calls))):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                max_iterations=2,
+                on_unresolved="pr_with_warning",
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert result.unresolved is True
+        assert result.stopped_reason == "max_iterations"
+        assert len(result.rounds) == 2
+        assert result.needs_unresolved_label is True
+        assert result.should_fail_task is False
+
+    def test_fail_mode_reports_unresolved_and_requests_task_failure(self, config, setup, tmp_path):
+        calls: list[str] = []
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=self._not_ready_fake(calls))):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                max_iterations=1,
+                on_unresolved="fail",
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert result.unresolved is True
+        assert len(result.rounds) == 1
+        assert calls == ["probe_writer", "code_reviewer"]  # cap=1 — no fixer call
+        assert result.needs_unresolved_label is False
+        assert result.should_fail_task is True
+
+
+class TestAdversarialReviewerRetriedOnceThenNotReady:
+    def test_call2_exception_retried_once_then_succeeds(self, config, setup, tmp_path):
+        attempts = 0
+
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            nonlocal attempts
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                return AgentResult(status="success", cost_usd=0.01, result_text="PROBES:\n")
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("transient SDK error")
+            return AgentResult(status="success", cost_usd=0.02, result_text="VERDICT: READY\n")
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert attempts == 2
+        assert result.verdict == "READY"
+        assert result.unresolved is False
+
+    def test_call2_unparseable_twice_counts_as_not_ready(self, config, setup, tmp_path):
+        attempts = 0
+
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            nonlocal attempts
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                return AgentResult(status="success", cost_usd=0.01, result_text="PROBES:\n")
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                return AgentResult(status="success", cost_usd=0.02, result_text="Tried.")
+            attempts += 1
+            return AgentResult(status="success", cost_usd=0.02, result_text="no verdict here")
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                max_iterations=1,
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert attempts == 2  # retried once, within round 1 alone
+        assert result.rounds[0].verdict == "NOT_READY"
+        assert result.rounds[0].parse_error is not None
+
+
+class TestAdversarialStaleShaRefused:
+    def test_head_changing_during_review_forces_not_ready(self, config, setup, tmp_path):
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                return AgentResult(status="success", cost_usd=0.01, result_text="PROBES:\n")
+            # Simulate something else committing to the repo mid-review.
+            _git(setup.repo_dir, "commit", "--allow-empty", "-m", "concurrent change")
+            return AgentResult(status="success", cost_usd=0.02, result_text="VERDICT: READY\n")
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                max_iterations=1,
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert result.rounds[0].stale_sha is True
+        assert result.rounds[0].verdict == "NOT_READY"
+        assert result.rounds[0].parse_error is not None
+        assert "stale" in result.rounds[0].parse_error.lower()
+
+
+class TestAdversarialBudgetExhaustedPartway:
+    def test_stops_after_round_one_when_budget_runs_out(self, config, setup, tmp_path):
+        config = config.model_copy(update={"max_budget_usd": 0.021})
+        calls: list[str] = []
+
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                calls.append("probe_writer")
+                return AgentResult(status="success", cost_usd=0.01, result_text="PROBES:\n")
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                calls.append("fixer")
+                return AgentResult(status="success", cost_usd=0.02, result_text="Tried.")
+            calls.append("code_reviewer")
+            return AgentResult(
+                status="success",
+                cost_usd=0.01,
+                result_text=(
+                    "VERDICT: NOT-READY\nFINDINGS:\n```json\n"
+                    '[{"type": "issue", "severity": "major", "title": "x", '
+                    '"description": "x", "evidence": "app.py:1"}]\n```\n'
+                ),
+            )
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                max_iterations=2,
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert calls == ["probe_writer", "code_reviewer"]  # no fixer — budget ran out
+        assert result.stopped_reason == "budget_exhausted"
+        assert result.unresolved is True
+
+
+class TestAdversarialProbesCannotBeTamperedWith:
+    def test_fixer_touching_probes_dir_is_reverted_and_recorded(self, config, setup, tmp_path):
+        """Amendment 1: the fixer has Bash/Write/Edit, so a Write tool call into
+        tests/review_probes/ must be detected (git-diff-and-revert) and
+        recorded, even though it is not blocked by the Cedar layer in this
+        in-process fake (Cedar enforcement is exercised separately in
+        test_review_cedar.py)."""
+        marker = Path(setup.repo_dir) / "FIXED_MARKER"
+        probes_dir = Path(setup.repo_dir) / "tests" / "review_probes"
+
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                scratch_dir = _scratch_dir_from_prompt(user_prompt)
+                probes = {"test_marker.py": _marker_probe_source(marker)}
+                _probe_writer_fake(scratch_dir, probes)
+                return AgentResult(status="success", cost_usd=0.01, result_text=_manifest(probes))
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                marker.write_text("fixed", encoding="utf-8")
+                # Tamper: try to neutralize the probe directly.
+                probes_dir.mkdir(parents=True, exist_ok=True)
+                (probes_dir / "test_marker.py").write_text(
+                    "def test_marker():\n    assert True\n", encoding="utf-8"
+                )
+                return AgentResult(status="success", cost_usd=0.02, result_text="Tampered.")
+            if "test_marker.py" in user_prompt and "FAIL" in user_prompt:
+                return AgentResult(
+                    status="success",
+                    cost_usd=0.02,
+                    result_text=(
+                        "VERDICT: NOT-READY\nFINDINGS:\n```json\n"
+                        '[{"type": "issue", "severity": "major", "title": "x", '
+                        '"description": "x", "evidence": "app.py:1"}]\n```\n'
+                    ),
+                )
+            return AgentResult(status="success", cost_usd=0.02, result_text="VERDICT: READY\n")
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                max_iterations=2,
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert len(result.rounds) == 2
+        assert result.rounds[1].reverted_probe_paths == ["tests/review_probes/test_marker.py"]
+        # Reverted to the committed (still-failing, pre-fix) content, not the
+        # fixer's neutered version — the probe keeps grading the real fix.
+        committed_content = (probes_dir / "test_marker.py").read_text(encoding="utf-8")
+        assert "assert True" not in committed_content
+
+    def test_pycache_churn_from_running_the_probes_is_not_tamper(self, config, setup, tmp_path):
+        """Regression (live demo run, 2026-11-18): the fixer's own `mise run
+        build`/pytest invocation recompiles the committed probes, writing
+        bytecode cache under tests/review_probes/__pycache__/ as a side
+        effect — that must never be reported as the fixer tampering with the
+        probes."""
+        marker = Path(setup.repo_dir) / "FIXED_MARKER"
+        probes_dir = Path(setup.repo_dir) / "tests" / "review_probes"
+
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                scratch_dir = _scratch_dir_from_prompt(user_prompt)
+                probes = {"test_marker.py": _marker_probe_source(marker)}
+                _probe_writer_fake(scratch_dir, probes)
+                return AgentResult(status="success", cost_usd=0.01, result_text=_manifest(probes))
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                marker.write_text("fixed", encoding="utf-8")
+                # Bytecode cache churn, not tampering: running the committed
+                # probe writes/updates its __pycache__ entry.
+                pycache_dir = probes_dir / "__pycache__"
+                pycache_dir.mkdir(parents=True, exist_ok=True)
+                (pycache_dir / "test_marker.cpython-313-pytest.pyc").write_bytes(b"\x00\x01")
+                return AgentResult(status="success", cost_usd=0.02, result_text="Ran the probes.")
+            if "test_marker.py" in user_prompt and "FAIL" in user_prompt:
+                return AgentResult(
+                    status="success",
+                    cost_usd=0.02,
+                    result_text=(
+                        "VERDICT: NOT-READY\nFINDINGS:\n```json\n"
+                        '[{"type": "issue", "severity": "major", "title": "x", '
+                        '"description": "x", "evidence": "app.py:1"}]\n```\n'
+                    ),
+                )
+            return AgentResult(status="success", cost_usd=0.02, result_text="VERDICT: READY\n")
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                max_iterations=2,
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert result.rounds[1].reverted_probe_paths == []
+
+
+class TestAdversarialInvalidProbeDoesNotBlock:
+    def test_call2_marks_probe_invalid_and_still_reports_ready(self, config, setup, tmp_path):
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                scratch_dir = _scratch_dir_from_prompt(user_prompt)
+                probes = {"test_out_of_scope.py": "def test_x():\n    assert False\n"}
+                _probe_writer_fake(scratch_dir, probes)
+                return AgentResult(status="success", cost_usd=0.01, result_text=_manifest(probes))
+            return AgentResult(
+                status="success",
+                cost_usd=0.02,
+                result_text=(
+                    "VERDICT: READY\nFINDINGS:\n```json\n[]\n```\n"
+                    "INVALID_PROBES:\n```json\n"
+                    '[{"filename": "test_out_of_scope.py", '
+                    '"reason": "tests behavior the issue never asked for"}]\n```\n'
+                ),
+            )
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert result.verdict == "READY"
+        assert result.unresolved is False
+        assert result.rounds[0].invalid_probes == {
+            "test_out_of_scope.py": "tests behavior the issue never asked for"
+        }
+        assert len(result.rounds) == 1  # READY — no fixer, no second round

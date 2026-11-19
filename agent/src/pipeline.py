@@ -43,6 +43,7 @@ from models import (
 from observability import current_otel_trace_id, task_span
 from post_hooks import (
     _extract_agent_notes,
+    apply_unresolved_label,
     ensure_committed,
     ensure_pr,
     reconcile_agent_branch,
@@ -292,6 +293,31 @@ def _execute_agent_step(
         review_outcome_out.update(ctx.artifacts["review_outcome"])
 
     return ctx.agent_result
+
+
+def _apply_unresolved_review_failure(
+    agent_result: AgentResult, review_outcome: dict
+) -> AgentResult:
+    """Fail the task when adversarial review is unresolved and on_unresolved=="fail".
+
+    Task 5 (ADR-026 (fork)): the coder's own ``run_agent`` call (``agent_result``)
+    already succeeded — ``review_and_fix``'s StepOutcome "failed" status alone
+    doesn't propagate to the task result (``_execute_agent_step`` only raises
+    when ``run_agent`` itself produced no result), so this must be explicit.
+    ``on_unresolved: "pr_with_warning"`` (the default) returns ``agent_result``
+    unchanged; the PR still ships, with the `review:unresolved` label added
+    separately once the PR exists.
+    """
+    if not review_outcome.get("should_fail_task"):
+        return agent_result
+    rounds = review_outcome.get("rounds") or []
+    return AgentResult(
+        status="error",
+        error=(
+            f"adversarial review unresolved after {len(rounds)} round(s): "
+            f"{review_outcome.get('verdict')}"
+        ),
+    )
 
 
 def _should_post_start_comment(channel_source: str | None, workflow_id: str) -> bool:
@@ -1299,6 +1325,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                     agent_span.set_status(StatusCode.ERROR, str(e))
                     agent_span.record_exception(e)
                     agent_result = AgentResult(status="error", error=str(e))
+            agent_result = _apply_unresolved_review_failure(agent_result, review_outcome)
             progress.write_agent_milestone(
                 "agent_execution_complete",
                 f"status={agent_result.status} turns={agent_result.turns}",
@@ -1542,6 +1569,12 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                     post_span.set_attribute("build.passed", build_passed)
                     post_span.set_attribute("lint.passed", lint_passed)
                     post_span.set_attribute("pr.url", pr_url or "")
+                    # Task 5 (ADR-026 (fork)): review_mode: adversarial,
+                    # on_unresolved: "pr_with_warning" (the default) — the
+                    # loop exhausted max_iterations still NOT_READY, but the
+                    # PR still ships; label it so a human reviewer notices.
+                    if pr_url and review_outcome.get("needs_unresolved_label"):
+                        apply_unresolved_label(setup.repo_dir, config.repo_url, pr_url)
             if pr_url:
                 progress.write_agent_milestone("pr_created", pr_url)
                 # Move the Jira card In Progress → In Review now that a PR is

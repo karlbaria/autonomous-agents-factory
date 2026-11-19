@@ -864,3 +864,93 @@ class TestRunAgentHandler:
             _handle_run_agent(wf.steps[0], ctx)
 
         assert "_T3_PROBE" not in os.environ
+
+
+class TestReviewAndFixHandler:
+    """Task 5 (ADR-026 (fork)): the handler threads the adversarial-mode step
+    fields through and fails the step when the loop requests it."""
+
+    def _ctx_with_repo(self, wf):
+        from models import RepoSetup
+
+        return _real_ctx(wf, setup=RepoSetup(repo_dir="/repo", branch="b", default_branch="main"))
+
+    def test_threads_adversarial_step_fields(self):
+        from review.backend import ReviewAndFixResult
+        from workflow.runner import _handle_review_and_fix
+
+        wf = _workflow(
+            [
+                {
+                    "kind": "review_and_fix",
+                    "name": "review",
+                    "review_mode": "adversarial",
+                    "max_iterations": 3,
+                    "block_on_severity": "critical",
+                    "on_unresolved": "fail",
+                }
+            ]
+        )
+        ctx = self._ctx_with_repo(wf)
+        captured: dict = {}
+
+        def fake(**kwargs):
+            captured.update(kwargs)
+            return ReviewAndFixResult(ran=True, mode="adversarial", verdict="READY")
+
+        with patch("review.run_review_and_fix", side_effect=fake):
+            outcome = _handle_review_and_fix(wf.steps[0], ctx)
+
+        assert outcome.succeeded
+        assert captured["review_mode"] == "adversarial"
+        assert captured["max_iterations"] == 3
+        assert captured["block_on_severity"] == "critical"
+        assert captured["on_unresolved"] == "fail"
+
+    def test_should_fail_task_becomes_a_failed_step_outcome(self):
+        from review.backend import ReviewAndFixResult
+        from workflow.runner import _handle_review_and_fix
+
+        wf = _workflow([{"kind": "review_and_fix", "name": "review", "review_mode": "adversarial"}])
+        ctx = self._ctx_with_repo(wf)
+        review_result = ReviewAndFixResult(
+            ran=True,
+            mode="adversarial",
+            verdict="NOT_READY",
+            unresolved=True,
+            on_unresolved="fail",
+            should_fail_task=True,
+            rounds=[],
+        )
+
+        with patch("review.run_review_and_fix", return_value=review_result):
+            outcome = _handle_review_and_fix(wf.steps[0], ctx)
+
+        assert outcome.failed
+        assert "NOT_READY" in (outcome.error or "")
+        # The review outcome still threads through even on a failed step —
+        # pipeline.py's review_outcome_out needs it regardless.
+        assert outcome.data["review_outcome"]["should_fail_task"] is True
+
+    def test_pr_with_warning_succeeds_despite_being_unresolved(self):
+        from review.backend import ReviewAndFixResult
+        from workflow.runner import _handle_review_and_fix
+
+        wf = _workflow([{"kind": "review_and_fix", "name": "review", "review_mode": "adversarial"}])
+        ctx = self._ctx_with_repo(wf)
+        review_result = ReviewAndFixResult(
+            ran=True,
+            mode="adversarial",
+            verdict="NOT_READY",
+            unresolved=True,
+            on_unresolved="pr_with_warning",
+            needs_unresolved_label=True,
+            should_fail_task=False,
+            rounds=[],
+        )
+
+        with patch("review.run_review_and_fix", return_value=review_result):
+            outcome = _handle_review_and_fix(wf.steps[0], ctx)
+
+        assert outcome.succeeded
+        assert outcome.data["review_outcome"]["needs_unresolved_label"] is True

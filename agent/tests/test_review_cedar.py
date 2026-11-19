@@ -124,3 +124,54 @@ class TestRulesAreDormantWithoutConfinement:
             "Read", {"file_path": str(tmp_path / "coder_repo" / "x.py")}
         )
         assert decision.outcome == Outcome.ALLOW
+
+
+def _fixer_engine(protected_write_roots: list[str]) -> PolicyEngine:
+    return PolicyEngine(
+        task_type="review_fixer",
+        repo="owner/repo",
+        read_only=False,
+        protected_write_roots=protected_write_roots,
+    )
+
+
+class TestFixerProtectedWriteRoots:
+    """Task 5 amendment 1 (ADR-026 (fork)): the fixer has Bash, so this Cedar
+    rule is defense-in-depth only — the deterministic git-diff-and-revert
+    step in review/backend.py is what actually enforces probe immunity —
+    but it still must deny a Write/Edit the fixer aims at the protected
+    probes directory, the same mechanism Task 4 used for the probe writer's
+    scratch confinement, inverted (forbid *inside* a root, not outside one)."""
+
+    def test_write_inside_protected_root_denied(self, tmp_path):
+        probes_dir = tmp_path / "repo" / "tests" / "review_probes"
+        engine = _fixer_engine([str(probes_dir)])
+        decision = engine.evaluate_tool_use(
+            "Write", {"file_path": str(probes_dir / "test_divide.py")}
+        )
+        assert decision.outcome == Outcome.DENY
+        assert "review_fixer_write_protected_root" in decision.reason
+
+    def test_edit_inside_protected_root_denied(self, tmp_path):
+        probes_dir = tmp_path / "repo" / "tests" / "review_probes"
+        engine = _fixer_engine([str(probes_dir)])
+        decision = engine.evaluate_tool_use(
+            "Edit", {"file_path": str(probes_dir / "test_divide.py")}
+        )
+        assert decision.outcome == Outcome.DENY
+
+    def test_write_elsewhere_in_repo_allowed(self, tmp_path):
+        probes_dir = tmp_path / "repo" / "tests" / "review_probes"
+        engine = _fixer_engine([str(probes_dir)])
+        decision = engine.evaluate_tool_use(
+            "Write", {"file_path": str(tmp_path / "repo" / "app.py")}
+        )
+        assert decision.outcome == Outcome.ALLOW
+
+    def test_dormant_without_protected_write_roots(self, tmp_path):
+        """Every other caller never sets protected_write_roots."""
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=False)
+        decision = engine.evaluate_tool_use(
+            "Write", {"file_path": str(tmp_path / "tests" / "review_probes" / "test_x.py")}
+        )
+        assert decision.outcome == Outcome.ALLOW

@@ -73,6 +73,18 @@ when { context.outside_scratch_dir == true };
 forbid (principal, action == Agent::Action::"read_file", resource)
 when { context.outside_allowed_read_roots == true };
 
+// Task 5 (ADR-026 (fork)): the fixer may write anywhere in the repo EXCEPT
+// the committed review probes — defense-in-depth only (the fixer has Bash,
+// which this rule cannot see; the deterministic git-diff-and-revert step in
+// review/backend.py is what actually enforces probe immunity).
+// `inside_protected_write_root` is computed by PolicyEngine from
+// `protected_write_roots` and is False for every caller that doesn't set
+// one, so this rule is dormant everywhere except the fixer call.
+@tier("hard")
+@rule_id("review_fixer_write_protected_root")
+forbid (principal, action == Agent::Action::"write_file", resource)
+when { context.inside_protected_write_root == true };
+
 // Reject any SQL DROP TABLE through Bash — agents should not be running
 // destructive DDL against production or dev databases without a human
 // in the loop. Hard-deny because even "just testing locally" is a common

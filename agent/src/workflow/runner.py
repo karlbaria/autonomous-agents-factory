@@ -736,15 +736,19 @@ def _handle_deliver_artifact(step: Step, ctx: StepContext) -> StepOutcome:
 
 
 def _handle_review_and_fix(step: Step, ctx: StepContext) -> StepOutcome:
-    """Run one round of the independent two-call review (Task 4 — ADR-025 (fork)).
+    """Run the independent review (Task 4 — ADR-025 (fork); the bounded
+    adversarial fix loop is Task 5 — ADR-026 (fork)).
 
     Thin wrapper over ``review.backend.run_review_and_fix``: it shares
     ``ctx.ledger`` with the coder's ``run_agent`` call that already ran
     earlier in this same ``StepContext`` (Task 3), so coder and reviewer
-    costs land in one ledger. Advisory only in Task 4 (``review_mode:
-    adversarial``'s fix loop is Task 5) — the review never fails this step;
-    the coder's PR must ship regardless of whether the review itself could
-    run.
+    costs land in one ledger. Advisory mode never fails this step — the
+    coder's PR must ship regardless of whether the review itself could run.
+    Adversarial mode fails this step only when the loop is unresolved
+    (exhausted ``max_iterations`` still ``NOT_READY``) AND the step's
+    ``on_unresolved`` is ``"fail"``; the default, ``"pr_with_warning"``,
+    still succeeds — the caller (``pipeline.py``) adds the
+    ``review:unresolved`` label to the PR instead.
     """
     from config import AGENT_WORKSPACE
     from review import run_review_and_fix
@@ -767,7 +771,21 @@ def _handle_review_and_fix(step: Step, ctx: StepContext) -> StepOutcome:
         reviewer_model=step.reviewer_model,
         reviewer_max_turns=step.reviewer_max_turns,
         workspace_base_dir=AGENT_WORKSPACE,
+        max_iterations=step.max_iterations,
+        block_on_severity=step.block_on_severity,
+        on_unresolved=step.on_unresolved,
     )
+    if result.should_fail_task:
+        return StepOutcome(
+            kind=step.kind,
+            name=_step_key(step),
+            status="failed",
+            error=(
+                f"adversarial review unresolved after {len(result.rounds)} round(s): "
+                f"{result.verdict}"
+            ),
+            data={"review_outcome": result.model_dump(mode="json")},
+        )
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),

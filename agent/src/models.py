@@ -273,6 +273,11 @@ class TaskConfig(BaseModel):
     # every other call, which keeps the two confinement rules dormant.
     allowed_read_roots: list[str] | None = None
     scratch_write_root: str | None = None
+    # Task 5 (ADR-026 (fork)): set only for the fixer's call
+    # (review/backend.py). Threaded straight through to PolicyEngine's
+    # ``protected_write_roots`` (runner.py); None for every other call, which
+    # keeps that confinement rule dormant.
+    protected_write_roots: list[str] | None = None
 
     @model_validator(mode="after")
     def _validate_trace_requires_user_id(self) -> Self:

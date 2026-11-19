@@ -37,6 +37,7 @@ _KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(
     (
         "coding/new-task-v1",
         "coding/new-task-verified-v1",
+        "coding/new-task-adversarial-v1",
         "coding/pr-iteration-v1",
         "coding/restack-v1",
     )

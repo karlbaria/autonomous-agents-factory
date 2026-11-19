@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from review.findings import Finding
 from review.probes import Probe, ProbeResult
 from review.prompts import (
     CODE_REVIEWER_SYSTEM_PROMPT,
     code_reviewer_user_prompt,
+    fixer_user_prompt,
     probe_writer_user_prompt,
 )
 from review.signatures import PublicSignature
@@ -31,6 +33,14 @@ class TestCodeReviewerUserPrompt:
         assert "Add a /gcd endpoint" in prompt
         assert "diff --git a/x" in prompt
         assert "no probes were written" in prompt
+
+    def test_default_block_on_severity_is_major(self):
+        prompt = code_reviewer_user_prompt("task", "diff", [])
+        assert "major" in prompt
+
+    def test_block_on_severity_is_configurable(self):
+        prompt = code_reviewer_user_prompt("task", "diff", [], block_on_severity="critical")
+        assert "critical" in prompt
 
     def test_includes_probe_pass_fail(self):
         results = [
@@ -64,3 +74,50 @@ class TestCodeReviewerSystemPromptTypeSeverityDisambiguation:
         for finding_type in ("issue", "comment", "question", "good_point"):
             assert f"`{finding_type}`" in CODE_REVIEWER_SYSTEM_PROMPT
         assert "never `minor`, `medium`, `major`, or `critical`" in CODE_REVIEWER_SYSTEM_PROMPT
+
+
+class TestFixerUserPrompt:
+    """Task 5 amendment 3 (ADR-026 (fork)): the fixer's prompt includes the
+    original issue, not just the findings and failing probes — it needs the
+    same requirements Call 1 and Call 2 are grading against."""
+
+    def test_includes_issue_text(self):
+        prompt = fixer_user_prompt("Add a /divide endpoint", [], [])
+        assert "Add a /divide endpoint" in prompt
+
+    def test_includes_blocking_findings_with_evidence(self):
+        finding = Finding(
+            id="finding-1",
+            type="issue",
+            severity="major",
+            title="Missing zero-division check",
+            description="divide(a, 0) raises ZeroDivisionError instead of 400",
+            evidence="app.py:12",
+        )
+        prompt = fixer_user_prompt("task", [finding], [])
+        assert "Missing zero-division check" in prompt
+        assert "app.py:12" in prompt
+
+    def test_includes_failing_probe_output(self):
+        result = ProbeResult(
+            probe=Probe(id="p1", intent="divide by zero", filename="test_zero.py", source="x"),
+            passed=False,
+            output="AssertionError: expected 400, got 500",
+        )
+        prompt = fixer_user_prompt("task", [], [result])
+        assert "test_zero.py" in prompt
+        assert "AssertionError: expected 400, got 500" in prompt
+
+    def test_states_probes_are_off_limits(self):
+        prompt = fixer_user_prompt("task", [], [])
+        assert "tests/review_probes" in prompt
+
+
+class TestCodeReviewerSystemPromptInvalidProbes:
+    """Task 5 amendment 2 (ADR-026 (fork)): Call 2 may mark a probe invalid,
+    with its reasoning recorded, via an optional INVALID_PROBES: block."""
+
+    def test_documents_invalid_probes_contract(self):
+        assert "INVALID_PROBES:" in CODE_REVIEWER_SYSTEM_PROMPT
+        assert "filename" in CODE_REVIEWER_SYSTEM_PROMPT
+        assert "reason" in CODE_REVIEWER_SYSTEM_PROMPT
