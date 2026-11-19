@@ -2596,13 +2596,25 @@ describe('fanout-task-events: Jira dispatcher', () => {
     expect(adfText(mockUpdateIssueCommentAdf.mock.calls[1][3])).toContain('task t-jira');
   });
 
-  test('non-Jira task short-circuits — postIssueCommentAdf never called', async () => {
-    mockGet({ ...TASK_RECORD_JIRA, channel_source: 'github' });
+  test('task with no Jira link short-circuits — postIssueCommentAdf never called', async () => {
+    mockGet({ ...TASK_RECORD_JIRA, channel_source: 'github', channel_metadata: undefined });
 
     const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-jira')] };
     await handler(event);
 
     expect(mockPostIssueCommentAdf).not.toHaveBeenCalled();
+  });
+
+  test('auto-tracked task (channel_source slack, Jira link present) posts the same final comment as a Jira-origin task (#32)', async () => {
+    mockGet({ ...TASK_RECORD_JIRA, channel_source: 'slack' });
+
+    const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-jira')] };
+    await handler(event);
+
+    expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
+    const [ctx, issueKey] = mockPostIssueCommentAdf.mock.calls[0];
+    expect(ctx).toEqual({ cloudId: 'cloud-uuid-acme', registryTableName: 'JiraWorkspaceRegistry' });
+    expect(issueKey).toBe('KAN-42');
   });
 
   test('Jira-origin task missing jira_issue_key — skip without posting', async () => {

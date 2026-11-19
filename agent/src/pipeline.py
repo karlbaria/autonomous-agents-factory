@@ -1154,7 +1154,9 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             )
 
             # "Starting" comment on the Jira issue through the Forge app actor
-            # (or legacy OAuth fallback). No-op for non-Jira tasks.
+            # (or legacy OAuth fallback). No-op for a task with no Jira link
+            # (channel_metadata.jira_cloud_id/jira_issue_key) — covers both
+            # Jira-origin and auto-tracked (issue #32) tasks the same way.
             # Best-effort; failures are logged, never block.
             workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
             if _should_post_start_comment(config.channel_source, workflow_id):
@@ -1164,7 +1166,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 )
 
             # Move the Jira card To Do → In Progress so the board reflects that
-            # work has started (issue #572). No-op for non-Jira tasks.
+            # work has started (issue #572). No-op for a task with no Jira
+            # link — same gate as the start comment above (issue #32).
             # Best-effort; failures are logged and never block the pipeline.
             # Part of the Early-ACK block (moved before setup_repo with the 👀
             # and start comment) so board state updates immediately, not after
@@ -1586,7 +1589,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 # to mirror the Linear twin, which only transitions on success
                 # (react_task_finished: `if transition_state and success`). A
                 # build-failed PR leaves the card In Progress with the failure
-                # comment. No-op for non-Jira tasks; best-effort.
+                # comment. No-op for a task with no Jira link; best-effort.
                 if build_passed:
                     transition_pr_opened(
                         config.channel_source,

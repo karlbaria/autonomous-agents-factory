@@ -77,11 +77,20 @@ def _reset_circuit():
 
 
 class TestChannelGate:
-    def test_non_jira_source_is_noop(self, monkeypatch):
+    def test_no_jira_link_is_noop_regardless_of_source(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         with patch("jira_reactions.requests.post") as post:
-            comment_task_started("linear", JIRA_META)
+            comment_task_started("linear", {})
             post.assert_not_called()
+
+    def test_auto_tracked_non_jira_source_with_jira_link_fires(self, monkeypatch):
+        """Issue #32: gating is on the Jira link in channel_metadata, not on
+        channel_source — an auto-tracked Slack/API task (Task 13 PR 2) gets
+        the same start comment a Jira-origin task does."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        with patch("jira_reactions.requests.post", return_value=_resp(201)) as post:
+            comment_task_started("slack", JIRA_META)
+            post.assert_called_once()
 
     def test_empty_metadata_is_noop(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
@@ -249,16 +258,28 @@ class TestAuthCircuitBreaker:
 
 
 class TestTransitionChannelGate:
-    def test_non_jira_source_is_noop(self, monkeypatch):
+    def test_no_jira_link_is_noop_regardless_of_source(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         with (
             patch("jira_reactions.requests.get") as get,
             patch("jira_reactions.requests.post") as post,
         ):
-            transition_task_started("linear", JIRA_META)
-            transition_pr_opened("linear", JIRA_META)
+            transition_task_started("linear", {})
+            transition_pr_opened("linear", {})
             get.assert_not_called()
             post.assert_not_called()
+
+    def test_auto_tracked_non_jira_source_with_jira_link_fires(self, monkeypatch):
+        """Issue #32: an auto-tracked Slack/API task's issue still transitions
+        start → In Progress and PR-opened → In Review, same as Jira-origin."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(_transition("21", "In Progress", category="indeterminate"))
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
+        ):
+            transition_task_started("slack", JIRA_META)
+        assert post.call_args[1]["json"] == {"transition": {"id": "21"}}
 
     def test_empty_metadata_is_noop(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")

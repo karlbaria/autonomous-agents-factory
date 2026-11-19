@@ -192,14 +192,22 @@ describe('notifyJiraOnConcurrencyCap', () => {
     expect(message).toContain('concurrency limit');
   });
 
-  test('no-ops on non-Jira channels', async () => {
-    for (const source of ['api', 'webhook', 'slack', 'linear'] as const) {
+  test('no-ops on a task with no Jira link, regardless of channel_source', async () => {
+    for (const source of ['api', 'webhook', 'slack', 'linear', 'jira'] as const) {
+      reportJiraIssueFailureMock.mockClear();
+      await notifyJiraOnConcurrencyCap(task({ channel_source: source }));
+      expect(reportJiraIssueFailureMock).not.toHaveBeenCalled();
+    }
+  });
+
+  test('posts a Jira comment for an auto-tracked task (channel_source slack/api with a Jira link), same as Jira-origin (#32)', async () => {
+    for (const source of ['slack', 'api'] as const) {
       reportJiraIssueFailureMock.mockClear();
       await notifyJiraOnConcurrencyCap(task({
         channel_source: source,
         channel_metadata: { jira_cloud_id: 'cloud-1', jira_issue_key: 'ENG-42' },
       }));
-      expect(reportJiraIssueFailureMock).not.toHaveBeenCalled();
+      expect(reportJiraIssueFailureMock).toHaveBeenCalledTimes(1);
     }
   });
 

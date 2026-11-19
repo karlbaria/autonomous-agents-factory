@@ -540,7 +540,7 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
 
 /**
  * Post a Jira issue comment when admission control queues a task on the
- * user concurrency cap (#441). Jira-only; silently no-ops for other channels.
+ * user concurrency cap (#441). Silently no-ops for a task with no Jira link.
  *
  * Parity with {@link notifyLinearOnConcurrencyCap}: the webhook processor
  * covers pre-`createTaskCore` rejections (unmapped project, unlinked actor,
@@ -549,12 +549,16 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
  * integration silently drop the request (the agent — which would otherwise
  * comment — never starts).
  *
+ * Gated on `channel_metadata.jira_cloud_id`/`jira_issue_key`, not
+ * `channel_source === 'jira'` (issue #32) — an auto-tracked Slack/API task
+ * (Task 13 PR 2) carries the same metadata and gets the same courtesy
+ * comment a Jira-origin task does.
+ *
  * Best-effort: `reportIssueFailure` swallows its own errors; we wrap in
  * try/catch anyway because a transient throw during the registry lookup must
  * never block the rejection path. Exported for unit testing.
  */
 export async function notifyJiraOnConcurrencyCap(task: TaskRecord): Promise<void> {
-  if (task.channel_source !== 'jira') return;
   const cloudId = task.channel_metadata?.jira_cloud_id;
   const issueKey = task.channel_metadata?.jira_issue_key;
   if (!cloudId || !issueKey) return;
