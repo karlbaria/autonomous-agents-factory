@@ -28,6 +28,7 @@ import {
   disallowedWorkflowModel,
   getWorkflowDescriptor,
   isValidWorkflowRef,
+  resolveChannelDefaultWorkflow,
   resolveWorkflowRef,
   resolveWorkflowRefError,
   workflowIsReadOnly,
@@ -351,5 +352,20 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
     }
     const ungranted = WORKFLOW_MODEL_ALLOWLIST.filter((id) => !grantedForms.has(id));
     expect(ungranted).toEqual([]);
+  });
+});
+
+describe('resolveChannelDefaultWorkflow', () => {
+  test('uses the repo default_workflow when set', () => {
+    expect(resolveChannelDefaultWorkflow({ default_workflow: 'coding/new-task-adversarial-v1' }))
+      .toBe('coding/new-task-adversarial-v1');
+  });
+
+  test('falls back to CODING_WORKFLOW_ID when the repo has no default_workflow', () => {
+    expect(resolveChannelDefaultWorkflow({})).toBe(CODING_WORKFLOW_ID);
+  });
+
+  test('falls back to CODING_WORKFLOW_ID when the repo config is null (not onboarded)', () => {
+    expect(resolveChannelDefaultWorkflow(null)).toBe(CODING_WORKFLOW_ID);
   });
 });

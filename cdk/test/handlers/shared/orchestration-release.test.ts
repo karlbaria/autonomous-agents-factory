@@ -31,6 +31,21 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
+// Task 13 (fork): releaseChild looks up the repo's own default_workflow via
+// its own module-level DynamoDB client (not the `ddb` releaseChild is given),
+// so it must be mocked separately rather than through the injected `ddb`.
+const lookupRepoMock = jest.fn();
+jest.mock('../../../src/handlers/shared/repo-config', () => ({
+  lookupRepo: (...args: unknown[]) => lookupRepoMock(...args),
+}));
+
+beforeEach(() => {
+  // Default: no per-repo default_workflow — children pin CODING_WORKFLOW_ID,
+  // unchanged from before Task 13 (fork). Overridden per-case below.
+  lookupRepoMock.mockReset();
+  lookupRepoMock.mockResolvedValue({ onboarded: true, config: null });
+});
+
 const NOW = '2026-06-09T12:00:00.000Z';
 
 function makeRow(overrides: Partial<OrchestrationChildRow> = {}): OrchestrationChildRow {
@@ -198,6 +213,26 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
     // what is being submitted, and nothing here asserted it before.
     const body = createTaskCore.mock.calls[0][0];
     expect(body.workflow_ref).toBe('coding/new-task-v1');
+  });
+
+  // Task 13 (fork): the repo's own default_workflow wins over CODING_WORKFLOW_ID.
+  test("pins the repo's default_workflow when the repo config has one", async () => {
+    lookupRepoMock.mockResolvedValueOnce({
+      onboarded: true,
+      config: { repo: 'owner/repo', status: 'active', default_workflow: 'coding/new-task-adversarial-v1' },
+    });
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({}),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      now: NOW,
+    });
+    expect(createTaskCore.mock.calls[0][0].workflow_ref).toBe('coding/new-task-adversarial-v1');
+    expect(lookupRepoMock).toHaveBeenCalledWith('owner/repo');
   });
 
   test('an INTEGRATION node also pins the coding workflow — it is the case that breaks', async () => {

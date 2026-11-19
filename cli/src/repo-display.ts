@@ -125,7 +125,7 @@ export function formatRepoConfigForDisplay(
   for (const key of [
     'compute_type', 'runtime_arn', 'model_id', 'max_turns', 'max_budget_usd',
     'poll_interval_ms', 'approval_gate_cap', 'system_prompt_overrides',
-    'egress_allowlist', 'cedar_policies', 'github_token_secret_arn',
+    'egress_allowlist', 'cedar_policies', 'github_token_secret_arn', 'default_workflow',
   ] as const) {
     const value = config[key];
     if (value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0)) {
@@ -251,6 +251,12 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
     lines.push({
       key: 'cedar_policies',
       text: `${cedar.length} policy/policies (per-blueprint override)`,
+    });
+  }
+  if (typeof display.blueprint_overrides.default_workflow === 'string') {
+    lines.push({
+      key: 'default_workflow',
+      text: `${display.blueprint_overrides.default_workflow} (per-blueprint override; else coding/new-task-v1)`,
     });
   }
 

@@ -52,6 +52,14 @@ jest.mock('../../src/handlers/shared/jira-task-by-issue', () => {
   };
 });
 
+// Task 13 (fork): the repo's default_workflow lookup. Mocked as its own
+// module (not via ddbSend) so it doesn't shift the ddbSend call-order
+// sequencing every other test in this file depends on.
+const lookupRepoMock = jest.fn();
+jest.mock('../../src/handlers/shared/repo-config', () => ({
+  lookupRepo: (...args: unknown[]) => lookupRepoMock(...args),
+}));
+
 // The processor screens the folded comment section via the Bedrock Guardrail
 // (fail-open on intervention). Mock the client so it passes by default; the
 // comment-block-dropped test overrides it to GUARDRAIL_INTERVENED.
@@ -176,6 +184,11 @@ describe('jira-webhook-processor handler', () => {
     });
     resolveTaskByJiraIssueMock.mockReset();
     resolveTaskByJiraIssueMock.mockResolvedValue(null);
+    // Default: no per-repo default_workflow — tasks pin CODING_WORKFLOW_ID,
+    // unchanged from before Task 13 (fork). The default-workflow test below
+    // overrides this per-case.
+    lookupRepoMock.mockReset();
+    lookupRepoMock.mockResolvedValue({ onboarded: true, config: null });
     // Default (#577): no comments, no attachments. Per-case tests override.
     fetchRecentHumanCommentsMock.mockReset();
     fetchRecentHumanCommentsMock.mockResolvedValue([]);
@@ -865,6 +878,30 @@ describe('jira-webhook-processor handler', () => {
       jira_oauth_secret_arn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-jira-oauth-cloud-1',
       jira_site_url: 'https://acme.atlassian.net',
     });
+  });
+
+  // Task 13 (fork): the repo's own default_workflow wins over CODING_WORKFLOW_ID.
+  test('pins the repo default_workflow when the repo config has one', async () => {
+    ddbSend
+      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } })
+      .mockResolvedValueOnce({
+        Item: {
+          jira_identity: 'cloud-1#acc-1',
+          platform_user_id: 'cognito-user-1',
+          status: 'active',
+        },
+      });
+    lookupRepoMock.mockResolvedValueOnce({
+      onboarded: true,
+      config: { repo: 'org/repo', status: 'active', default_workflow: 'coding/new-task-adversarial-v1' },
+    });
+    createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+
+    await handler(eventWith(issue()));
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [reqBody] = createTaskCoreMock.mock.calls[0];
+    expect(reqBody.workflow_ref).toBe('coding/new-task-adversarial-v1');
   });
 
   test('stamps status_on_start/status_on_pr overrides into channelMetadata when configured', async () => {

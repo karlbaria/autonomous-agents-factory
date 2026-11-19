@@ -217,6 +217,30 @@ describe('repo onboard/offboard', () => {
     expect(put.input.Item?.poll_interval_ms).toBe(12345);
   });
 
+  test('onboardRepo persists --default-workflow', async () => {
+    await onboardRepo('us-east-1', 'RepoTable', 'acme/a', { defaultWorkflow: 'coding/new-task-adversarial-v1' });
+
+    const put = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(put.input.Item?.default_workflow).toBe('coding/new-task-adversarial-v1');
+  });
+
+  test('onboardRepo carries forward an existing default_workflow when not overridden', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as {
+      loadRepoConfig: jest.Mock;
+    };
+    loadRepoConfig.mockResolvedValueOnce({
+      repo: 'acme/a',
+      status: 'active',
+      onboarded_at: '2025-01-01T00:00:00Z',
+      default_workflow: 'coding/new-task-verified-v1',
+    });
+
+    await onboardRepo('us-east-1', 'RepoTable', 'acme/a');
+
+    const put = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(put.input.Item?.default_workflow).toBe('coding/new-task-verified-v1');
+  });
+
   test('onboardRepo treats a missing row as a fresh onboard', async () => {
     const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as {
       loadRepoConfig: jest.Mock;

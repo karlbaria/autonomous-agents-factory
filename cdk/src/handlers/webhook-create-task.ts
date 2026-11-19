@@ -25,10 +25,12 @@ import { createTaskCore } from './shared/create-task-core';
 import { buildWebhookChannelMetadata, extractWebhookContext } from './shared/gateway';
 import { isUsableHmacSecret } from './shared/hmac-secret';
 import { logger } from './shared/logger';
+import { lookupRepo } from './shared/repo-config';
 import { ErrorCode, errorResponse } from './shared/response';
 import type { CreateTaskRequest } from './shared/types';
 import { makeClient } from './shared/ua';
 import { parseBody } from './shared/validation';
+import { resolveChannelDefaultWorkflow } from './shared/workflows';
 
 const sm = makeClient(SecretsManagerClient);
 const SECRET_PREFIX = 'bgagent/webhook/';
@@ -146,8 +148,21 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // 4. Extract idempotency key
     const idempotencyKey = event.headers['Idempotency-Key'] ?? event.headers['idempotency-key'];
 
-    // 5. Delegate to shared core
-    return await createTaskCore(body, {
+    // 5. Explicit coding workflow when the caller named neither a workflow
+    // nor a repo-less request: a repo-bound webhook task must not fall
+    // through the resolution ladder to the repo-less default/agent-v1
+    // (which never commits or opens a PR), mirroring the Jira/Slack/
+    // orchestration-release call sites. Task 13 (fork): the repo's own
+    // default_workflow wins when set. A caller that explicitly wants the
+    // repo-less fallback can still send workflow_ref itself.
+    let resolvedBody = body;
+    if (body.workflow_ref === undefined && body.repo) {
+      const { config: webhookTaskRepoConfig } = await lookupRepo(body.repo);
+      resolvedBody = { ...body, workflow_ref: resolveChannelDefaultWorkflow(webhookTaskRepoConfig) };
+    }
+
+    // 6. Delegate to shared core
+    return await createTaskCore(resolvedBody, {
       userId: webhookCtx.userId,
       channelSource: 'webhook',
       channelMetadata: buildWebhookChannelMetadata(event, webhookCtx.webhookId),

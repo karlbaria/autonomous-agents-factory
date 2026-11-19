@@ -174,4 +174,32 @@ describe('loadRepoConfig', () => {
       "Unable to look up repo config for 'org/repo'",
     );
   });
+
+  // Task 13 (fork) — default_workflow is surfaced when present
+  test('returns default_workflow when present in config', async () => {
+    const config = {
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      default_workflow: 'coding/new-task-adversarial-v1',
+    };
+    mockSend.mockResolvedValueOnce({ Item: config });
+
+    const result = await loadRepoConfig('org/repo');
+    expect(result?.default_workflow).toBe('coding/new-task-adversarial-v1');
+  });
+
+  test('returns undefined default_workflow when absent', async () => {
+    const config = {
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+    mockSend.mockResolvedValueOnce({ Item: config });
+
+    const result = await loadRepoConfig('org/repo');
+    expect(result?.default_workflow).toBeUndefined();
+  });
 });

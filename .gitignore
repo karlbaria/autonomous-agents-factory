@@ -99,6 +99,7 @@ local-docs/
 .idea
 .vscode
 .DS_Store
+*.code-workspace
 
 # ──────────────────────────────────────────────
 # Security scan outputs

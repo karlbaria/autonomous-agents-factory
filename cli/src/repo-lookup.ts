@@ -43,6 +43,7 @@ export interface RepoConfigRow {
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
   readonly approval_gate_cap?: number;
+  readonly default_workflow?: string;
 }
 
 /**

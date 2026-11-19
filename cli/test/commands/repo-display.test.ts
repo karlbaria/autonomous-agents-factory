@@ -200,6 +200,22 @@ describe('buildRepoShowLines', () => {
       .toBe('1 policy/policies (per-blueprint override)');
   });
 
+  // Task 13 (fork)
+  test('shows default_workflow when set, and omits it when unset', () => {
+    const withDefault = buildRepoShowLines(formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active', default_workflow: 'coding/new-task-adversarial-v1' },
+      PLATFORM,
+    ));
+    expect(withDefault.find((l) => l.key === 'default_workflow')?.text)
+      .toBe('coding/new-task-adversarial-v1 (per-blueprint override; else coding/new-task-v1)');
+
+    const withoutDefault = buildRepoShowLines(formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active' },
+      PLATFORM,
+    ));
+    expect(withoutDefault.find((l) => l.key === 'default_workflow')).toBeUndefined();
+  });
+
   test('warns when platform stack output is missing', () => {
     const display = formatRepoConfigForDisplay(
       { repo: 'awslabs/agent-plugins', status: 'active' },

@@ -21,11 +21,12 @@ import * as crypto from 'crypto';
 import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
+import { lookupRepo } from './shared/repo-config';
 import { slackFetch } from './shared/slack-api';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { Attachment } from './shared/types';
 import { makeDocClient } from './shared/ua';
-import { CODING_WORKFLOW_ID } from './shared/workflows';
+import { resolveChannelDefaultWorkflow } from './shared/workflows';
 import type { SlackCommandPayload } from './slack-commands';
 
 /**
@@ -252,17 +253,19 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
     return;
   }
 
+  // Explicit coding workflow: a Slack-submitted task targets a repo, so it
+  // must not fall through the resolution ladder to the repo-less
+  // default/agent-v1 (which never commits or opens a PR). Mirrors the Jira
+  // processor. Task 13 (fork): the repo's own default_workflow wins when set.
+  const { config: slackTaskRepoConfig } = await lookupRepo(repo);
+
   // Create the task through the shared core.
   const result = await createTaskCore(
     {
       repo,
       issue_number: issueNumber,
       task_description: description,
-      // Explicit coding workflow: a Slack-submitted task targets a repo, so it
-      // must not fall through the resolution ladder to the repo-less
-      // default/agent-v1 (which never commits or opens a PR). Mirrors the Jira
-      // processor. See CODING_WORKFLOW_ID.
-      workflow_ref: CODING_WORKFLOW_ID,
+      workflow_ref: resolveChannelDefaultWorkflow(slackTaskRepoConfig),
       ...(attachments.length > 0 && { attachments }),
     },
     {
