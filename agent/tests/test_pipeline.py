@@ -2403,3 +2403,156 @@ class TestEarlyAckOrdering:
         _args, kwargs = m_finished.call_args
         assert kwargs.get("success") is False
         assert kwargs.get("started_reaction_id") == "reaction-42"
+
+
+class TestJiraCredentialResolutionGate:
+    """Issue #34: resolve_jira_oauth_token must fire for any task that
+    carries a Jira link in channel_metadata, not only channel_source ==
+    "jira" — an auto-tracked Slack/API task (Task 13 PR 2) needs the same
+    credentials jira_reactions.py reads to post comments and transitions.
+    """
+
+    @staticmethod
+    def _mock_span() -> MagicMock:
+        span = MagicMock()
+        span.__enter__ = MagicMock(return_value=span)
+        span.__exit__ = MagicMock(return_value=False)
+        return span
+
+    def _run(self, mock_setup_repo, mock_task_span, mock_run_agent, **run_task_kwargs):
+        mock_setup_repo.return_value = RepoSetup(
+            repo_dir="/workspace/repo",
+            branch="bgagent/test/branch",
+            build_before=True,
+        )
+
+        async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1)
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+
+        with (
+            patch("pipeline.resolve_jira_oauth_token") as m_resolve_jira,
+            patch("pipeline.resolve_linear_api_token"),
+            patch("pipeline.react_task_started", return_value=None),
+            patch("pipeline.comment_task_started"),
+            patch("pipeline.transition_task_started"),
+            patch("pipeline.configure_channel_mcp"),
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.ensure_pr", return_value="https://github.com/o/r/pull/1"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline.task_state"),
+        ):
+            from pipeline import run_task
+
+            run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                **run_task_kwargs,
+            )
+        return m_resolve_jira
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_auto_tracked_slack_task_with_jira_link_resolves_credentials(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        auto_tracked_meta = {
+            "slack_channel_id": "C1",
+            "jira_cloud_id": "cloud-1",
+            "jira_issue_key": "SHOP-2",
+            "jira_oauth_secret_arn": (
+                "arn:aws:secretsmanager:us-east-1:111122223333:secret:bgagent-jira-oauth-cloud-1"
+            ),
+        }
+
+        m_resolve_jira = self._run(
+            mock_setup_repo,
+            mock_task_span,
+            mock_run_agent,
+            task_id="t-auto-tracked",
+            channel_source="slack",
+            channel_metadata=auto_tracked_meta,
+        )
+
+        m_resolve_jira.assert_called_once_with(auto_tracked_meta)
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_plain_slack_task_with_no_jira_link_does_not_resolve_credentials(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        m_resolve_jira = self._run(
+            mock_setup_repo,
+            mock_task_span,
+            mock_run_agent,
+            task_id="t-no-jira-link",
+            channel_source="slack",
+            channel_metadata={"slack_channel_id": "C1"},
+        )
+
+        m_resolve_jira.assert_not_called()
+
+    @patch("runner.run_agent")
+    @patch("pipeline.build_system_prompt")
+    @patch("pipeline.discover_project_config")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    def test_jira_origin_task_still_resolves_credentials(
+        self,
+        mock_task_span,
+        mock_setup_repo,
+        _mock_discover,
+        _mock_build_prompt,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        jira_meta = {
+            "jira_cloud_id": "cloud-1",
+            "jira_issue_key": "ENG-1",
+            "jira_oauth_secret_arn": (
+                "arn:aws:secretsmanager:us-east-1:111122223333:secret:bgagent-jira-oauth-cloud-1"
+            ),
+        }
+
+        m_resolve_jira = self._run(
+            mock_setup_repo,
+            mock_task_span,
+            mock_run_agent,
+            task_id="t-jira-origin",
+            channel_source="jira",
+            channel_metadata=jira_meta,
+        )
+
+        m_resolve_jira.assert_called_once_with(jira_meta)

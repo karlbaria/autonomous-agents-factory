@@ -528,7 +528,9 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     session, so in practice the agent reads a freshly-written token with a
     full lifetime ahead of it.
 
-    This function is only called when ``channel_source == 'jira'``.
+    Called whenever ``channel_metadata`` carries a Jira link (``channel_source
+    == 'jira'``, or an auto-tracked task once its outbound issue exists —
+    issue #34), not only for Jira-origin tasks.
     """
     secret_arn = ""
     if channel_metadata:

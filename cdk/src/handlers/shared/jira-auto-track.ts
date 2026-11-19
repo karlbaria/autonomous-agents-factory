@@ -134,7 +134,16 @@ function textToAdfDocument(text: string): Record<string, unknown> {
 }
 
 export type CreateAutoTrackedIssueResult =
-  | { readonly kind: 'created'; readonly issueKey: string }
+  | {
+    readonly kind: 'created';
+    readonly issueKey: string;
+    // Threaded through so the caller can stamp them into channel_metadata
+    // (issue #34) — the agent needs its own Jira credentials later
+    // (jira_reactions.py's resolve_jira_oauth_token), the same way a
+    // Jira-origin task's channel_metadata already carries them.
+    readonly oauthSecretArn: string;
+    readonly siteUrl: string;
+  }
   // Jira's create response reports exactly which field it needed (or that
   // the issue type name doesn't exist in this project) via a 400 with an
   // `errors` map — the caller surfaces this reason verbatim rather than the
@@ -249,7 +258,14 @@ export async function createAutoTrackedJiraIssue(
 
   if (outcome.ok) {
     const issueKey = parseCreatedIssueKey(outcome.body);
-    if (issueKey) return { kind: 'created', issueKey };
+    if (issueKey) {
+      return {
+        kind: 'created',
+        issueKey,
+        oauthSecretArn: resolved.oauthSecretArn,
+        siteUrl: resolved.siteUrl,
+      };
+    }
     logger.warn('Jira auto-track issue create succeeded without a usable issue key', {
       jira_cloud_id: params.cloudId,
       project_key: params.projectKey,
@@ -346,6 +362,11 @@ export async function resolveJiraAutoTrack(
         ...params.channelMetadata,
         jira_cloud_id: mapping.cloudId,
         jira_issue_key: result.issueKey,
+        // The agent resolves its own Jira credentials from this ARN at task
+        // start (jira_reactions.py via resolve_jira_oauth_token) — without
+        // it, the task has a Jira link but no way to act on it (issue #34).
+        jira_oauth_secret_arn: result.oauthSecretArn,
+        jira_site_url: result.siteUrl,
       },
     };
   }

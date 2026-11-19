@@ -1131,9 +1131,17 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # Resolve the per-channel access token from Secrets Manager first
             # (react_task_started/comment_task_started read the env var it sets).
             # configure_channel_mcp DOES need setup.repo_dir, so it stays below.
+            #
+            # The Jira branch is keyed on the task actually carrying a Jira
+            # link, not on channel_source == "jira" (issue #34): an
+            # auto-tracked Slack/API task (Task 13 PR 2) carries the same
+            # jira_cloud_id/jira_oauth_secret_arn once its outbound issue is
+            # created, and needs the same credentials jira_reactions.py reads
+            # to post comments and transition the issue.
+            has_jira_link = bool((config.channel_metadata or {}).get("jira_cloud_id"))
             if config.channel_source == "linear":
                 resolve_linear_api_token(config.channel_metadata)
-            elif config.channel_source == "jira":
+            elif config.channel_source == "jira" or has_jira_link:
                 resolve_jira_oauth_token(config.channel_metadata)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
