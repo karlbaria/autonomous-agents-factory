@@ -523,3 +523,40 @@ The owner's Slack testing surfaced a real parsing bug, reproduced exactly: `@Jar
 
 - PR 2 (outbound Jira issue creation + auto-tracking) starts next, under the same issue #26.
 - The Slack repo-parsing bug (§3 above) — tracked separately, not yet merged as of this entry.
+
+## Task 13: Outbound Jira issue creation and auto-tracking — PR 2 (outbound create + auto-track)
+
+[autonomous-agents-factory#31](https://github.com/karlbaria/autonomous-agents-factory/pull/31) (`feat/26-jira-auto-track`, under the same issue #26 as PR 1), merged. Adds outbound Jira issue creation through the Forge app actor (`create_issue` as a sixth allowlisted web-trigger operation) and opt-in auto-tracking per project mapping (`bgagent jira map ... --auto-track`), for tasks that start outside Jira (Slack/API) against a repo with an opted-in mapping.
+
+### 1. Post-merge deploy
+
+- **`cdk:diff`** showed new IAM Statement Changes this time (first IAM diff of the lab): `TaskApi/CreateTaskFn` and `SlackIntegration/CommandProcessorFn` service roles both got `dynamodb:BatchGetItem/ConditionCheckItem/DescribeTable/GetItem/Query/Scan/GetRecords/GetShardIterator` on `JiraIntegration/ProjectMappingTable` and `JiraIntegration/WorkspaceRegistryTable`, plus `secretsmanager:GetSecretValue` on `bgagent-jira-oauth-*` — both Lambdas need to resolve a repo's Jira mapping and outbound credentials to create an issue. Reviewed and approved by the owner before deploying.
+- **Deploy hit an environment snag, not a code problem:** `mise //cdk:deploy --require-approval broadening` built everything, created the changeset, then failed — `mise` runs without a TTY, so CDK's own interactive confirmation of the (already-approved) IAM diff couldn't render, and the changeset it had created was auto-cleaned up on that failure. Since the re-displayed diff was byte-identical to what the owner had just approved, re-ran with `--require-approval never` instead, which deployed cleanly. **Added this as a standing checklist rule** in `FACTORY_PLAN.md`'s Rollback and safety section: IAM/security-group approval happens at the `cdk:diff` step, and the deploy that follows immediately (no merges in between) uses `--require-approval never` for exactly this reason.
+- **CLI rebuilt** (`cli/` changed in this PR): `MISE_EXPERIMENTAL=1 mise //cli:build` — 1249/1249 tests, typecheck, lint all clean.
+- **Forge redeployed:** `forge login` (API token entered interactively) + `forge deploy --environment production` from `integrations/jira-forge-app` — `bgagent` app v2.1.0 live on production. (The informational "not eligible for Runs on Atlassian" notice is unrelated to this change.)
+
+### 2. Jira-side setup
+
+- **`Create Issues` permission on `SHOP`:** already covered. The Forge app writes via `atlassian-addons-project-access`, a built-in Jira role every installed Connect/Forge app gets added to automatically — the owner confirmed it on the permission scheme page. Jira's **Permission Helper** UI tool can't check it directly: it can't search for or select an installed app as the "user" to check, only real human accounts.
+- **Opted `SHOP` into auto-tracking:** `bgagent jira map 05c31df8-daa2-42f3-a976-d0d5037a2e42 SHOP --repo karlbaria/factory-shop --auto-track --region us-east-2 --stack-name backgroundagent-dev-factory` (re-running `map` on an existing mapping updates it in place — no duplicate). Output confirmed `Auto-track Slack/API tasks: on`.
+
+### 3. Demo — three attempts, two real bugs found and fixed along the way
+
+The demo (a Slack task against `factory-shop` should create a `SHOP` card, run with the reviewer, and move the card through the board as the PR opens) took three rounds to get right — not because of Jira configuration or permissions, but two genuine gaps in the merged PR's own code, each one layered under the last:
+
+- **Attempt 1** — Slack task → created `SHOP-1`, ran `coding/new-task-adversarial-v1` (reviewer), `build_passed: true`, PR [factory-shop#4](https://github.com/karlbaria/factory-shop/pull/4). The card never left **Backlog**. Traced the cause: every CDK consumer that drives Jira comments/transitions (`fanout-task-events.ts`'s `dispatchToJira`, `orchestrate-task.ts`'s `notifyJiraOnConcurrencyCap`, `create-task-core.ts`'s `jira_issue_identity` GSI hoist) — and `jira_reactions.py`'s own `_enabled()` gate in the agent — all checked `channel_source === 'jira'` instead of "does this task actually have a Jira link," so an auto-tracked Slack-origin task never got any of them even though its issue existed. Filed [autonomous-agents-factory#32](https://github.com/karlbaria/autonomous-agents-factory/issues/32), fixed in [#33](https://github.com/karlbaria/autonomous-agents-factory/pull/33) (gate on `channel_metadata.jira_cloud_id`/`jira_issue_key` presence everywhere instead), merged, redeployed (no IAM/SG changes that round).
+- **Attempt 2** — created `SHOP-2`, same workflow, `build_passed: true`, PR [factory-shop#5](https://github.com/karlbaria/factory-shop/pull/5). Still stuck in **Backlog**. Confirmed via a direct DynamoDB read that the TaskRecord now correctly carried `jira_cloud_id`/`jira_issue_key` (PR 2's fix had worked) — but there was a second, deeper gap: the agent only loads its own Jira write credentials (`resolve_jira_oauth_token`, which sets the env vars `jira_reactions.py` reads) when `channel_source == "jira"`, and even that aside, `jira-auto-track.ts` never stamped `jira_oauth_secret_arn`/`jira_site_url` into `channel_metadata` on a successful create — only `jira_cloud_id`/`jira_issue_key`. So the task had a Jira link but the agent had no way to authenticate to Jira with it. Filed [#34](https://github.com/karlbaria/autonomous-agents-factory/issues/34), fixed in [#35](https://github.com/karlbaria/autonomous-agents-factory/pull/35) (thread the secret ARN/site URL through `resolveJiraAutoTrack`, and key the agent's credential-resolution gate off the Jira link too), merged, redeployed (AgentCore runtime version bumped 10 → 11).
+- **Attempt 3** — task `01M7TRFETHFTSZVA5MMQ1V800M`, `coding/new-task-adversarial-v1`, review round 1 `READY` (3 findings, 0 probes failed), PR [factory-shop#7](https://github.com/karlbaria/factory-shop/pull/7). **The card finally moved off Backlog.** The owner's `SHOP` board only has a Backlog/Selected for development/In Progress/Done workflow — no dedicated review status — so the PR-opened transition correctly fell back to **In Progress** per the documented heuristic (`JIRA_SETUP_GUIDE.md`: In Review → common synonyms → In Progress as the safe fallback), not a bug. The owner plans to add a review column and re-verify later.
+
+### 4. Smoke test
+
+`coding/new-task-v1` on `factory-sandbox-py`: "add a simple health check helper function with a docstring" — task `01M7TRNR6Y0GTC8EXNRSQ2T6B2`, `COMPLETED`, `build_passed: true`, PR [factory-sandbox-py#64](https://github.com/karlbaria/factory-sandbox-py/pull/64). Clean.
+
+### 5. Tagged and pushed `known-good-task13`
+
+Supersedes PR 1's `known-good-task13a`; this is the tag for the completed Task 13 (both PRs, plus the two follow-up fixes).
+
+### Open items
+
+- `SHOP`'s Jira workflow has no review-status column; the PR-opened transition lands on In Progress there until the owner adds one.
+- Task 14 (Confluence publishing) and Task 15 (feature-planning workflow) are next, both depending on Task 13.
