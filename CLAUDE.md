@@ -8,6 +8,8 @@ Before every commit in this repo, run mise run build and mise run security (subs
 
 Never add the approved label to issues, and never merge PRs; the owner does both.
 
+Every `bgagent` command must pass `--stack-name backgroundagent-dev-factory --region us-east-2` explicitly; some commands default to the stock `backgroundagent-dev` stack.
+
 @AGENTS.md
 
 See also [README.md](./README.md) for the Claude Code plugin (`docs/abca-plugin/`), which provides interactive guided workflows for setup, deployment, repository onboarding, task submission, and troubleshooting via `/setup`, `/deploy`, `/onboard-repo`, `/submit-task`, `/status`, and `/troubleshoot` skills. Run Claude Code with `claude --plugin-dir docs/abca-plugin` to activate it.
