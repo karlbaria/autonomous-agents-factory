@@ -8,7 +8,7 @@ Before every commit in this repo, run mise run build and mise run security (subs
 
 Never add the approved label to issues, and never merge PRs; the owner does both.
 
-Every `bgagent` command must pass `--stack-name backgroundagent-dev-factory --region us-east-2` explicitly; some commands default to the stock `backgroundagent-dev` stack.
+Only `bgagent` commands that accept `--stack-name` (`repo`, `jira`, `github`, `admin`, `setup`, and similar operator-AWS-credential commands) must pass `--stack-name backgroundagent-dev-factory --region us-east-2` explicitly; some of them default to the stock `backgroundagent-dev` stack. Task commands (`submit`, `list`, `watch`, `status`, `webhook`, and similar) don't take that flag at all — they use the stack baked into `~/.bgagent/config.json` at `bgagent configure` time. Before using them, verify that file's `stack_name` is `backgroundagent-dev-factory`.
 
 @AGENTS.md
 
