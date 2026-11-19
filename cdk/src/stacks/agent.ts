@@ -1417,19 +1417,23 @@ export class AgentStack extends Stack {
     });
 
     // --- Slack integration (secrets populated post-deploy) ---
-    if (features.slack) {
-      const slackIntegration = new SlackIntegration(this, 'SlackIntegration', {
-        api: taskApi.api,
-        userPool: taskApi.userPool,
-        taskTable: taskTable.table,
-        taskEventsTable: taskEventsTable.table,
-        budgetTable: budgetTable.table,
-        repoTable: repoTable.table,
-        orchestratorFunctionArn: orchestrator.alias.functionArn,
-        guardrailId: inputGuardrail.guardrailId,
-        guardrailVersion: inputGuardrail.guardrailVersion,
-      });
-
+    // Hoisted to a ternary-assigned const (rather than `if (features.slack) {
+    // const slackIntegration = ... }`), matching jiraIntegration/
+    // linearIntegration below, so Task 13 (fork) PR 2's cross-construct Jira
+    // wiring — added further down, once `jiraIntegration` exists — can still
+    // reach `slackIntegration.commandProcessorFn`.
+    const slackIntegration = features.slack ? new SlackIntegration(this, 'SlackIntegration', {
+      api: taskApi.api,
+      userPool: taskApi.userPool,
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      budgetTable: budgetTable.table,
+      repoTable: repoTable.table,
+      orchestratorFunctionArn: orchestrator.alias.functionArn,
+      guardrailId: inputGuardrail.guardrailId,
+      guardrailVersion: inputGuardrail.guardrailVersion,
+    }) : undefined;
+    if (slackIntegration) {
       // --- Slack App setup outputs ---
       // Pre-filled manifest URL: opens Slack's "Create New App" page with all
       // URLs, scopes, and events pre-configured. User just clicks Create.
@@ -1881,6 +1885,35 @@ export class AgentStack extends Stack {
         value: jiraIntegration.workspaceRegistryTable.tableName,
         description: 'Name of the DynamoDB Jira workspace registry — `bgagent jira setup` writes a row per OAuth-installed tenant',
       });
+
+      // Jira auto-tracking (Task 13 (fork) PR 2), scoped to exactly the two
+      // channels the owner named: the direct API (createTaskFn, which
+      // `bgagent submit` also hits) and Slack (commandProcessorFn). Each
+      // needs read access to the project mapping table (to find an opted-in
+      // repo) and the workspace registry + per-tenant OAuth secret (to
+      // create the issue through whichever outbound identity the tenant has
+      // configured) — the same registry-table/secret scope the
+      // orchestrator/reconciler above already have. Read-only: this path
+      // never refreshes or rotates a token, so no Put grant, unlike those.
+      for (const autoTrackFn of [
+        taskApi.createTaskFn,
+        ...(slackIntegration ? [slackIntegration.commandProcessorFn] : []),
+      ]) {
+        jiraIntegration.projectMappingTable.grantReadData(autoTrackFn);
+        jiraIntegration.workspaceRegistryTable.grantReadData(autoTrackFn);
+        autoTrackFn.addEnvironment(
+          'JIRA_PROJECT_MAPPING_TABLE_NAME',
+          jiraIntegration.projectMappingTable.tableName,
+        );
+        autoTrackFn.addEnvironment(
+          'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
+          jiraIntegration.workspaceRegistryTable.tableName,
+        );
+        autoTrackFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [jiraOauthSecretArn],
+        }));
+      }
     }
 
     // --- Fan-out plane consumer ---

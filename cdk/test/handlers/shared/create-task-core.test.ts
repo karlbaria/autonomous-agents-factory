@@ -67,6 +67,17 @@ jest.mock('../../../src/handlers/shared/workflows', () => {
   return { ...actual, disallowedWorkflowModel: mockDisallowedWorkflowModel };
 });
 
+// Task 13 (fork) PR 2: mocked as its own module, not exercised through
+// mockSend, so the Jira auto-track scan/create path never runs for the
+// other 70+ tests in this file. Default implementation echoes the
+// channelMetadata it was given, matching the real function's no-op
+// behavior when no mapping is configured (which is true here: no
+// JIRA_PROJECT_MAPPING_TABLE_NAME is set for this file).
+const mockResolveJiraAutoTrack = jest.fn();
+jest.mock('../../../src/handlers/shared/jira-auto-track', () => ({
+  resolveJiraAutoTrack: (...args: unknown[]) => mockResolveJiraAutoTrack(...args),
+}));
+
 let ulidCounter = 0;
 jest.mock('ulid', () => ({ ulid: jest.fn(() => `ULID${ulidCounter++}`) }));
 
@@ -108,6 +119,9 @@ beforeEach(() => {
       period: '2026-08',
       blocked: null,
     }),
+  );
+  mockResolveJiraAutoTrack.mockImplementation(
+    (params: { channelMetadata: Record<string, string> }) => Promise.resolve({ channelMetadata: params.channelMetadata }),
   );
 });
 
@@ -1174,6 +1188,63 @@ describe('createTaskCore', () => {
       );
       expect(result.statusCode).toBe(201);
       expect(persistedTaskItem().attachments).toHaveLength(4);
+    });
+  });
+
+  describe('Jira auto-tracking (Task 13 (fork) PR 2)', () => {
+    function findPutItem(tableName: string) {
+      const putCall = mockSend.mock.calls.find(
+        (c: any) => c[0]?._type === 'Put' && c[0]?.input?.TableName === tableName,
+      );
+      return putCall?.[0]?.input?.Item;
+    }
+
+    test('passes repo, channel, task description, and the events-table context to resolveJiraAutoTrack', async () => {
+      await createTaskCore(
+        { repo: 'org/repo', task_description: 'Add a thing', workflow_ref: 'coding/new-task-v1' },
+        makeContext({ channelSource: 'slack', channelMetadata: { slack_team_id: 'T1' } }),
+        'req-jira-1',
+      );
+
+      expect(mockResolveJiraAutoTrack).toHaveBeenCalledTimes(1);
+      expect(mockResolveJiraAutoTrack).toHaveBeenCalledWith(expect.objectContaining({
+        repo: 'org/repo',
+        channelSource: 'slack',
+        channelMetadata: { slack_team_id: 'T1' },
+        taskDescription: 'Add a thing',
+        eventsTableName: 'TaskEvents',
+        taskRetentionDays: 90,
+      }));
+    });
+
+    test('persists whatever channel_metadata resolveJiraAutoTrack returns, including auto-tracked Jira fields', async () => {
+      mockResolveJiraAutoTrack.mockResolvedValueOnce({
+        channelMetadata: { slack_team_id: 'T1', jira_cloud_id: 'cloud-1', jira_issue_key: 'SHOP-7' },
+      });
+
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Add a thing', workflow_ref: 'coding/new-task-v1' },
+        makeContext({ channelSource: 'slack', channelMetadata: { slack_team_id: 'T1' } }),
+        'req-jira-2',
+      );
+
+      expect(result.statusCode).toBe(201);
+      expect(findPutItem('Tasks').channel_metadata).toEqual({
+        slack_team_id: 'T1',
+        jira_cloud_id: 'cloud-1',
+        jira_issue_key: 'SHOP-7',
+      });
+    });
+
+    test('a repo-less task still calls resolveJiraAutoTrack (repo: undefined) and succeeds — gating is its job, not create-task-core\'s', async () => {
+      const result = await createTaskCore(
+        { task_description: 'Research something', workflow_ref: 'knowledge/web-research-v1' },
+        makeContext({ channelSource: 'slack' }),
+        'req-jira-3',
+      );
+
+      expect(result.statusCode).toBe(201);
+      expect(mockResolveJiraAutoTrack).toHaveBeenCalledWith(expect.objectContaining({ repo: undefined }));
     });
   });
 });

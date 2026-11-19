@@ -125,6 +125,7 @@ describe('requestJiraAppActor', () => {
       status: 401,
       retryable: false,
       errorCode: 'invalid_signature',
+      body: '{"error":"invalid_signature","detail":"do-not-log"}',
     });
     expect(error).toHaveBeenCalledWith(
       'Jira app-actor proxy rejected request',
@@ -149,6 +150,7 @@ describe('requestJiraAppActor', () => {
       status: 503,
       retryable: false,
       errorCode: 'proxy_not_configured',
+      body: '{"error":"proxy_not_configured"}',
     });
   });
 
@@ -166,6 +168,7 @@ describe('requestJiraAppActor', () => {
       status,
       retryable: true,
       errorCode,
+      body,
     });
   });
 

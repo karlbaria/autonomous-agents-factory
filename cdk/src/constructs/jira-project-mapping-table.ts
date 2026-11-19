@@ -60,6 +60,17 @@ export interface JiraProjectMappingTableProps {
  * - label_filter — Jira issue label that triggers a task (default `bgagent`)
  * - status — 'active' | 'removed'
  * - onboarded_at, updated_at — ISO timestamps
+ * - auto_track — boolean, opt-in (Task 13 (fork) PR 2: `bgagent jira map
+ *   --auto-track`). When true, a task on the mapped repo that did NOT
+ *   originate in Jira (`channel_source` `slack`/`api`) gets a Jira issue
+ *   created and tracked automatically.
+ *
+ * No GSI on `repo`: the repo -> mapping lookup this field enables
+ * (`jira-auto-track.ts::findAutoTrackedJiraMapping`) scans the table with a
+ * filter instead, since this table is expected to stay small (one row per
+ * onboarded Jira project). If it grows past a page, add a GSI on `repo`
+ * rather than paginating the scan — see `docs/lab/LAB_LOG.md`'s Task 13 PR 2
+ * entry.
  */
 export class JiraProjectMappingTable extends Construct {
   /**

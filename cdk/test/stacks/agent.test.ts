@@ -840,6 +840,39 @@ describe('AgentStack', () => {
     expect(asJson).toContain('secretsmanager:PutSecretValue');
   });
 
+  // Task 13 (fork) PR 2: the direct-API and Slack Lambdas can resolve an
+  // opted-in Jira project mapping and create the issue through whichever
+  // outbound identity the tenant has configured. Scoped to exactly these
+  // two — webhook-create-task.ts and the Linear processor are untouched.
+  test.each([
+    'TaskApiCreateTaskFn',
+    'SlackIntegrationCommandProcessorFn',
+  ] as const)('%s can resolve a Jira auto-track mapping and read (not write) the OAuth secret', (prefix) => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const fn = Object.entries(fns).find(([id]) => id.startsWith(prefix));
+    expect(fn).toBeDefined();
+    const vars = (fn![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.JIRA_PROJECT_MAPPING_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+
+    const policies = template.findResources('AWS::IAM::Policy');
+    const fnPolicies = Object.entries(policies).filter(([logicalId]) => logicalId.startsWith(prefix));
+    const asJson = JSON.stringify(fnPolicies.map(([, policy]) => policy));
+    expect(asJson).toContain('bgagent-jira-oauth-*');
+    expect(asJson).toContain('secretsmanager:GetSecretValue');
+    expect(asJson).not.toContain('secretsmanager:PutSecretValue');
+  });
+
+  test('webhook-create-task.ts is NOT wired for Jira auto-tracking (scoped to slack + api only)', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const fn = Object.entries(fns).find(([id]) => id.startsWith('TaskApiWebhookCreateTaskFn'));
+    expect(fn).toBeDefined();
+    const vars = (fn![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.JIRA_PROJECT_MAPPING_TABLE_NAME).toBeUndefined();
+  });
+
   test('the orchestration reconciler cannot read S3 objects at all', () => {
     // The trace/artifacts bucket holds full agent trajectories under
     // traces/<user_id>/ — tool input and output, authorized per-user by the presign

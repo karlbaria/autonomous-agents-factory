@@ -236,6 +236,20 @@ describe('renderEvent', () => {
     expect(output).not.toContain('[undefined]');
   });
 
+  // Task 13 (fork) PR 2.
+  test('renders jira_auto_track_skipped with the project key and Jira field errors', () => {
+    const event = makeEvent({
+      event_type: 'jira_auto_track_skipped',
+      metadata: {
+        jira_project_key: 'SHOP',
+        jira_errors: { customfield_10050: 'Component is required.' },
+      },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('⚠ Jira auto-track skipped for project SHOP');
+    expect(output).toContain('customfield_10050: Component is required.');
+  });
+
   test('renders unknown event type with JSON metadata', () => {
     const event = makeEvent({
       event_type: 'custom_event',

@@ -113,6 +113,10 @@ const PROGRESS_EVENT_TYPES = new Set([
   'agent_cost_update',
   'agent_error',
   'agent_blocked',
+  // Task 13 (fork) PR 2: written at task-admission time (before the agent
+  // starts), not by the agent's own progress writer — the one auto-track
+  // outcome the owner asked to surface as a visible milestone.
+  'jira_auto_track_skipped',
 ]);
 
 /** Format an event timestamp to a short local time string. */
@@ -233,6 +237,16 @@ export function renderEvent(event: TaskEvent): string {
         line += `\n         ↳ ${String(meta.remediation_hint)}`;
       }
       return line;
+    }
+    case 'jira_auto_track_skipped': {
+      // Task 13 (fork) PR 2: the mapped Jira project needed a field (or a
+      // valid issue type) this task couldn't supply, so the issue was never
+      // created — the task itself still ran normally.
+      const projectKey = String(meta.jira_project_key ?? '?');
+      const errors = (meta.jira_errors && typeof meta.jira_errors === 'object')
+        ? Object.entries(meta.jira_errors as Record<string, string>).map(([field, msg]) => `${field}: ${msg}`).join('; ')
+        : '';
+      return `[${time}] ⚠ Jira auto-track skipped for project ${projectKey}${errors ? ` — ${errors}` : ''}`;
     }
     default:
       return `[${time}] ${event.event_type}: ${JSON.stringify(meta)}`;

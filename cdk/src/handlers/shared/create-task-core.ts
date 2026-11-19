@@ -33,6 +33,7 @@ import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningCo
 import { checkBudgetAdmission } from './budgets';
 import { generateBranchName } from './gateway';
 import { estimateImageTokensFromBuffer } from './image-tokens';
+import { resolveJiraAutoTrack } from './jira-auto-track';
 import { logger } from './logger';
 import { lookupRepo } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
@@ -770,6 +771,25 @@ export async function createTaskCore(
   const hasPresignedAttachments = validatedAttachments.some(a => a.delivery === 'presigned');
   const initialStatus = hasPresignedAttachments ? TaskStatus.PENDING_UPLOADS : TaskStatus.SUBMITTED;
 
+  // 4b. Jira auto-tracking (Task 13 (fork) PR 2) — opt-in per Jira project
+  // mapping (`bgagent jira map --auto-track`). All of the decision logic
+  // (which channels qualify, the mapping lookup, the create attempt, the
+  // visible skip-event write) lives in resolveJiraAutoTrack() rather than
+  // inline here on purpose: createTaskCore is already at a pre-existing,
+  // suppressed cyclomatic complexity ceiling (140 when it landed) that must
+  // not grow, and a single delegated call adds none — see workflows.ts's
+  // resolveChannelDefaultWorkflow() for the same pattern (Task 13 (fork) PR 1).
+  const jiraAutoTrack = await resolveJiraAutoTrack({
+    repo: body.repo,
+    channelSource: context.channelSource,
+    channelMetadata: context.channelMetadata,
+    taskId,
+    taskDescription: body.task_description,
+    eventsTableName: EVENTS_TABLE_NAME,
+    now,
+    taskRetentionDays: TASK_RETENTION_DAYS,
+  });
+
   // 5. Build task record
   const taskRecord: TaskRecord = {
     task_id: taskId,
@@ -788,7 +808,9 @@ export async function createTaskCore(
     ...(userTrace && { trace: true }),
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
-    channel_metadata: context.channelMetadata,
+    // Already merged with any auto-tracked jira_cloud_id/jira_issue_key
+    // (Task 13 (fork) PR 2) — see resolveJiraAutoTrack() above.
+    channel_metadata: jiraAutoTrack.channelMetadata,
     // Hoist linear_issue_id to the top level so the sparse
     // LinearIssueIndex GSI can resolve an issue → its newest task + PR (a GSI
     // cannot key off the nested channel_metadata map). Linear-origin only.

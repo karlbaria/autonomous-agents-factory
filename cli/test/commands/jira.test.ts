@@ -265,6 +265,29 @@ describe('jira map action status overrides', () => {
     expect(putCmd.input.Item).not.toHaveProperty('status_on_start');
     expect(putCmd.input.Item).not.toHaveProperty('status_on_pr');
   });
+
+  // Task 13 (fork) PR 2: opt-in auto-tracking.
+  test('persists auto_track: true when --auto-track is supplied', async () => {
+    const program = makeJiraCommand();
+    await program.parseAsync([
+      'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo', '--auto-track',
+    ]);
+
+    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(putCmd.input.Item).toMatchObject({ auto_track: true });
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Auto-track Slack/API tasks: on'));
+  });
+
+  test('omits auto_track entirely when --auto-track is not supplied', async () => {
+    const program = makeJiraCommand();
+    await program.parseAsync([
+      'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo',
+    ]);
+
+    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(putCmd.input.Item).not.toHaveProperty('auto_track');
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Auto-track Slack/API tasks: off'));
+  });
 });
 
 describe('generateInviteCode', () => {
