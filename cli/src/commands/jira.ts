@@ -1228,6 +1228,11 @@ export function makeJiraCommand(): Command {
       .option('--label <label>', `Label that triggers a task (default: ${DEFAULT_LABEL_FILTER})`, DEFAULT_LABEL_FILTER)
       .option('--status-on-start <name>', 'Jira status to move the issue to when a task starts (overrides the In Progress heuristic)')
       .option('--status-on-pr <name>', 'Jira status to move the issue to when a PR is opened (overrides the "In Review" default)')
+      .option(
+        '--auto-track',
+        'Opt in: auto-create and track a Jira issue for a task on this repo that did NOT '
+          + 'originate in Jira (submitted via Slack or the API). Omit on a later `jira map` to turn it back off.',
+      )
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .action(async (cloudId: string, projectKey: string, opts) => {
@@ -1281,6 +1286,11 @@ export function makeJiraCommand(): Command {
             // statusCategory / "In Review" heuristics otherwise.
             ...(statusOnStart && { status_on_start: statusOnStart }),
             ...(statusOnPr && { status_on_pr: statusOnPr }),
+            // Task 13 (fork) PR 2: opt-in auto-tracking. Only persisted when
+            // passed, like the two overrides above — omitting --auto-track on
+            // a later `jira map` turns it back off (this is a full Put, not a
+            // merge).
+            ...(opts.autoTrack && { auto_track: true }),
             status: 'active',
             onboarded_at: now,
             updated_at: now,
@@ -1295,6 +1305,7 @@ export function makeJiraCommand(): Command {
         if (statusOnPr) {
           console.log(`  Status on PR opened: ${statusOnPr}`);
         }
+        console.log(`  Auto-track Slack/API tasks: ${opts.autoTrack ? 'on' : 'off'}`);
       }),
   );
 

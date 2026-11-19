@@ -333,3 +333,103 @@ test('returns the app identity used by api.asApp', async () => {
   });
   assert.deepEqual(calls.sort(), ['/rest/api/3/myself', '/rest/api/3/serverInfo'].sort());
 });
+
+test('creates an issue through Jira as the app actor', async () => {
+  const calls = [];
+  const invoke = handler(async (...args) => {
+    calls.push(args);
+    return jiraResponse(201, '{"id":"10050","key":"SHOP-7"}');
+  });
+  const result = await invoke(event({
+    version: 1,
+    operation: 'create_issue',
+    cloud_id: 'cloud-1',
+    project_key: 'SHOP',
+    issue_type_name: 'Task',
+    summary: 'Add a GET /api/products/count endpoint',
+    body: { type: 'doc', version: 1, content: [] },
+  }));
+
+  assert.equal(result.statusCode, 201);
+  assert.deepEqual(JSON.parse(result.body), { id: '10050', key: 'SHOP-7' });
+  assert.equal(calls[0][0], '/rest/api/3/issue');
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    fields: {
+      project: { key: 'SHOP' },
+      issuetype: { name: 'Task' },
+      summary: 'Add a GET /api/products/count endpoint',
+      description: { type: 'doc', version: 1, content: [] },
+    },
+  });
+});
+
+test('creates an issue with no description when the body is omitted', async () => {
+  const calls = [];
+  const invoke = handler(async (...args) => {
+    calls.push(args);
+    return jiraResponse(201, '{"id":"10051","key":"SHOP-8"}');
+  });
+  await invoke(event({
+    version: 1,
+    operation: 'create_issue',
+    cloud_id: 'cloud-1',
+    project_key: 'SHOP',
+    issue_type_name: 'Task',
+    summary: 'No description here',
+  }));
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    fields: {
+      project: { key: 'SHOP' },
+      issuetype: { name: 'Task' },
+      summary: 'No description here',
+    },
+  });
+});
+
+test('surfaces a Jira-side 400 (e.g. an unknown required field) without masking it', async () => {
+  const invoke = handler(async () => jiraResponse(
+    400,
+    '{"errors":{"customfield_10050":"Component is required."}}',
+  ));
+  const result = await invoke(event({
+    version: 1,
+    operation: 'create_issue',
+    cloud_id: 'cloud-1',
+    project_key: 'SHOP',
+    issue_type_name: 'Task',
+    summary: 'Needs a field we did not send',
+  }));
+  assert.equal(result.statusCode, 400);
+  assert.match(result.body, /customfield_10050/);
+});
+
+test('rejects a malformed project key, issue type, summary, or description before calling Jira', async () => {
+  let calls = 0;
+  const invoke = handler(async () => {
+    calls += 1;
+    return jiraResponse(201, '{}');
+  });
+  const base = {
+    version: 1,
+    operation: 'create_issue',
+    cloud_id: 'cloud-1',
+    project_key: 'SHOP',
+    issue_type_name: 'Task',
+    summary: 'A valid summary',
+  };
+  const cases = [
+    { ...base, project_key: 'shop' },
+    { ...base, project_key: '../../evil' },
+    { ...base, issue_type_name: '' },
+    { ...base, summary: '' },
+    { ...base, summary: 'x'.repeat(256) },
+    { ...base, body: 'not-an-object' },
+    { ...base, body: ['not', 'adf'] },
+  ];
+  for (const payload of cases) {
+    const result = await invoke(event(payload));
+    assert.equal(result.statusCode, 400, JSON.stringify(payload));
+    assert.match(result.body, /invalid_create_issue_request/);
+  }
+  assert.equal(calls, 0);
+});

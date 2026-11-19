@@ -26,6 +26,9 @@ const APP_ACTOR_MIN_SECRET_LENGTH = 32;
 const ISSUE_KEY_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
 const COMMENT_ID_RE = /^\d+$/;
 const TRANSITION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+// Mirrors cli/src/commands/jira.ts's PROJECT_KEY_RE.
+const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{1,99}$/;
+const MAX_SUMMARY_LENGTH = 255; // Jira's own summary field limit.
 
 function response(statusCode, body = '') {
   return {
@@ -208,6 +211,42 @@ export function createProxyHandler({
                 'Content-Type': 'application/json',
               },
               body: JSON.stringify({ transition: { id: payload.transition_id } }),
+            },
+          ));
+        case 'create_issue':
+          // No separate createmeta round trip: Jira's own create response already
+          // reports exactly which required field (or an invalid issuetype name) is
+          // missing via a 400 with an `errors` map, which the caller (create-task-
+          // core.ts) uses to decide whether to skip. This proxy only validates the
+          // shape of what WE are sending, not whether the project accepts it.
+          if (
+            !PROJECT_KEY_RE.test(payload.project_key ?? '')
+            || typeof payload.issue_type_name !== 'string'
+            || payload.issue_type_name.trim().length === 0
+            || typeof payload.summary !== 'string'
+            || payload.summary.trim().length === 0
+            || payload.summary.length > MAX_SUMMARY_LENGTH
+            || (payload.body !== undefined
+              && (typeof payload.body !== 'object' || Array.isArray(payload.body)))
+          ) {
+            return response(400, { error: 'invalid_create_issue_request' });
+          }
+          return jiraResponse(await requestJira(
+            route`/rest/api/3/issue`,
+            {
+              method: 'POST',
+              headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                fields: {
+                  project: { key: payload.project_key },
+                  issuetype: { name: payload.issue_type_name },
+                  summary: payload.summary,
+                  ...(payload.body !== undefined && { description: payload.body }),
+                },
+              }),
             },
           ));
         default:

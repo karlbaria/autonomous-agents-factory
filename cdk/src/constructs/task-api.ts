@@ -304,6 +304,15 @@ export class TaskApi extends Construct {
    */
   public readonly appClientId: string;
 
+  /**
+   * The direct-API task-creation Lambda (`create-task.ts`) — what `bgagent
+   * submit` and any other direct API caller hits. Exposed so the stack can
+   * wire cross-construct grants added after this construct is instantiated
+   * (Task 13 (fork) PR 2: Jira auto-tracking needs JiraIntegration's tables,
+   * but `JiraIntegration` is constructed after `TaskApi` in `agent.ts`).
+   */
+  public readonly createTaskFn: lambda.NodejsFunction;
+
   // eslint-disable-next-line complexity -- predates the ceiling (53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
@@ -565,6 +574,7 @@ export class TaskApi extends Construct {
       memorySize: SCREENING_HANDLER_MEMORY_MB,
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
     });
+    this.createTaskFn = createTaskFn;
 
     const getTaskFn = new lambda.NodejsFunction(this, 'GetTaskFn', {
       entry: path.join(handlersDir, 'get-task.ts'),

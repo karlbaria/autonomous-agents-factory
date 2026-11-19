@@ -27,6 +27,7 @@ export const JIRA_APP_ACTOR_MIN_SECRET_LENGTH = sharedConstants.jira_app_actor.m
 const PROXY_ERROR_CODES = new Set([
   'cloud_id_required',
   'invalid_comment_request',
+  'invalid_create_issue_request',
   'invalid_update_comment_request',
   'invalid_issue_key',
   'invalid_json',
@@ -47,12 +48,18 @@ export interface JiraAppActorConfig {
 
 export interface JiraAppActorRequest {
   readonly version: 1;
-  readonly operation: 'comment' | 'update_comment' | 'get_transitions' | 'transition' | 'identity';
+  readonly operation: 'comment' | 'update_comment' | 'get_transitions' | 'transition' | 'identity' | 'create_issue';
   readonly cloud_id: string;
   readonly issue_key?: string;
   readonly comment_id?: string;
   readonly body?: Record<string, unknown>;
   readonly transition_id?: string;
+  /** `create_issue` only — target project key (e.g. `SHOP`). */
+  readonly project_key?: string;
+  /** `create_issue` only — issue type NAME (e.g. `Task`), not an id. */
+  readonly issue_type_name?: string;
+  /** `create_issue` only — the new issue's summary. */
+  readonly summary?: string;
 }
 
 export type JiraAppActorResult =
@@ -62,6 +69,13 @@ export type JiraAppActorResult =
     readonly status?: number;
     readonly retryable: boolean;
     readonly errorCode?: string;
+    /**
+     * Raw proxy response body, when one was received (a request that never
+     * reached the proxy — network/timeout — has none). Comment/transition
+     * callers don't need this; `create_issue` does, to show the caller
+     * exactly which Jira field was missing or invalid.
+     */
+    readonly body?: string;
   };
 
 function proxyErrorCode(body: string): string | undefined {
@@ -160,7 +174,7 @@ export async function requestJiraAppActor(
     } else {
       logger.error('Jira app-actor proxy rejected request', details);
     }
-    return { ok: false, status: result.status, retryable, errorCode };
+    return { ok: false, status: result.status, retryable, errorCode, body: responseBody };
   } catch (err) {
     logger.warn('Jira app-actor proxy request failed', {
       error_id: 'JIRA_APP_ACTOR_PROXY_NETWORK',

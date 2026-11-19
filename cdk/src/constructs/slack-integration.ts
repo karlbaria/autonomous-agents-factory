@@ -120,6 +120,15 @@ export class SlackIntegration extends Construct {
   /** The Slack client ID secret (placeholder — user populates after creating the Slack App). */
   public readonly clientIdSecret: secretsmanager.Secret;
 
+  /**
+   * The async slash-command/@mention worker (`slack-command-processor.ts`).
+   * Exposed so the stack can wire cross-construct grants added after this
+   * construct is instantiated (Task 13 (fork) PR 2: Jira auto-tracking
+   * needs JiraIntegration's tables, but `JiraIntegration` is constructed
+   * after `SlackIntegration` in `agent.ts`).
+   */
+  public readonly commandProcessorFn: lambda.NodejsFunction;
+
   constructor(scope: Construct, id: string, props: SlackIntegrationProps) {
     super(scope, id);
 
@@ -302,6 +311,7 @@ export class SlackIntegration extends Construct {
       // Screens inline file attachments via createTaskCore — pdf-parse must stay unbundled.
       bundling: attachmentScreeningBundling,
     });
+    this.commandProcessorFn = commandProcessorFn;
     this.userMappingTable.grantReadWriteData(commandProcessorFn);
     this.installationTable.grantReadData(commandProcessorFn);
     this.channelMappingTable.grantReadData(commandProcessorFn);
