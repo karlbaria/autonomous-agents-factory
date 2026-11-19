@@ -772,6 +772,53 @@ class TestAdversarialProbesCannotBeTamperedWith:
         committed_content = (probes_dir / "test_marker.py").read_text(encoding="utf-8")
         assert "assert True" not in committed_content
 
+    def test_pycache_churn_from_running_the_probes_is_not_tamper(self, config, setup, tmp_path):
+        """Regression (live demo run, 2026-11-18): the fixer's own `mise run
+        build`/pytest invocation recompiles the committed probes, writing
+        bytecode cache under tests/review_probes/__pycache__/ as a side
+        effect — that must never be reported as the fixer tampering with the
+        probes."""
+        marker = Path(setup.repo_dir) / "FIXED_MARKER"
+        probes_dir = Path(setup.repo_dir) / "tests" / "review_probes"
+
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                scratch_dir = _scratch_dir_from_prompt(user_prompt)
+                probes = {"test_marker.py": _marker_probe_source(marker)}
+                _probe_writer_fake(scratch_dir, probes)
+                return AgentResult(status="success", cost_usd=0.01, result_text=_manifest(probes))
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                marker.write_text("fixed", encoding="utf-8")
+                # Bytecode cache churn, not tampering: running the committed
+                # probe writes/updates its __pycache__ entry.
+                pycache_dir = probes_dir / "__pycache__"
+                pycache_dir.mkdir(parents=True, exist_ok=True)
+                (pycache_dir / "test_marker.cpython-313-pytest.pyc").write_bytes(b"\x00\x01")
+                return AgentResult(status="success", cost_usd=0.02, result_text="Ran the probes.")
+            if "test_marker.py" in user_prompt and "FAIL" in user_prompt:
+                return AgentResult(
+                    status="success",
+                    cost_usd=0.02,
+                    result_text=(
+                        "VERDICT: NOT-READY\nFINDINGS:\n```json\n"
+                        '[{"type": "issue", "severity": "major", "title": "x", '
+                        '"description": "x", "evidence": "app.py:1"}]\n```\n'
+                    ),
+                )
+            return AgentResult(status="success", cost_usd=0.02, result_text="VERDICT: READY\n")
+
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=fake)):
+            result = run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                review_mode="adversarial",
+                max_iterations=2,
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        assert result.rounds[1].reverted_probe_paths == []
+
 
 class TestAdversarialInvalidProbeDoesNotBlock:
     def test_call2_marks_probe_invalid_and_still_reports_ready(self, config, setup, tmp_path):

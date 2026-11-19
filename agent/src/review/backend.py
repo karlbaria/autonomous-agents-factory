@@ -221,11 +221,19 @@ def _merge_probes(fresh: list[Probe], carried: list[Probe]) -> list[Probe]:
 
 
 def _snapshot_dir(path: Path) -> dict[str, bytes]:
-    """Every file under ``path``, repo-relative to it, for tamper detection."""
+    """Every file under ``path``, repo-relative to it, for tamper detection.
+
+    Excludes ``__pycache__``: running the committed probes (the fixer's own
+    build/test invocation, or this module's own ``run_probes``) recompiles
+    their bytecode as a side effect, which is cache churn, not the fixer
+    editing or deleting a probe (seen for real in a live demo run).
+    """
     if not path.is_dir():
         return {}
     return {
-        str(p.relative_to(path)): p.read_bytes() for p in sorted(path.rglob("*")) if p.is_file()
+        str(p.relative_to(path)): p.read_bytes()
+        for p in sorted(path.rglob("*"))
+        if p.is_file() and "__pycache__" not in p.relative_to(path).parts
     }
 
 
