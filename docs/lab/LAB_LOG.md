@@ -492,3 +492,34 @@ Pre-check: `bgagent list` with every non-terminal status, filtered to each repo,
 - [factory-shop#2](https://github.com/karlbaria/factory-shop/pull/2) and [factory-sandbox-py#58](https://github.com/karlbaria/factory-sandbox-py/pull/58) (this session's demo PRs) are left open for the owner to review/merge.
 - `factory-shop` has no GitHub Actions workflow, CDK app, or Amplify Hosting preview yet — that's Task 16's job. No `FACTORY_AUTO_MERGE` variable either — Task 17's.
 - The real per-repo `default_workflow` field (Jira/Slack/webhook channels) is deferred to Task 13, not built here.
+
+## Task 13: Outbound Jira issue creation and auto-tracking — PR 1 (per-repo `default_workflow`)
+
+Shipped as two PRs under one issue, [autonomous-agents-factory#26](https://github.com/karlbaria/autonomous-agents-factory/issues/26), owner adds `approved` once and both PRs proceed under it; PR 2 (outbound Jira issue creation + auto-tracking) starts only after PR 1 merges.
+
+### 1. What was done, and where it differed from the plan
+
+- `RepoConfig` gets an optional `default_workflow?: string`, set via `bgagent repo onboard --default-workflow <id>` (idempotent — re-running `onboard` carries it forward like every other optional field; there's no separate `update` subcommand). Consulted by every repo-bound channel call site that previously hardcoded `CODING_WORKFLOW_ID` when a task named no workflow: `jira-webhook-processor.ts`, `slack-command-processor.ts`, `orchestration-release.ts` (Jira authored-subtask children — there's no existing mechanism for a parent to name its own workflow, so the repo default is the only input), and `webhook-create-task.ts` (which previously had **no** pinning at all).
+- **Complexity-ceiling constraint surfaced during implementation:** `jira-webhook-processor.ts`'s `handler` already sits at a pre-existing, suppressed cyclomatic complexity of 116/40. Inlining `repoConfig?.default_workflow ?? CODING_WORKFLOW_ID` at the call site adds 2 (one for `?.`, one for `??`) and would have pushed it to 118 — a regression the "must not grow" rule (`cdk/AGENTS.md`) forbids. Fixed by extracting a standalone `resolveChannelDefaultWorkflow()` helper in `workflows.ts`, so the fallback logic's complexity cost lands in a small new function instead. Verified before/after with `eslint --no-inline-config`: unchanged at 116.
+- **Behavior change, flagged in the PR:** a generic webhook task with a `repo` but no `workflow_ref` previously fell through to the repo-less `default/agent-v1` (never commits, `pr_url=null`). It now pins the coding workflow (or the repo's default) instead, matching the other channels. A caller that wants the old passthrough can still send `workflow_ref` explicitly.
+- `factory-shop`'s `default_workflow` set to `coding/new-task-adversarial-v1`; `factory-sandbox-py` left unset (keeps `coding/new-task-v1`).
+- New tests in `workflows.test.ts`, `repo-config.test.ts`, `jira-webhook-processor.test.ts`, `slack-command-processor.test.ts`, `orchestration-release.test.ts` (all three needed a fresh module-level mock of `repo-config.ts` rather than threading through the existing `ddbSend`/injected-`ddb` sequencing, to avoid reordering every other test in those files), `webhook-create-task.test.ts`, plus CLI tests (`repo-onboard.test.ts`, `repo.test.ts`, `repo-display.test.ts`).
+- `mise run build` (agent 2214/2214, cdk 6435/6435, cli 1246/1246, knip clean) and `mise run security` both green. [autonomous-agents-factory#27](https://github.com/karlbaria/autonomous-agents-factory/pull/27), merged.
+
+### 2. Post-merge deploy, smoke test, and Slack demo
+
+- **`cdk:diff`** against `backgroundagent-dev-factory` showed only expected churn: `AWS::Bedrock::GuardrailVersion` + `AWS::Lambda::Version` rotation on `TaskOrchestrator/OrchestratorFn` (both exempted version resources) and the usual timestamp-only `Custom::AWS` `RepoConfigCR` replacement (`onboarded_at`/`updated_at` ISO timestamps only). No IAM Statement Changes, no Security Group Changes, no table/secret/bucket/VPC replace-or-delete — no approval stop needed.
+- **Pre-deploy check:** `bgagent list` with every non-terminal status, across all repos (no `--repo` filter), returned zero in-flight tasks.
+- **Deploy:** the owner ran the standard `mise //cdk:deploy` command themselves.
+- **Smoke test — `coding/new-task-v1` on `factory-sandbox-py`:** filed [factory-sandbox-py#59](https://github.com/karlbaria/factory-sandbox-py/issues/59), "Add a GET `/triple/{n}` endpoint". Task `01M7S0SFAR6GPGBW33DQZWGTYG` — `COMPLETED`, `build_passed: true`, `lint_passed: true`, `resolved_workflow: coding/new-task-v1`, 5 turns, $0.1463, PR [factory-sandbox-py#60](https://github.com/karlbaria/factory-sandbox-py/pull/60). Clean.
+- **Slack demo (owner-run):** a Slack-submitted task against `factory-shop` naming no workflow ("add a GET endpoint that returns the number of products") resolved to `coding/new-task-adversarial-v1` — task `01M7S147TFVARDZYXG7M82ZPE3`, `COMPLETED`, $0.3536 (`coder: $0.1502, probe_writer: $0.1312, code_reviewer: $0.0722`), PR [factory-shop#3](https://github.com/karlbaria/factory-shop/pull/3) shows Round 1 `READY` with 5 passing probes and 2 findings. The same kind of bare Slack task against `factory-sandbox-py` ("add a GET ping endpoint that returns ok") resolved to `coding/new-task-v1` — task `01M7S15ABWMHA1HJAS4020WPK1`, `COMPLETED`, $0.1240, PR [factory-sandbox-py#61](https://github.com/karlbaria/factory-sandbox-py/pull/61), no reviewer section — confirming the sandbox repo is unaffected. The generic-webhook-channel leg of the demo was skipped as redundant: Slack and webhook resolve `default_workflow` through the exact same `resolveChannelDefaultWorkflow()` call.
+- **Tagged and pushed `known-good-task13a`** after the demo (the "a" suffix anticipates a second tag after PR 2).
+
+### 3. Bug found during the demo (fix tracked separately)
+
+The owner's Slack testing surfaced a real parsing bug, reproduced exactly: `@Jarvis add a GET /api/products/count endpoint in karlbaria/factory-shop`. `slack-events.ts`'s `repoPattern` (`/\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:#\d+)?)\b/`, unanchored, first-match-wins) matches the first `x/y`-shaped substring anywhere in the message text — which is `api/products`, lifted out of the URL path `/api/products/count` — rather than the intended `karlbaria/factory-shop` near the end. Confirmed directly: that regex against this exact string returns `api/products`, and the resulting `commandText` becomes `submit api/products add a GET //count endpoint in karlbaria/factory-shop`. Filed and fixed as its own small issue/PR, not folded into PR 1 or PR 2 — see the next entry below once it lands.
+
+### 4. Open items
+
+- PR 2 (outbound Jira issue creation + auto-tracking) starts next, under the same issue #26.
+- The Slack repo-parsing bug (§3 above) — tracked separately, not yet merged as of this entry.
