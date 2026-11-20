@@ -609,6 +609,180 @@ class TestEnsurePrReviewSummary:
         assert "could not be parsed: no VERDICT line found" in body
 
 
+class TestPostReviewStatus:
+    """Task 17 (fork) / ADR-028: the ``factory/review`` commit status."""
+
+    def _post(self, monkeypatch, review_outcome, head_sha="deadbeefcafe1234567890"):
+        sub = _SubprocessRunRecorder(
+            script=[
+                (lambda c: c[:2] == ["git", "rev-parse"], _cp(returncode=0, stdout=f"{head_sha}\n"))
+            ]
+        )
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+        post_hooks.post_review_status("/tmp/repo", "owner/repo", review_outcome)
+        return run_cmd
+
+    def _description(self, cmd):
+        return next(a for a in cmd if a.startswith("description="))
+
+    def test_ready_posts_success_on_current_head(self, monkeypatch):
+        run_cmd = self._post(
+            monkeypatch,
+            {"ran": True, "verdict": "READY", "reviewed_sha": "abc123"},
+            head_sha="deadbeefcafe1234567890",
+        )
+        cmd = run_cmd.cmd_for("post-review-status")
+        assert cmd is not None
+        assert cmd[2] == "repos/owner/repo/statuses/deadbeefcafe1234567890"
+        assert "state=success" in cmd
+        assert "context=factory/review" in cmd
+
+    def test_not_ready_posts_failure(self, monkeypatch):
+        run_cmd = self._post(
+            monkeypatch, {"ran": True, "verdict": "NOT_READY", "reviewed_sha": "abc123"}
+        )
+        cmd = run_cmd.cmd_for("post-review-status")
+        assert "state=failure" in cmd
+
+    def test_description_names_the_actually_reviewed_sha(self, monkeypatch):
+        # The status targets the final (post-probes-commit) HEAD, but its
+        # description should name whatever Call 2 actually reviewed — which
+        # can be an earlier commit on the same branch.
+        run_cmd = self._post(
+            monkeypatch,
+            {"ran": True, "verdict": "READY", "reviewed_sha": "abc123def456"},
+            head_sha="deadbeefcafe1234567890",
+        )
+        cmd = run_cmd.cmd_for("post-review-status")
+        assert self._description(cmd) == "description=READY (reviewed abc123def456)"
+
+    def test_adversarial_uses_final_rounds_verdict_and_reviewed_sha(self, monkeypatch):
+        review_outcome = {
+            "ran": True,
+            "mode": "adversarial",
+            "rounds": [
+                {"round_number": 1, "verdict": "NOT_READY", "reviewed_sha": "aaaaaaaaaaaa"},
+                {"round_number": 2, "verdict": "READY", "reviewed_sha": "bbbbbbbbbbbb"},
+            ],
+        }
+        run_cmd = self._post(monkeypatch, review_outcome)
+        cmd = run_cmd.cmd_for("post-review-status")
+        assert "state=success" in cmd
+        assert self._description(cmd) == "description=READY (reviewed bbbbbbbbbbbb)"
+
+    def test_review_not_ran_posts_nothing(self, monkeypatch):
+        run_cmd = self._post(monkeypatch, {"ran": False, "skipped_reason": "budget_exhausted"})
+        assert "post-review-status" not in run_cmd.labels()
+
+    def test_none_review_outcome_posts_nothing(self, monkeypatch):
+        run_cmd = self._post(monkeypatch, None)
+        assert "post-review-status" not in run_cmd.labels()
+
+    def test_unresolvable_head_sha_posts_nothing(self, monkeypatch):
+        sub = _SubprocessRunRecorder(script=[(lambda c: True, _cp(returncode=128, stderr="bad"))])
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+        post_hooks.post_review_status("/tmp/repo", "owner/repo", {"ran": True, "verdict": "READY"})
+        assert "post-review-status" not in run_cmd.labels()
+
+    def test_failed_post_warns_and_does_not_raise(self, monkeypatch):
+        sub = _SubprocessRunRecorder(
+            script=[(lambda c: c[:2] == ["git", "rev-parse"], _cp(returncode=0, stdout="abc\n"))]
+        )
+        run_cmd = _RunCmdRecorder(returncodes={"post-review-status": 1})
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+        warns: list[str] = []
+        monkeypatch.setattr(
+            post_hooks, "log", lambda lvl, msg: warns.append(msg) if lvl == "WARN" else None
+        )
+
+        post_hooks.post_review_status("/tmp/repo", "owner/repo", {"ran": True, "verdict": "READY"})
+
+        assert any("factory/review" in w for w in warns)
+
+
+class TestEnsurePrPostsReviewStatus:
+    """``ensure_pr`` posts ``factory/review`` on both its PR paths."""
+
+    def test_fresh_create_posts_review_status(self, monkeypatch):
+        def responder(cmd):
+            if "view" in cmd:
+                return _cp(returncode=1, stderr="no pr")
+            if "log" in cmd and "--reverse" in cmd:
+                return _cp(returncode=0, stdout="feat: do the thing\n")
+            if "log" in cmd:
+                return _cp(returncode=0, stdout="feat: do the thing\n\n---")
+            if cmd[:2] == ["git", "rev-parse"]:
+                return _cp(returncode=0, stdout="cafefeed1234\n")
+            return _cp()
+
+        sub = _SubprocessRunRecorder(responder=responder)
+        run_cmd = _RunCmdRecorder(stdouts={"create-pr": "https://github.com/o/r/pull/42\n"})
+        monkeypatch.setattr(post_hooks, "ensure_pushed", lambda d, b: True)
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        post_hooks.ensure_pr(
+            _config(),
+            _setup(),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+            review_outcome={"ran": True, "verdict": "READY", "reviewed_sha": "abc123"},
+        )
+        status_cmd = run_cmd.cmd_for("post-review-status")
+        assert status_cmd is not None
+        assert "state=success" in status_cmd
+
+    def test_existing_pr_posts_review_status(self, monkeypatch):
+        def responder(cmd):
+            if "view" in cmd and "baseRefName" in cmd:
+                return _cp(returncode=0, stdout="main\n")
+            if "view" in cmd and "body" in cmd:
+                return _cp(returncode=0, stdout="## Summary\n\nOriginal coder body.\n")
+            if "view" in cmd:
+                return _cp(returncode=0, stdout="https://github.com/o/r/pull/1\n")
+            if cmd[:2] == ["git", "rev-parse"]:
+                return _cp(returncode=0, stdout="cafefeed1234\n")
+            return _cp()
+
+        sub = _SubprocessRunRecorder(responder=responder)
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch="main"),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+            review_outcome={"ran": True, "verdict": "NOT_READY", "reviewed_sha": "abc123"},
+        )
+        status_cmd = run_cmd.cmd_for("post-review-status")
+        assert status_cmd is not None
+        assert "state=failure" in status_cmd
+
+    def test_no_review_outcome_posts_no_status(self, monkeypatch):
+        sub = _pr_view("https://github.com/o/r/pull/1", base="main")
+        run_cmd = _RunCmdRecorder()
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        post_hooks.ensure_pr(
+            _config(),
+            _setup(default_branch="main"),
+            build_passed=True,
+            lint_passed=True,
+            strategy="create",
+        )
+        assert "post-review-status" not in run_cmd.labels()
+
+
 class TestApplyUnresolvedLabel:
     """Task 5 (ADR-026 (fork)): on_unresolved: pr_with_warning labels the PR."""
 

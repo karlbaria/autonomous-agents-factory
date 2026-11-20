@@ -15,3 +15,9 @@
 # already on main. For a finding on an open branch add a SHA-independent
 # allowlist in .gitleaks.toml instead: a rebase or squash of the branch
 # invalidates the fingerprint (the #537 regression described above).
+
+# LAB_LOG.md's Task 16 wrap-up (1edf689, already on main) quoted a hardcoded
+# fake account ID from a deleted Jest nag test. Reworded to drop the literal
+# digits on a later commit (#46), but the already-merged commit itself still
+# carries them — keep this fingerprint rather than rewriting main history.
+1edf6891547b511e978ac97e6acb82a6e07920fb:docs/lab/LAB_LOG.md:aws-account-id:577

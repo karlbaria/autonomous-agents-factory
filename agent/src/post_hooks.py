@@ -680,6 +680,83 @@ def _review_section(review_outcome: dict | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _final_review_round(review_outcome: dict | None) -> dict | None:
+    """The dict holding the gating ``verdict``/``reviewed_sha`` — the LAST
+    round for adversarial mode (Task 5), the outcome itself for advisory
+    (Task 4).
+
+    Returns ``None`` when no review ran at all (every workflow but
+    ``coding/new-task-verified-v1``/``-adversarial-v1``, or a round skipped
+    outright — budget exhausted, ``review_mode: none``), matching
+    ``_review_section``'s own "no section" rule.
+    """
+    if not review_outcome or not review_outcome.get("ran"):
+        return None
+    rounds = review_outcome.get("rounds") or []
+    if review_outcome.get("mode") == "adversarial" and rounds:
+        return rounds[-1]
+    return review_outcome
+
+
+def post_review_status(repo_dir: str, repo_url: str, review_outcome: dict | None) -> None:
+    """Post the ``factory/review`` commit status (Task 17 (fork) / ADR-028).
+
+    Targets the branch's CURRENT ``HEAD`` — read here, after the probes
+    commit (Task 4) and any fixer-round commits (Task 5) have already
+    landed and been pushed by the caller — never the SHA Call 2 originally
+    reviewed, which may already be behind it. This is what lets the Task 17
+    watchdog key off a single, final status per PR rather than a status per
+    round. The description separately names the SHA Call 2 actually
+    reviewed, which can differ from this status's own target commit.
+
+    Best-effort and non-fatal, same as the other PR-body cosmetic steps in
+    this module: a failure here must not lose the PR itself.
+    """
+    final_round = _final_review_round(review_outcome)
+    if final_round is None:
+        return
+    verdict = final_round.get("verdict")
+    if verdict is None:
+        return
+    sha_result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if sha_result.returncode != 0 or not sha_result.stdout.strip():
+        log("WARN", "could not resolve HEAD sha to post factory/review status")
+        return
+    sha = sha_result.stdout.strip()
+    state = "success" if verdict == "READY" else "failure"
+    reviewed_sha = (final_round.get("reviewed_sha") or sha)[:12]
+    # GitHub's Statuses API caps `description` at 140 characters.
+    description = f"{verdict} (reviewed {reviewed_sha})"[:140]
+    result = run_cmd(
+        [
+            "gh",
+            "api",
+            f"repos/{repo_url}/statuses/{sha}",
+            "-f",
+            f"state={state}",
+            "-f",
+            "context=factory/review",
+            "-f",
+            f"description={description}",
+        ],
+        label="post-review-status",
+        cwd=repo_dir,
+        check=False,
+    )
+    if result.returncode != 0:
+        log(
+            "WARN",
+            f"failed to post factory/review status (non-fatal, rc={result.returncode}): "
+            f"{result.stderr.strip() if result.stderr else '(no stderr)'}",
+        )
+
+
 def apply_unresolved_label(repo_dir: str, repo_url: str, pr_url: str) -> None:
     """Add the ``review:unresolved`` label (Task 5 — ADR-026 (fork)).
 
@@ -856,6 +933,7 @@ def ensure_pr(
         appendix = _cost_line(agent_result, ledger) + _review_section(review_outcome)
         if appendix.strip():
             _append_pr_appendix(repo_dir, config.repo_url, pr_url, appendix)
+        post_review_status(repo_dir, config.repo_url, review_outcome)
         return pr_url
 
     # Check if there are any commits on this branch beyond the default branch
@@ -966,6 +1044,7 @@ def ensure_pr(
     if pr_result.returncode == 0:
         pr_url = pr_result.stdout.strip()
         log("POST", f"PR created: {pr_url}")
+        post_review_status(repo_dir, config.repo_url, review_outcome)
         return pr_url
     log("POST", "Failed to create PR")
     return None
