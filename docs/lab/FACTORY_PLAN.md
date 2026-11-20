@@ -51,6 +51,7 @@ Follow this checklist in every task from now on.
   git tag known-good-taskN
   git push origin known-good-taskN
   ```
+- **Lab exception to "never edit on `main`" ([ADR-003](../decisions/ADR-003-contribution-governance.md)):** a post-merge `docs/lab/LAB_LOG.md` wrap-up entry and the `known-good-*` tag above may be pushed directly to `main`, with no issue or PR. Everything else — code, infrastructure, policy, workflow files, ADRs, any change that isn't a LAB_LOG wrap-up entry or a known-good tag — still goes through an approved issue and a PR, with no exception.
 - **Rollback.** If a deploy breaks the factory, check out the latest `known-good-*` tag, rerun the standard deploy command, then return to `main` and fix the problem on a branch:
   ```bash
   git checkout known-good-taskN
