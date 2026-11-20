@@ -76,11 +76,49 @@ describe('submit command', () => {
       '--issue', '42',
     ]);
 
+    // #39: a bare repo-present submit sends no workflow_ref at all — the
+    // server resolves it against the repo's own default_workflow.
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', issue_number: 42, workflow_ref: 'coding/new-task-v1' },
+      { repo: 'owner/repo', issue_number: 42 },
       undefined,
     );
     expect(consoleSpy).toHaveBeenCalled();
+  });
+
+  // Regression (#39): the CLI used to pin DEFAULT_CODING_WORKFLOW_ID itself
+  // for a bare repo-present submit, which overrode the server's own
+  // repo-default resolution (create-task.ts's resolveChannelDefaultWorkflow
+  // call) and silently ran the platform default instead of e.g. a repo's
+  // configured coding/new-task-adversarial-v1.
+  test('a bare repo-present submit sends no workflow_ref, leaving the server to resolve it', async () => {
+    mockCreateTask.mockResolvedValue({ task_id: 'abc', status: 'SUBMITTED' });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--task', 'Fix the bug',
+    ]);
+
+    const [body] = mockCreateTask.mock.calls[0];
+    expect(body).not.toHaveProperty('workflow_ref');
+  });
+
+  test('an explicit --workflow on a repo-present submit is still sent as-is', async () => {
+    mockCreateTask.mockResolvedValue({ task_id: 'abc', status: 'SUBMITTED' });
+
+    const cmd = makeSubmitCommand();
+    await cmd.parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--task', 'Fix the bug',
+      '--workflow', 'coding/new-task-adversarial-v1',
+    ]);
+
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      { repo: 'owner/repo', task_description: 'Fix the bug', workflow_ref: 'coding/new-task-adversarial-v1' },
+      undefined,
+    );
   });
 
   test('submits a task with description', async () => {
@@ -114,8 +152,10 @@ describe('submit command', () => {
       '--task', 'Fix the bug',
     ]);
 
+    // #39: a bare repo-present submit sends no workflow_ref at all — the
+    // server resolves it against the repo's own default_workflow.
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_description: 'Fix the bug', workflow_ref: 'coding/new-task-v1' },
+      { repo: 'owner/repo', task_description: 'Fix the bug' },
       undefined,
     );
   });
@@ -167,8 +207,10 @@ describe('submit command', () => {
       '--max-turns', '50',
     ]);
 
+    // #39: a bare repo-present submit sends no workflow_ref at all — the
+    // server resolves it against the repo's own default_workflow.
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_description: 'Fix the bug', max_turns: 50, workflow_ref: 'coding/new-task-v1' },
+      { repo: 'owner/repo', task_description: 'Fix the bug', max_turns: 50 },
       undefined,
     );
   });
@@ -356,8 +398,10 @@ describe('submit command', () => {
       '--trace',
     ]);
 
+    // #39: a bare repo-present submit sends no workflow_ref at all — the
+    // server resolves it against the repo's own default_workflow.
     expect(mockCreateTask).toHaveBeenCalledWith(
-      { repo: 'owner/repo', task_description: 'deep debugging', trace: true, workflow_ref: 'coding/new-task-v1' },
+      { repo: 'owner/repo', task_description: 'deep debugging', trace: true },
       undefined,
     );
   });
@@ -434,10 +478,11 @@ describe('submit command', () => {
         '--approval-timeout', '120',
       ]);
       const [body] = mockCreateTask.mock.calls[0];
+      // #39: a bare repo-present submit sends no workflow_ref at all — the
+      // server resolves it against the repo's own default_workflow.
       expect(body).toEqual({
         repo: 'owner/repo',
         task_description: 'ok',
-        workflow_ref: 'coding/new-task-v1',
         approval_timeout_s: 120,
       });
     });
