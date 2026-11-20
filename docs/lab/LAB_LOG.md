@@ -598,10 +598,11 @@ PR [factory-shop#11](https://github.com/karlbaria/factory-shop/pull/11) (`Enviro
 
 Tags the completed Task 16: both original PRs (#8, #37), the OIDC subject fix (#10/#40), the CLI default-workflow fix (#41), and the three demo PRs (factory-shop#11-13).
 
+**Post-tag cleanup:** [#43](https://github.com/karlbaria/autonomous-agents-factory/pull/43) (the ADR-027 branch-protection note orphaned by the merge-race with #40) merged. Writing this very entry surfaced that `AGENTS.md`/ADR-003's "never edit on `main`" contradicts how every LAB_LOG wrap-up (including this one) and `known-good-*` tag actually gets committed — filed and fixed as [#44](https://github.com/karlbaria/autonomous-agents-factory/issues/44) → [#45](https://github.com/karlbaria/autonomous-agents-factory/pull/45): `FACTORY_PLAN.md`'s Rollback and safety checklist now states this as an explicit, bounded exception.
+
 ### Open items
 
 - [autonomous-agents-factory#42](https://github.com/karlbaria/autonomous-agents-factory/issues/42) — the agent still authenticates to GitHub as the owner's own PAT; required approvals on `protect-main` are stuck at 0 until it has its own identity. Tracked, not implemented.
-- [autonomous-agents-factory#43](https://github.com/karlbaria/autonomous-agents-factory/pull/43) — the ADR-027 branch-protection note, orphaned by a merge-race with #40, still open pending merge.
 - `factory-shop`'s GitHub Actions runs carry a Node.js 20 deprecation annotation: `actions/checkout@v4`, `actions/setup-node@v4`, `actions/setup-python@v5`, and `jdx/mise-action@v2` all still target Node 20 and are being forced onto Node 24 runners in the meantime. Not urgent — GitHub is doing the forcing — but these action versions should be bumped before GitHub stops doing that for them.
 - The main ABCA CloudFormation stack is at 475/490 resources, approaching CloudFormation's hard 500-resources-per-stack ceiling. Nothing failing yet, but the next few tasks that add resources to this stack should watch this number, and a nested-stack split is worth planning before it's an emergency.
 - `factory-shop-backend` ships one demo resource (the `ProductsTable`) that the FastAPI app doesn't read from or write to yet — wiring the app to real backend infrastructure is later work, not part of proving the write-IaC/pipeline-deploys loop itself.
