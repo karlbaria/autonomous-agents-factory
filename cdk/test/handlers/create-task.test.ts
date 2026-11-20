@@ -132,6 +132,62 @@ describe('create-task handler', () => {
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
+  // #39: a repo-bound API task with no workflow_ref now pins the coding
+  // workflow (or the repo's own default_workflow) instead of falling
+  // through to the repo-less default/agent-v1, mirroring the Jira/Slack/
+  // webhook call sites (Task 13 (fork)) — a deliberate behavior change, and
+  // the fix for the CLI's bgagent submit silently ignoring a repo's
+  // configured default_workflow (it used to pin coding/new-task-v1
+  // itself, client-side, which masked this same server-side gap).
+  test('pins coding/new-task-v1 when the caller sends no workflow_ref and the repo has no default_workflow', async () => {
+    const event = makeEvent();
+    await handler(event);
+    const taskPut = mockSend.mock.calls[0][0];
+    expect(taskPut.input.Item.resolved_workflow.id).toBe('coding/new-task-v1');
+  });
+
+  test("pins the repo's default_workflow when the repo config has one", async () => {
+    const original = process.env.REPO_TABLE_NAME;
+    process.env.REPO_TABLE_NAME = 'RepoTable';
+    try {
+      mockSend.mockResolvedValue({
+        Item: { repo: 'org/repo', status: 'active', default_workflow: 'coding/new-task-adversarial-v1' },
+      });
+      const event = makeEvent();
+      await handler(event);
+      const taskPut = mockSend.mock.calls.find(
+        ([cmd]) => cmd.input.Item?.resolved_workflow,
+      )?.[0];
+      expect(taskPut.input.Item.resolved_workflow.id).toBe('coding/new-task-adversarial-v1');
+    } finally {
+      if (original === undefined) delete process.env.REPO_TABLE_NAME;
+      else process.env.REPO_TABLE_NAME = original;
+      mockSend.mockResolvedValue({});
+    }
+  });
+
+  test('leaves an explicit workflow_ref untouched even when the repo has a default_workflow', async () => {
+    const original = process.env.REPO_TABLE_NAME;
+    process.env.REPO_TABLE_NAME = 'RepoTable';
+    try {
+      mockSend.mockResolvedValue({
+        Item: { repo: 'org/repo', status: 'active', default_workflow: 'coding/new-task-adversarial-v1' },
+      });
+      const event = makeEvent({
+        body: JSON.stringify({ repo: 'org/repo', task_description: 'Fix the bug', workflow_ref: 'coding/new-task-v1' }),
+      });
+      await handler(event);
+      const taskPut = mockSend.mock.calls.find(
+        ([cmd]) => cmd.input.Item?.resolved_workflow,
+      )?.[0];
+      expect(taskPut.input.Item.resolved_workflow.id).toBe('coding/new-task-v1');
+    } finally {
+      if (original === undefined) delete process.env.REPO_TABLE_NAME;
+      else process.env.REPO_TABLE_NAME = original;
+      mockSend.mockResolvedValue({});
+    }
+  });
+
   test('returns 401 when user is not authenticated', async () => {
     const event = makeEvent();
     event.requestContext.authorizer = null;
@@ -184,8 +240,11 @@ describe('create-task handler', () => {
   });
 
   test('returns 400 when the resolved workflow has no satisfiable input', async () => {
-    // No workflow_ref ⇒ resolves to default/agent-v1, which requires
-    // task_description; a bare repo satisfies nothing.
+    // #39: a repo-bound request with no workflow_ref now resolves to the
+    // repo's default_workflow (coding/new-task-v1 here, since REPO_TABLE_NAME
+    // is unset in this test file), not the repo-less default/agent-v1.
+    // coding/new-task-v1 requires one of issue_number/task_description; a
+    // bare repo satisfies neither.
     const event = makeEvent({ body: JSON.stringify({ repo: 'org/repo' }) });
     const result = await handler(event);
 

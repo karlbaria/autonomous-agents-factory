@@ -22,9 +22,11 @@ import { ulid } from 'ulid';
 import { createTaskCore } from './shared/create-task-core';
 import { buildChannelMetadata, extractUserGroups, extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
+import { lookupRepo } from './shared/repo-config';
 import { ErrorCode, errorResponse } from './shared/response';
 import type { CreateTaskRequest } from './shared/types';
 import { parseBody } from './shared/validation';
+import { resolveChannelDefaultWorkflow } from './shared/workflows';
 
 /**
  * POST /v1/tasks — Create a new task (Cognito-authenticated).
@@ -48,8 +50,21 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // 3. Extract idempotency key
     const idempotencyKey = event.headers['Idempotency-Key'] ?? event.headers['idempotency-key'];
 
+    // 3a. Explicit coding workflow when the caller named neither a workflow
+    // nor a repo-less request: a repo-bound API task must not fall through
+    // the resolution ladder to the repo-less default/agent-v1 (which never
+    // commits or opens a PR), mirroring the Jira/Slack/webhook/orchestration-
+    // release call sites. Task 13 (fork)/#39: the repo's own default_workflow
+    // wins when set. A caller that explicitly wants the repo-less fallback
+    // can still send workflow_ref itself (or omit repo entirely).
+    let resolvedBody = body;
+    if (body.workflow_ref === undefined && body.repo) {
+      const { config: apiTaskRepoConfig } = await lookupRepo(body.repo);
+      resolvedBody = { ...body, workflow_ref: resolveChannelDefaultWorkflow(apiTaskRepoConfig) };
+    }
+
     // 4. Delegate to shared core
-    return await createTaskCore(body, {
+    return await createTaskCore(resolvedBody, {
       userId,
       teamIds: extractUserGroups(event),
       channelSource: 'api',

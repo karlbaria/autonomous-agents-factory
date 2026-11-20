@@ -31,7 +31,6 @@ import {
   AttachmentType,
   AttachmentUploadInstruction,
   CreateTaskRequest,
-  DEFAULT_CODING_WORKFLOW_ID,
   INITIAL_APPROVALS_MAX_ENTRIES,
   INITIAL_APPROVALS_MAX_ENTRY_LENGTH,
   MAX_BUDGET_USD_MAX,
@@ -195,21 +194,24 @@ export function makeSubmitCommand(): Command {
       // workflows; an explicit --workflow overrides. The published mapping
       // (WORKFLOWS.md §"Replacing task types") is new_task→coding/new-task-v1,
       // pr_iteration→coding/pr-iteration-v1, pr_review→coding/pr-review-v1.
+      //
+      // A bare repo-present submit (no --workflow/--pr/--review-pr) leaves
+      // workflowRef undefined on purpose (#39): the server's create-task
+      // handler now resolves an absent workflow_ref against the repo's own
+      // RepoConfig.default_workflow when a repo is present (falling back to
+      // coding/new-task-v1), the same way the Slack/webhook/Jira channels
+      // already do (Task 13 (fork)). The CLI used to pin
+      // DEFAULT_CODING_WORKFLOW_ID here itself — that masked a real repo
+      // default_workflow (e.g. coding/new-task-adversarial-v1) behind the
+      // platform default and silently skipped review. A repo-less submit (no
+      // --repo) is unaffected: the server ladder's repo-less fallback
+      // (default/agent-v1) is the correct behavior there, with no repo
+      // default to apply.
       let workflowRef: string | undefined = opts.workflow;
       if (workflowRef === undefined && opts.pr !== undefined) {
         workflowRef = 'coding/pr-iteration-v1';
       } else if (workflowRef === undefined && opts.reviewPr !== undefined) {
         workflowRef = 'coding/pr-review-v1';
-      } else if (workflowRef === undefined && opts.repo) {
-        // A bare repo-present submit (no --workflow/--pr/--review-pr) is the old
-        // `new_task` default: clone → build → open a PR. The SERVER ladder
-        // deliberately resolves an absent workflow_ref to the repo-less
-        // default/agent-v1 (WORKFLOWS.md §"Resolution order"), so the CLI must
-        // send the coding workflow EXPLICITLY rather than omit it — otherwise
-        // `bgagent submit --repo X --task Y` silently regresses from "opens a PR"
-        // to "emits an S3 markdown artifact". A repo-less submit (no --repo, with
-        // --workflow) is unaffected: it carries its explicit workflow_ref above.
-        workflowRef = DEFAULT_CODING_WORKFLOW_ID;
       }
       const prNumber = opts.pr ?? opts.reviewPr;
 

@@ -197,9 +197,10 @@ export const DEFAULT_WORKFLOW_ID = 'default/agent-v1';
 export const CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
 /**
- * The workflow a repo-bound channel task (Jira/Slack/webhook/orchestration-
- * release) runs when it names no ``workflow_ref`` of its own (Task 13
- * (fork)): the repo's own ``RepoConfig.default_workflow`` when set, else
+ * The workflow a repo-bound channel task (Jira/Slack/webhook/API/
+ * orchestration-release) runs when it names no ``workflow_ref`` of its own
+ * (Task 13 (fork); #39 added the API/CLI call site): the repo's own
+ * ``RepoConfig.default_workflow`` when set, else
  * {@link CODING_WORKFLOW_ID}. A standalone function (rather than inlining
  * ``config?.default_workflow ?? CODING_WORKFLOW_ID`` at each call site) so
  * the ``?.``/``??`` cyclomatic cost lands here, not inside the large
