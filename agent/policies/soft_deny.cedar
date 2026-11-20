@@ -82,3 +82,18 @@ when { context.file_path like "*.env" };
 @category("auth")
 forbid (principal, action == Agent::Action::"write_file", resource)
 when { context.file_path like "*credentials*" };
+
+// Task 16 (FACTORY_PLAN.md): the agent writes IaC, only a pipeline deploys
+// it. The agent's own credentials stay Bedrock-only, so this is
+// belt-and-suspenders — a `cdk deploy`/`cdk destroy` the agent attempts
+// directly pauses for human approval instead of executing. Routine IaC
+// writes (`cdk synth`, `cdk diff`) are not gated. 600s window, high
+// severity: these commands change or delete live cloud resources.
+@tier("soft")
+@rule_id("cdk_deploy_or_destroy")
+@approval_timeout_s("600")
+@severity("high")
+@category("destructive")
+forbid (principal, action == Agent::Action::"execute_bash", resource)
+when { context.command like "*cdk deploy*"
+    || context.command like "*cdk destroy*" };

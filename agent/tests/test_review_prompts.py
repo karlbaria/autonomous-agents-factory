@@ -76,6 +76,20 @@ class TestCodeReviewerSystemPromptTypeSeverityDisambiguation:
         assert "never `minor`, `medium`, `major`, or `critical`" in CODE_REVIEWER_SYSTEM_PROMPT
 
 
+class TestCodeReviewerSystemPromptIacRisk:
+    """Task 16 (FACTORY_PLAN.md): risky IaC must be an automatic "major"
+    finding, not left to the reviewer's judgment."""
+
+    def test_names_public_resources_wildcard_iam_and_missing_encryption(self):
+        assert "major" in CODE_REVIEWER_SYSTEM_PROMPT
+        assert "public" in CODE_REVIEWER_SYSTEM_PROMPT
+        assert "wildcard" in CODE_REVIEWER_SYSTEM_PROMPT
+        assert "encryption" in CODE_REVIEWER_SYSTEM_PROMPT
+
+    def test_documents_the_amplify_preview_exception(self):
+        assert "Amplify" in CODE_REVIEWER_SYSTEM_PROMPT
+
+
 class TestFixerUserPrompt:
     """Task 5 amendment 3 (ADR-026 (fork)): the fixer's prompt includes the
     original issue, not just the findings and failing probes — it needs the

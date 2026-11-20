@@ -78,6 +78,7 @@ describe('builtin-policies — parseable by shared/cedar-policy', () => {
         'push_to_protected_branch',
         'write_env_files',
         'write_credentials',
+        'cdk_deploy_or_destroy',
       ]),
     );
   });
