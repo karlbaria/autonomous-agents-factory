@@ -20,6 +20,9 @@ Through Task 15.5, `factory-shop` (the second target app repo) has application c
 - `cdk-nag` (`AwsSolutionsChecks`) runs as an Aspect over both stacks; `cdk synth` fails on any ERROR-level finding, and that's the build gate — wired into `mise run build`, so broken or insecure IaC fails the same build gate every other change goes through. `.github/workflows/build.yml` runs this gate on every PR with no AWS credentials at all.
 - The reviewer's system prompt (`agent/src/review/prompts.py`) now names public resources (other than the documented Amplify PR-preview hosting), wildcard IAM, and missing encryption as automatic `major` findings when the diff touches IaC.
 - Amplify Hosting is set up once, by a human, through the console (connecting the GitHub App is an interactive OAuth step that can't be scripted), with PR previews on; `amplify.yml` documents the monorepo build spec (`appRoot: frontend`).
+- **`main` is now protected by a GitHub ruleset** (`protect-main`, enabled after upgrading to GitHub Pro — see [karlbaria/factory-shop#9](https://github.com/karlbaria/factory-shop/issues/9)): a pull request and the `build` check are both required, force pushes are blocked, and there is no bypass list. This is what turns "human review of merges to `main`" from a stated intent (the rest of this ADR, written before the ruleset existed) into something GitHub itself enforces. Required approvals are **0**, not 1 — today's agent PRs are authored as `karlbaria` (the same identity that would review them), so GitHub cannot require a human approval without also blocking the agent's own PRs from ever merging; see the next item.
+
+Required approvals of 0 is a known gap, not an oversight: anyone with write access, including the coding agent's own GitHub token, can merge an unreviewed PR to `main` the moment its `build` check passes. The ruleset still raises the bar over no protection at all — a PR and a green build are now unconditionally required, and force-push/bypass is closed — but it does not by itself guarantee a human looked at a change before it deploys. Moving the agent to its own bot/GitHub App identity (tracked separately — see References) would let required approvals become 1 with a real author/reviewer distinction, rather than today's 0.
 
 ## Fork points
 
@@ -41,5 +44,7 @@ Approved by the repo owner before implementation, amending `FACTORY_PLAN.md`'s T
 - `docs/lab/FACTORY_PLAN.md` — Task 16 (IaC and pipeline deploys for the target app repo)
 - [autonomous-agents-factory#36](https://github.com/karlbaria/autonomous-agents-factory/issues/36)
 - [autonomous-agents-factory#38](https://github.com/karlbaria/autonomous-agents-factory/issues/38)
+- [autonomous-agents-factory#42](https://github.com/karlbaria/autonomous-agents-factory/issues/42) — tracks moving the agent to its own GitHub App identity, which this ADR's 0-required-approvals gap motivates
 - [karlbaria/factory-shop#8](https://github.com/karlbaria/factory-shop/pull/8)
+- [karlbaria/factory-shop#9](https://github.com/karlbaria/factory-shop/issues/9) — the `protect-main` ruleset decision and branch-protection follow-ups
 - [karlbaria/factory-shop#10](https://github.com/karlbaria/factory-shop/pull/10)
