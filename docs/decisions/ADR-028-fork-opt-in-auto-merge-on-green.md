@@ -1,0 +1,48 @@
+# ADR-028 (fork): Opt-in auto-merge on green, with public demo previews
+
+**Status:** accepted
+**Date:** 2026-11-20
+**Implementation:** [autonomous-agents-factory#46](https://github.com/karlbaria/autonomous-agents-factory/issues/46) (this repo's share — the reviewer posts `factory/review`) and [karlbaria/factory-shop#14](https://github.com/karlbaria/factory-shop/issues/14) (the preview smoke test, the watchdog, and the `deploy.yml`/`FACTORY_AUTO_MERGE` wiring, which live in the target app repo) — Factory Lab Task 17 (`docs/lab/FACTORY_PLAN.md`). "(fork)" marks this ADR as a **fork** of that plan doc's Task 17 text: several points were narrowed or changed from the plan's own wording before implementation (see "Fork points" below), so this document — not the plan doc — is the record of what actually shipped.
+
+## Context
+
+Through Task 16, `factory-shop` has a working build gate, an independent reviewer, and a pipeline-only deploy path, but every PR still needs a human to notice it's green and click merge. Task 17 adds a live preview smoke test and, only when a repo opts in, a watchdog that merges a PR once every gate is green — closing the loop from ticket to a deployed change with no human in the merge step, while keeping that behavior off by default and fully auditable.
+
+## Decision
+
+- **Three gates on every PR's head SHA:** the ruleset's own **native `build` check** (already required by `protect-main`, unchanged by this task), a new `factory/review` commit status posted by the agent's own PAT after the reviewer's final verdict, and a new `factory/preview-smoke` commit status posted by a GitHub Actions job's default `GITHUB_TOKEN`.
+- **`factory/review`** (`agent/src/post_hooks.py`, `post_review_status`): posted at the point `ensure_pr` already runs, against the branch's **current `HEAD`** — i.e. after the probes commit (Task 4) and any fixer-round commits (Task 5) have landed and been pushed, not the SHA Call 2 originally reviewed. Its description separately names the SHA actually reviewed, since that can differ from the status's own target commit. `state: success` for `READY`, `failure` otherwise — including the `pr_with_warning` path, so a PR left open with unresolved findings still shows a red status rather than nothing. Fires for every workflow with a `review_and_fix` step; no schema or step-kind change.
+- **`factory-shop/.github/workflows/preview-smoke.yml`** (new): triggers on `check_run` (`completed`), filtered exactly like the existing Amplify-preview-screenshot filter already in `cdk/src/handlers/github-deployment-status.ts`'s `normalizeAmplifyPreviewCheck` (`app.slug` matching `^aws-amplify-[a-z0-9-]+$`, `conclusion: success`), reading the preview URL from `details_url`. Runs exactly one Playwright check (HTTP 200, a key element visible) and posts `factory/preview-smoke` via its own `GITHUB_TOKEN` (`permissions: statuses: write`).
+- **`factory-shop/.github/workflows/watchdog.yml`** (new, **self-contained to this repo**, not a reusable/callable workflow): triggered by `status` (catches `factory/review`, posted via the PAT — not subject to GitHub's `GITHUB_TOKEN` loop-prevention) and `workflow_run` completed for `preview-smoke.yml` (catches the `GITHUB_TOKEN`-posted statuses, which are subject to it). Every run re-reads the PR's **current** `headRefOid` — never the triggering event's SHA — and evaluates the opt-in variable, the three gates, and whether the branch is behind `main`, in that order.
+  - Opt-in off, a gate red/missing, or behind `main` → posts its own status, **`factory/auto-merge`**, `pending`, with a reason in the description (`"opt-in off"`, `"waiting for review"`, `"behind main"`). No PR comment.
+  - All green, not behind → merges via its own `GITHUB_TOKEN` (`contents: write`, `pull-requests: write`), then posts `factory/auto-merge` `success`, `"merged"`.
+  - After every successful merge, unconditionally dispatches `deploy.yml` (`gh workflow run deploy.yml --ref main`, `actions: write`) — no changed-files check; `cdk deploy` with no diff is a no-op, so checking first would only add complexity without changing the outcome.
+  - `concurrency: group: watchdog-<head sha>, cancel-in-progress: false` so two wake-ups on the same commit can't double-merge.
+- **`deploy.yml`** gains a `workflow_dispatch` trigger. A merge made with the watchdog's `GITHUB_TOKEN` won't trigger `deploy.yml`'s existing `push` trigger (GitHub's own loop-prevention), so the watchdog calls `workflow_dispatch` explicitly — a fresh request, exempt from that rule, and still runs with `GITHUB_REF: refs/heads/main`, so the OIDC trust condition (`ref:refs/heads/main`) from [ADR-027](./ADR-027-fork-agent-writes-iac-pipeline-deploys.md) still matches.
+- **No custom `factory/build` status, and `build.yml` is unchanged.** The watchdog reads the ruleset's existing native `build` check run directly.
+- **The gate-evaluation logic lives in `factory-shop/.github/scripts/evaluate-merge.mjs`** as a pure function (gate states + ahead/behind count + opt-in flag → decision + reason), tested with Node's built-in `node --test` — no new test dependency. Cases: all green, red, missing, a status present only on an older SHA, behind main, opt-in off, plus a test that no workflow or script hardcodes `karlbaria/factory-shop` (or any literal owner/repo string).
+- **A property this design relies on, worth stating explicitly:** workflows triggered by `status`, `workflow_run`, or `check_run` always execute the workflow file as it exists on the repository's **default branch**, never the triggering PR's copy. An agent-authored PR therefore cannot alter `watchdog.yml`, `preview-smoke.yml`, or `deploy.yml` in a way that affects its own merge decision — only a change merged to `main` (itself gated by `protect-main`) can do that.
+
+## Fork points
+
+Narrowed from the plan doc's Task 17 text, agreed before implementation:
+
+1. **"Reusable GitHub Actions workflow" → self-contained, single-repo workflow.** The plan describes the watchdog as reusable; v1 has exactly one repo (`factory-shop`) that needs it, so building a callable/reusable workflow now would be unexercised abstraction. Deferred until a second app repo needs the same watchdog.
+2. **No custom `factory/build` status.** The plan's "every gate is a GitHub commit status" line groups `factory/build` with `factory/review` and `factory/preview-smoke` as if all three were new, uniformly-named statuses. In practice the ruleset already requires and enforces the native `build` check from `build.yml`; adding a parallel custom status that just restates it would be duplicate signal for no new information. The watchdog reads the native check directly instead.
+3. **PR comments and a Jira merge-record → a single `factory/auto-merge` status.** The plan's guidance calls for commenting when a PR is behind `main` and for recording who/what merged (on the PR and on the linked Jira issue). v1 replaces both with one commit status, `factory/auto-merge`, whose `pending`/`success` state and description reason serve as the entire record. No Jira write in v1 — the existing PR-merged → Jira-transition path (wired for the agent's own merges in earlier tasks) is left for the owner to extend to watchdog-authored merges later, rather than building it now for a demo.
+
+## Consequences
+
+- **Positive:** A fully green PR on an opted-in repo goes from "ready" to "merged and deployed" with no human click, while the opt-in default (off), the native `build` check, and `protect-main`'s PR-required/no-bypass rules mean nothing new is unconditionally enforced — the watchdog can only do what a human with write access could already do by clicking Merge.
+- **Positive:** `factory/auto-merge`'s reason string is visible directly on the PR's checks tab, with no separate dashboard or log to go looking in, for exactly the failure modes (opt-in off, a red/missing gate, behind main) the demo needs to show.
+- **Negative / scoped out:** No Jira record of an auto-merge in v1 — tracked as a gap, not solved here (see Fork point 3).
+- **Negative / scoped out:** The watchdog is not reusable across app repos yet; onboarding a second repo this way means copying, not calling, `watchdog.yml` (see Fork point 1).
+- **Negative / accepted:** As in [ADR-027](./ADR-027-fork-agent-writes-iac-pipeline-deploys.md), merges here are not gated by a human-distinct-from-author approval (`protect-main`'s required approvals remain 0) — the watchdog's own `GITHUB_TOKEN` identity merging is a different actor from the PAT that authored the PR, which is a small improvement over today's self-review gap, but still not a real second-party review.
+
+## References
+
+- `docs/lab/FACTORY_PLAN.md` — Task 17 (preview smoke test and opt-in auto-merge on green)
+- [ADR-025 (fork)](./ADR-025-fork-two-call-reviewer.md), [ADR-026 (fork)](./ADR-026-fork-adversarial-fix-loop.md) — the reviewer and fix-loop `factory/review` is posted against
+- [ADR-027 (fork)](./ADR-027-fork-agent-writes-iac-pipeline-deploys.md) — the OIDC trust condition `deploy.yml`'s `workflow_dispatch` path relies on, and the `protect-main` 0-required-approvals gap this task shares
+- [autonomous-agents-factory#46](https://github.com/karlbaria/autonomous-agents-factory/issues/46)
+- [karlbaria/factory-shop#14](https://github.com/karlbaria/factory-shop/issues/14)
