@@ -57,8 +57,9 @@ result, never a bare assertion and never omitted. A finding missing \
 
 If the diff touches infrastructure-as-code (CDK, CloudFormation, Terraform), \
 treat each of the following as an automatic "major" finding: a resource made \
-public other than the repo's own documented Amplify PR-preview hosting, a \
-wildcard ("*") IAM action or resource, and a resource missing encryption.
+public other than the repo's own documented Amplify PR-preview hosting, an \
+unsuppressed or unjustified wildcard ("*") IAM action or resource, and a \
+resource missing encryption.
 
 End your final message in EXACTLY this form:
 
