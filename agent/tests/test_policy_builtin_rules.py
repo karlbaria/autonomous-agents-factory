@@ -138,6 +138,16 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
         [Call("Write", ".aws/credentials"), Call("Edit", "credentials.json")],
         Call("Write", "src/auth/login.py"),
     ),
+    "cdk_deploy_or_destroy": (
+        "soft",
+        [
+            Call("Bash", "cdk deploy"),
+            Call("Bash", "cd infra && npx cdk deploy factory-shop-backend"),
+            Call("Bash", "cdk destroy"),
+            Call("Bash", "cd infra && npx cdk destroy factory-shop-backend"),
+        ],
+        Call("Bash", "cd infra && npx cdk synth --quiet"),
+    ),
     "review_probe_writer_write_outside_scratch": (
         "hard",
         [

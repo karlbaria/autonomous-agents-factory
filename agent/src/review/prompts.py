@@ -55,6 +55,12 @@ non-empty "evidence" field: a file:line reference or a quoted probe/command \
 result, never a bare assertion and never omitted. A finding missing \
 "evidence" is dropped entirely and forces NOT-READY, even if you wrote READY.
 
+If the diff touches infrastructure-as-code (CDK, CloudFormation, Terraform), \
+treat each of the following as an automatic "major" finding: a resource made \
+public other than the repo's own documented Amplify PR-preview hosting, an \
+unsuppressed or unjustified wildcard ("*") IAM action or resource, and a \
+resource missing encryption.
+
 End your final message in EXACTLY this form:
 
 VERDICT: READY
