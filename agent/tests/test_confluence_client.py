@@ -207,6 +207,23 @@ class TestSpacesAndPages:
         assert call.json["body"] == {"representation": "storage", "value": "<p>n</p>"}
 
 
+class TestDeletePage:
+    def test_delete_page(self):
+        client, s = _client(_Resp(204))
+        client.delete_page("10")
+        assert (s.calls[0].method, s.calls[0].url) == ("DELETE", f"{V2}/pages/10")
+
+    def test_delete_page_tolerates_404(self):
+        client, _ = _client(_Resp(404, text="gone"))
+        client.delete_page("10")
+
+    def test_delete_page_raises_other_errors(self):
+        client, _ = _client(_Resp(403, text="no"))
+        with pytest.raises(ConfluenceError) as ei:
+            client.delete_page("10")
+        assert ei.value.status == 403
+
+
 class TestPageUrl:
     def test_base_plus_webui(self):
         raw = _page(

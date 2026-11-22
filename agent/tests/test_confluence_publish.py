@@ -36,11 +36,19 @@ class FakeConfluence:
         self.created: list[tuple[str, str, str, str | None]] = []
         self.updated: list[tuple[str, str, str]] = []
         self.fail: dict[str, ConfluenceError] = {}
+        # op -> how many more calls fail (absent: every call fails while in `fail`)
+        self.fail_times: dict[str, int] = {}
+        self.deleted: list[str] = []
         self._next_id = 1000
 
     def _maybe_fail(self, op):
-        if op in self.fail:
-            raise self.fail[op]
+        if op not in self.fail:
+            return
+        if op in self.fail_times:
+            if self.fail_times[op] <= 0:
+                return
+            self.fail_times[op] -= 1
+        raise self.fail[op]
 
     def get_space_id(self, key):
         self._maybe_fail("get_space_id")
@@ -70,6 +78,13 @@ class FakeConfluence:
         self.pages[page.id] = new
         self.updated.append((page.id, title, body))
         return new
+
+    def delete_page(self, page_id):
+        self._maybe_fail("delete_page")
+        self.deleted.append(page_id)
+        self.pages.pop(page_id, None)
+        self.labels.pop(page_id, None)
+        self.markers.pop(page_id, None)
 
     def get_labels(self, page_id):
         self._maybe_fail("get_labels")
@@ -251,12 +266,55 @@ class TestSkipReasons:
         fake.fail["update_page"] = ConfluenceError("HTTP 400", status=400)
         self._assert_skip(_publish(fake), "api_error")
 
-    def test_labelling_failure_after_create_is_reported(self, fake):
-        fake.fail["add_labels"] = ConfluenceError("HTTP 403", status=403)
+
+class TestCreateRollback:
+    """Labelling a just-created page: retry once, then delete it (never leave an
+    unlabelled factory page that blocks every later run as a clash)."""
+
+    def test_single_labelling_failure_is_retried_and_published(self, fake):
+        fake.fail["add_labels"] = ConfluenceError("HTTP 503", status=503)
+        fake.fail_times["add_labels"] = 1
         out = _publish(fake)
-        self._assert_skip(out, "api_error")
-        assert "was created but labelling it failed" in out.detail
-        assert fake.created  # the page exists; the skip explains the later clash
+        assert (out.status, out.action) == ("published", "created")
+        assert fake.labels[out.page_id] == {LABEL_GENERATED, LABEL_DRAFT}
+        assert fake.markers[out.page_id] == 1
+        assert not fake.deleted
+
+    def test_single_marker_failure_is_retried_and_published(self, fake):
+        fake.fail["set_last_written_version"] = ConfluenceError("HTTP 503", status=503)
+        fake.fail_times["set_last_written_version"] = 1
+        out = _publish(fake)
+        assert out.status == "published"
+        assert fake.markers[out.page_id] == 1
+        assert not fake.deleted
+
+    @pytest.mark.parametrize("op", ["add_labels", "set_last_written_version"])
+    def test_repeated_failure_deletes_the_created_page(self, fake, op):
+        fake.fail[op] = ConfluenceError("HTTP 403", status=403)
+        out = _publish(fake)
+        assert out.status == "skipped"
+        assert out.skip_reason == "api_error"
+        assert "the page was deleted" in out.detail
+        created_id = str(fake._next_id)
+        assert fake.deleted == [created_id]
+        assert created_id not in fake.pages
+
+    def test_next_run_after_rollback_creates_cleanly(self, fake):
+        fake.fail["add_labels"] = ConfluenceError("HTTP 403", status=403)
+        assert _publish(fake).skip_reason == "api_error"
+        del fake.fail["add_labels"]
+        out = _publish(fake)
+        # Not an ownership clash: no unlabelled page was left behind.
+        assert (out.status, out.action) == ("published", "created")
+        assert fake.labels[out.page_id] == {LABEL_GENERATED, LABEL_DRAFT}
+
+    def test_delete_failure_is_reported_with_manual_cleanup(self, fake):
+        fake.fail["add_labels"] = ConfluenceError("HTTP 403", status=403)
+        fake.fail["delete_page"] = ConfluenceError("HTTP 403", status=403)
+        out = _publish(fake)
+        assert out.skip_reason == "api_error"
+        assert "delete it by hand" in out.detail
+        assert str(fake._next_id) in fake.pages
 
 
 class TestOutcomeShape:

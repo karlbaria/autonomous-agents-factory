@@ -14,7 +14,9 @@ The create-vs-update decision of issue #57 §4, with its two guards:
    own HTTP 409 on a stale version write is reported the same way.
 
 Not found → create under the mapped parent page (space root when unset), with
-the ``factory-generated`` and ``factory-draft`` labels.
+the ``factory-generated`` and ``factory-draft`` labels and the version marker.
+If that labelling fails twice, the just-created page is deleted again, so an
+unlabelled factory page never blocks later runs as an ownership clash.
 
 **Every non-publish is a reported skip, never an exception and never silent**
 (issue #57 §5): the caller records the :class:`ConfluenceOutcome` as a progress
@@ -142,6 +144,49 @@ def _update_owned_page(
     return _published("updated", updated)
 
 
+def _claim_created_page(client: ConfluenceClient, page: Page) -> None:
+    """Label a just-created page as ours and store its version marker."""
+    client.add_labels(page.id, [LABEL_GENERATED, LABEL_DRAFT])
+    client.set_last_written_version(page.id, page.version)
+
+
+def _mark_created_page_or_roll_back(
+    client: ConfluenceClient, page: Page
+) -> ConfluenceOutcome | None:
+    """Claim a just-created page (one retry); delete it if that keeps failing.
+
+    A created page without the ``factory-generated`` label (or without its
+    version marker) would make every later run of the same deliverable report
+    an ``ownership_clash`` (or ``human_edit_detected``) forever. So the claim is
+    retried once, and if it still fails the page is deleted: the run reports
+    ``api_error`` and the next run starts clean. Returns ``None`` on success.
+    """
+    try:
+        _claim_created_page(client, page)
+        return None
+    except ConfluenceError as first:
+        log("WARN", f"confluence: labelling new page {page.id} failed ({first}); retrying once")
+    try:
+        _claim_created_page(client, page)
+        return None
+    except ConfluenceError as second:
+        failure = second
+    try:
+        client.delete_page(page.id)
+    except ConfluenceError as e:
+        return _skip(
+            "api_error",
+            f"page {page.id} was created but labelling it failed twice ({failure}), and "
+            f"deleting it failed too ({e}); delete it by hand, or later runs will report "
+            "an ownership clash on this title",
+        )
+    return _skip(
+        "api_error",
+        f"labelling new page {page.id} failed twice ({failure}); the page was deleted "
+        "so the next run can create it cleanly",
+    )
+
+
 def publish_markdown(
     markdown: str,
     channel_metadata: dict[str, str] | None,
@@ -179,17 +224,9 @@ def publish_markdown(
             return _update_owned_page(client, existing, title, storage)
         parent_id = meta.get("confluence_parent_page_id") or None
         created = client.create_page(space_id, title, storage, parent_id)
-        try:
-            client.add_labels(created.id, [LABEL_GENERATED, LABEL_DRAFT])
-            client.set_last_written_version(created.id, created.version)
-        except ConfluenceError as e:
-            # The page exists but is not yet marked ours: report it, so the
-            # next run's ownership clash on this title has an explanation.
-            return _skip(
-                "api_error",
-                f"page {created.id} was created but labelling it failed ({e}); "
-                "add the factory labels by hand or delete the page",
-            )
+        rollback = _mark_created_page_or_roll_back(client, created)
+        if rollback is not None:
+            return rollback
         return _published("created", created)
     except ConfluenceError as e:
         return _skip("api_error", str(e))

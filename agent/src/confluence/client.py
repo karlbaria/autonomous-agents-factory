@@ -4,14 +4,14 @@ Calls go through Atlassian's OAuth 2.0 (3LO) gateway,
 ``https://api.atlassian.com/ex/confluence/{cloudId}/wiki/...`` — the same
 pattern as ``jira_reactions.JIRA_API_BASE`` — with the tenant's shared
 Jira+Confluence bearer token (``config.resolve_confluence_oauth_token``). Only
-the five granular scopes ADR-029 widened the app with are needed:
-``read/write:page``, ``read:space``, ``read/write:label``.
+the six granular scopes ADR-029 widened the app with are needed:
+``read/write/delete:page``, ``read:space``, ``read/write:label``.
 
 Surface:
 
 - space lookup by key (``get_space_id``)
 - find a page by exact title in a space, fetch a page with its storage body
-  and ``version.number``, create, update
+  and ``version.number``, create, update, delete (roll back a create)
 - labels: ``factory-generated`` (the ownership guard), ``factory-draft`` →
   ``factory-final`` (the draft/final lifecycle; a label, never a title prefix)
 - the ``factory.lastWrittenVersion`` content property (edit detection)
@@ -266,6 +266,14 @@ class ConfluenceClient:
         }
         raw = self._request("PUT", self._v2(f"/pages/{quote(page.id, safe='')}"), body=payload)
         return self._to_page(raw)
+
+    def delete_page(self, page_id: str) -> None:
+        """Move a page to the trash (``delete:page:confluence``); 404 is success."""
+        try:
+            self._request("DELETE", self._v2(f"/pages/{quote(page_id, safe='')}"))
+        except ConfluenceError as e:
+            if e.status != HTTPStatus.NOT_FOUND:
+                raise
 
     # --- labels ------------------------------------------------------------
 

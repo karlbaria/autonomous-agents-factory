@@ -171,7 +171,7 @@ describe('confluence setup action', () => {
         refresh_token: 'widened-refresh-token',
         token_type: 'Bearer',
         expires_in: 3600,
-        scope: 'read:jira-work write:jira-work read:jira-user offline_access read:page:confluence write:page:confluence read:space:confluence read:label:confluence write:label:confluence',
+        scope: 'read:jira-work write:jira-work read:jira-user offline_access read:page:confluence write:page:confluence read:space:confluence read:label:confluence write:label:confluence delete:page:confluence',
       }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify([{
         id: 'cloud-123',
@@ -207,6 +207,7 @@ describe('confluence setup action', () => {
         'read:space:confluence',
         'read:label:confluence',
         'write:label:confluence',
+        'delete:page:confluence',
       ]));
 
       // Token exchange reused the existing app's client_id/client_secret —
@@ -322,7 +323,7 @@ describe('confluence map action', () => {
     expect(update.input.TableName).toBe('RepoTable');
     expect(update.input.Key).toEqual({ repo: 'owner/repo' });
     expect(update.input.UpdateExpression).toContain('confluence_cloud_id = :cloudId');
-    expect(update.input.UpdateExpression).toContain('confluence_space_id = :spaceKey');
+    expect(update.input.UpdateExpression).toContain('confluence_space_key = :spaceKey');
     expect(update.input.UpdateExpression).toContain('confluence_parent_page_id = :parentPageId');
     expect(update.input.UpdateExpression).not.toContain('REMOVE');
     expect(update.input.ExpressionAttributeValues).toMatchObject({
