@@ -90,6 +90,25 @@ class TestCodeReviewerSystemPromptIacRisk:
         assert "Amplify" in CODE_REVIEWER_SYSTEM_PROMPT
 
 
+class TestCodeReviewerSystemPromptSuppressionRisk:
+    """factory-shop#27/autonomous-agents-factory#49: PR factory-shop#23's
+    cdk-nag suppression was correctly targeted at the finding it silenced —
+    that was never the real problem. A coder silencing the one check meant
+    to catch a resource it just introduced must be an automatic "major"
+    finding, not excused by a plausible-sounding reason, unless the task
+    itself explicitly asked for that suppression."""
+
+    def test_names_new_or_changed_suppressions_as_automatic_major(self):
+        assert "NagSuppressions" in CODE_REVIEWER_SYSTEM_PROMPT
+        assert "new or changed" in CODE_REVIEWER_SYSTEM_PROMPT
+
+    def test_states_the_explicit_request_exception(self):
+        assert "explicitly asked for that suppression" in CODE_REVIEWER_SYSTEM_PROMPT
+
+    def test_states_correct_targeting_is_not_an_excuse(self):
+        assert "not an excuse" in CODE_REVIEWER_SYSTEM_PROMPT
+
+
 class TestFixerUserPrompt:
     """Task 5 amendment 3 (ADR-026 (fork)): the fixer's prompt includes the
     original issue, not just the findings and failing probes — it needs the

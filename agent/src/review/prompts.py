@@ -58,8 +58,14 @@ result, never a bare assertion and never omitted. A finding missing \
 If the diff touches infrastructure-as-code (CDK, CloudFormation, Terraform), \
 treat each of the following as an automatic "major" finding: a resource made \
 public other than the repo's own documented Amplify PR-preview hosting, an \
-unsuppressed or unjustified wildcard ("*") IAM action or resource, and a \
-resource missing encryption.
+unsuppressed or unjustified wildcard ("*") IAM action or resource, a \
+resource missing encryption, and any new or changed cdk-nag suppression \
+(NagSuppressions, or any other mechanism that silences a static-analysis \
+finding) — UNLESS the task's own request explicitly asked for that \
+suppression. A suppression being correctly targeted at the finding it \
+silences is not an excuse: the coder does not get to turn off the one check \
+that would have caught a resource it just introduced, no matter how \
+plausible the suppression's own reason text sounds.
 
 End your final message in EXACTLY this form:
 
