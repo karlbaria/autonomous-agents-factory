@@ -100,6 +100,17 @@ export async function resolveConfluenceChannelMetadata(
   };
 }
 
+/**
+ * Near-expiry window for the warming call: refresh at task start when the
+ * stored token expires within 45 minutes, so a research task finds a usable
+ * token at delivery. Atlassian access tokens live about an hour, so a token
+ * is refreshed at most once per ~15 minutes (60 − 45) however many tasks
+ * start. The agent's own read-side check stays at 60 seconds.
+ */
+const WARM_WINDOW_MINUTES = 45;
+const SECONDS_PER_MINUTE = 60;
+export const CONFLUENCE_WARM_REFRESH_THRESHOLD_SECONDS = WARM_WINDOW_MINUTES * SECONDS_PER_MINUTE;
+
 /** What {@link warmConfluenceToken} did — returned for logs and tests. */
 export type ConfluenceWarmOutcome =
   | 'not_applicable'
@@ -112,8 +123,9 @@ export type ConfluenceWarmOutcome =
  * Make sure the tenant's stored token will be usable when the agent's
  * Confluence deliverer reads it.
  *
- * Uses the resolver's normal refresh-if-near-expiry path, never
- * ``forceRefresh``: forcing a rotation on every task would add
+ * Uses the resolver's normal refresh-if-near-expiry path with a wider,
+ * warming-specific window ({@link CONFLUENCE_WARM_REFRESH_THRESHOLD_SECONDS}),
+ * never ``forceRefresh``: forcing a rotation on every task would add
  * refresh-token race risk this warming call does not need. Calls
  * ``resolveJiraOauthToken`` (the 3LO path) rather than
  * ``resolveJiraOutboundAuth``: a tenant with a Forge app actor resolves to the
@@ -144,7 +156,10 @@ export async function warmConfluenceToken(
 
   let resolved: Awaited<ReturnType<typeof resolveJiraOauthToken>> = null;
   try {
-    resolved = await resolveJiraOauthToken(cloudId, registryTableName, options);
+    resolved = await resolveJiraOauthToken(cloudId, registryTableName, {
+      ...options,
+      refreshThresholdSeconds: CONFLUENCE_WARM_REFRESH_THRESHOLD_SECONDS,
+    });
   } catch (err) {
     logger.warn('[fanout/confluence] token refresh threw', {
       event: 'fanout.confluence.warm_failed',

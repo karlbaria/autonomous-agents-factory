@@ -36,6 +36,7 @@ jest.mock('../../../src/handlers/shared/repo-config', () => ({
 }));
 
 import {
+  CONFLUENCE_WARM_REFRESH_THRESHOLD_SECONDS,
   resolveConfluenceChannelMetadata,
   warmConfluenceToken,
 } from '../../../src/handlers/shared/confluence-publishing';
@@ -149,6 +150,10 @@ describe('warmConfluenceToken', () => {
     const [cloudId, table, options] = resolveJiraOauthTokenMock.mock.calls[0];
     expect([cloudId, table]).toEqual(['cloud-1', 'RegTable']);
     expect(options?.forceRefresh).toBeUndefined();
+    // Warming-specific window: refresh at task start if the token expires
+    // within 45 minutes (the agent's read-side check stays at 60s).
+    expect(options?.refreshThresholdSeconds).toBe(45 * 60);
+    expect(CONFLUENCE_WARM_REFRESH_THRESHOLD_SECONDS).toBe(2700);
     // The 3LO path, not the outbound-identity resolver (which would pick the
     // Forge app actor and never touch the token Confluence uses).
     expect(resolveJiraOutboundAuthMock).not.toHaveBeenCalled();

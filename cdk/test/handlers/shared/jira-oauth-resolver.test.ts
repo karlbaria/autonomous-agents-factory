@@ -827,6 +827,73 @@ describe('resolveJiraOauthToken: forceRefresh (reactive-401 path, issue #370)', 
   });
 });
 
+describe('resolveJiraOauthToken: refreshThresholdSeconds (Confluence warming, Task 14 (fork))', () => {
+  const WINDOW = 45 * 60;
+
+  beforeEach(() => {
+    _resetCachesForTesting();
+  });
+
+  function setup(expiresInSeconds: number) {
+    const stored = makeStoredToken({
+      access_token: 'stored_token',
+      refresh_token: 'rt-old',
+      expires_at: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
+    });
+    const clients = makeFakeClients({
+      registryItem: { site_url: 'https://acme.atlassian.net', oauth_secret_arn: 'arn:secret:acme', status: 'active' },
+      storedToken: stored,
+    });
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: 'refreshed_token', token_type: 'Bearer', expires_in: 3600, refresh_token: 'rt-new',
+      }),
+    });
+    const puts = () => clients.smSend.mock.calls.filter((c) => c[0]!.constructor.name === 'PutSecretValueCommand');
+    return { clients, fetchImpl: fetchImpl as unknown as typeof fetch, fetchMock: fetchImpl, puts };
+  }
+
+  test('a token with 30 minutes left is NOT refreshed under the default 60s window', async () => {
+    const { clients, fetchImpl, fetchMock } = setup(30 * 60);
+    const result = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, { ...clients, fetchImpl });
+    expect(result?.accessToken).toBe('stored_token');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('the same token IS refreshed (and persisted) under a 45-minute window', async () => {
+    const { clients, fetchImpl, fetchMock, puts } = setup(30 * 60);
+    const result = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, {
+      ...clients, fetchImpl, refreshThresholdSeconds: WINDOW,
+    });
+    expect(result?.accessToken).toBe('refreshed_token');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(puts()).toHaveLength(1);
+  });
+
+  test('a token with 50 minutes left is not refreshed under a 45-minute window', async () => {
+    const { clients, fetchImpl, fetchMock } = setup(50 * 60);
+    const result = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, {
+      ...clients, fetchImpl, refreshThresholdSeconds: WINDOW,
+    });
+    expect(result?.accessToken).toBe('stored_token');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('a cached token inside the window is not returned from cache', async () => {
+    const { clients, fetchImpl, fetchMock } = setup(30 * 60);
+    // Prime the in-memory cache with a default-window resolve (no refresh).
+    await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, { ...clients, fetchImpl });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const warmed = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, {
+      ...clients, fetchImpl, refreshThresholdSeconds: WINDOW,
+    });
+    expect(warmed?.accessToken).toBe('refreshed_token');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('getRegistryRow / parseRegistryRow', () => {
   beforeEach(() => {
     _resetCachesForTesting();
