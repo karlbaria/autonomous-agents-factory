@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "features": {
     "slack": true,
-    "linear": true,
+    "linear": false,
     "jira": true,
     "deployPreviewScreenshots": true,
     "agentRegistry": true,
