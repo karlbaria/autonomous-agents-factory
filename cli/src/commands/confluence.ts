@@ -258,7 +258,7 @@ export function makeConfluenceCommand(): Command {
         const now = new Date().toISOString();
         const setClauses = [
           'confluence_cloud_id = :cloudId',
-          'confluence_space_id = :spaceKey',
+          'confluence_space_key = :spaceKey',
           'updated_at = :updatedAt',
         ];
         const values: Record<string, unknown> = {
