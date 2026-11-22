@@ -133,6 +133,11 @@ export interface BlueprintConfig {
   readonly cedar_policy_modules?: string[];
   /** Registry (#246) skill refs surfaced from RepoConfig. */
   readonly skills?: string[];
+  /** Confluence space mapping surfaced from RepoConfig (Task 14 (fork), #57);
+   *  the orchestrator stamps it into the agent's channel_metadata. */
+  readonly confluence_cloud_id?: string;
+  readonly confluence_space_key?: string;
+  readonly confluence_parent_page_id?: string;
 }
 
 const ddb = makeDocClient();

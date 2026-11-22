@@ -14,7 +14,8 @@ version: 1.0.0
 domain: knowledge
 description: >-
   Research a topic and deliver a cited artifact. No repo: works from the task
-  description, attachments, and fetched URLs; the result is uploaded to S3.
+  description, attachments, and fetched URLs; the result is uploaded to S3 and,
+  when the task's repo has a Confluence space mapping, published there too.
 guidance: >-
   Select for open-ended research / summarisation requests that have no codebase
   — e.g. "summarise these papers", "research approaches to X and cite sources".
@@ -35,10 +36,13 @@ repo_config:
   discover: false
 required_inputs:
   all_of: [task_description]
+# deliver: S3 always; Confluence when the task's repo is mapped (`bgagent
+# confluence map`), otherwise a reported skip; the comment milestone's first
+# line carries the page link or the skip reason (Task 14, issue #57).
 steps:
   - { kind: hydrate_context,  name: context }
   - { kind: run_agent,        name: research }
-  - { kind: deliver_artifact, name: deliver, target: s3_and_comment }
+  - { kind: deliver_artifact, name: deliver, target: s3_comment_and_confluence }
 terminal_outcomes:
   primary: artifact
 limits:

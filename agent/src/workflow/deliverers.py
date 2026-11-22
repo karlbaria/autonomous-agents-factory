@@ -151,6 +151,13 @@ DELIVERERS: dict[str, Deliverer] = {
     "s3_and_confluence": Deliverer(
         "s3_and_confluence", frozenset({"artifact"}), publishes_confluence=True
     ),
+    # S3 + Confluence + the comment milestone, whose first line reports the
+    # Confluence outcome (page link, or the skip reason) — see _post_comment.
+    "s3_comment_and_confluence": Deliverer(
+        "s3_comment_and_confluence",
+        frozenset({"artifact", "comment"}),
+        publishes_confluence=True,
+    ),
 }
 
 # The target a ``deliver_artifact`` step uses when it omits ``target``. This is
@@ -217,7 +224,15 @@ def _upload_to_s3(ctx: StepContext) -> str:
     return uri
 
 
-def _post_comment(ctx: StepContext) -> bool:
+def _confluence_comment_line(outcome: ConfluenceOutcome) -> str:
+    """One line reporting the Confluence outcome, for the delivered comment."""
+    if outcome.status == "published":
+        where = outcome.page_url or f"page {outcome.page_id}"
+        return f"Confluence: {outcome.action} {where}"
+    return f"Confluence: not published ({outcome.skip_reason}: {outcome.detail})"
+
+
+def _post_comment(ctx: StepContext, confluence: ConfluenceOutcome | None = None) -> bool:
     """Record the deliverable as a ``delivered_comment`` progress milestone.
 
     The agent has no direct comment channel for a repo-less task (there is no
@@ -235,6 +250,10 @@ def _post_comment(ctx: StepContext) -> bool:
     if ctx.progress is None:
         return False
     body = _artifact_body(ctx).decode("utf-8")
+    if confluence is not None:
+        # First, not last: the milestone's details are preview-truncated, and a
+        # trailing line would be cut off on a long deliverable.
+        body = f"{_confluence_comment_line(confluence)}\n\n{body}"
     ctx.progress.write_agent_milestone("delivered_comment", body)
     return True
 
@@ -276,11 +295,12 @@ def deliver(target: str, ctx: StepContext) -> DeliveryResult:
     comment_posted = False
     if "artifact" in DELIVERERS[target].produces:
         artifact_uri = _upload_to_s3(ctx)
-    if "comment" in DELIVERERS[target].produces:
-        comment_posted = _post_comment(ctx)
-    # After S3 on purpose: S3 is the load-bearing deliverable and has already
-    # succeeded (or raised) before Confluence is attempted.
+    # S3 first: it is the load-bearing deliverable and has already succeeded
+    # (or raised) before Confluence is attempted. Confluence before the comment,
+    # so the comment can report the page link or the skip reason.
     confluence = _publish_confluence(ctx) if DELIVERERS[target].publishes_confluence else None
+    if "comment" in DELIVERERS[target].produces:
+        comment_posted = _post_comment(ctx, confluence)
     return DeliveryResult(
         artifact_uri=artifact_uri, comment_posted=comment_posted, confluence=confluence
     )

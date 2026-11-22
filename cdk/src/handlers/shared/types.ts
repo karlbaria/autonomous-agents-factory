@@ -276,6 +276,12 @@ export interface TaskRecord {
   /** S3 URI of a repo-less workflow's delivered artifact (deliver_artifact,
    *  #248 Phase 3); absent for coding tasks / comment-only delivery. */
   readonly artifact_uri?: string;
+  /** Confluence publish outcome written by the agent's terminal write
+   *  (Task 14 (fork), #57); absent for non-Confluence workflows. */
+  readonly confluence_status?: string;
+  readonly confluence_page_url?: string;
+  readonly confluence_skip_reason?: string;
+  readonly confluence_skip_detail?: string;
   /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
    *  tripped any cap. Equals the legacy `turns` value. */
   readonly turns_attempted?: number;
@@ -518,6 +524,13 @@ export interface TaskDetail {
   /** S3 URI of a repo-less delivered artifact (#248 Phase 3); ``null`` for
    *  coding tasks or comment-only delivery. */
   readonly artifact_uri: string | null;
+  /** Confluence publish outcome (Task 14 (fork), #57): ``published`` or
+   *  ``skipped``, with the page link or the skip reason/detail; all ``null``
+   *  for a workflow that does not publish to Confluence. */
+  readonly confluence_status: string | null;
+  readonly confluence_page_url: string | null;
+  readonly confluence_skip_reason: string | null;
+  readonly confluence_skip_detail: string | null;
   readonly attachments: AttachmentSummary[] | null;
   /** Cedar HITL: running counter of approval gates fired on this
    *  task (TaskRecord §10.2, §13.6). Surfaced so CLI / dashboard
@@ -986,6 +999,10 @@ export function toTaskDetail(
     trace: record.trace === true,
     trace_s3_uri: record.trace_s3_uri ?? null,
     artifact_uri: record.artifact_uri ?? null,
+    confluence_status: record.confluence_status ?? null,
+    confluence_page_url: record.confluence_page_url ?? null,
+    confluence_skip_reason: record.confluence_skip_reason ?? null,
+    confluence_skip_detail: record.confluence_skip_detail ?? null,
     attachments: record.attachments
       ? record.attachments.map(a => ({
         attachment_id: a.attachment_id,

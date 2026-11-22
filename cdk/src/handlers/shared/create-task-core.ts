@@ -870,6 +870,9 @@ export async function createTaskCore(
           repo: body.repo ?? null,
           issue_number: body.issue_number ?? null,
           channel_source: context.channelSource,
+          // Lets the fan-out decide on Confluence token warming without a
+          // TaskTable read (Task 14 (fork), #57).
+          resolved_workflow: resolvedWorkflow.id,
         },
       },
     }));

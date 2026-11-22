@@ -87,6 +87,10 @@ export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): st
   if (task.artifact_uri) {
     lines.push(`Artifact:    ${task.artifact_uri}`);
   }
+  const confluenceLine = describeConfluence(task);
+  if (confluenceLine !== null) {
+    lines.push(`Confluence:  ${confluenceLine}`);
+  }
   if (task.error_message) {
     lines.push(...formatErrorLines(task));
   }
@@ -281,6 +285,10 @@ export function formatStatusSnapshot(
   if (task.artifact_uri) {
     lines.push(`  Artifact:      ${task.artifact_uri}`);
   }
+  const confluence = describeConfluence(task);
+  if (confluence !== null) {
+    lines.push(`  Confluence:    ${confluence}`);
+  }
   // In-guest liveness, next to the control-plane freshness line it complements
   // (ADR-021 P2r2-F11). `Last event:` says when the platform last heard *about*
   // the task; `Heartbeat:` says when the agent last said it was alive — the same
@@ -349,6 +357,26 @@ function formatDescriptionLines(description: string): string[] {
  *  (``missing built-in hard-deny policies: /app/policies/hard_deny.cedar``)
  *  but the CLI rendered ``unknown: Unexpected error``, hiding the
  *  only useful diagnostic. */
+/**
+ * One-line Confluence publish outcome (Task 14 (fork), #57): the page link
+ * when published, the skip reason and detail when skipped — a skip is
+ * reported, never silent. `null` for a workflow that does not publish.
+ */
+function describeConfluence(
+  task: Pick<TaskDetail, 'confluence_status' | 'confluence_page_url' | 'confluence_skip_reason' | 'confluence_skip_detail'>,
+): string | null {
+  if (task.confluence_status === 'published') {
+    return task.confluence_page_url ?? 'published';
+  }
+  if (task.confluence_status === 'skipped') {
+    const reason = task.confluence_skip_reason ?? 'unknown';
+    return task.confluence_skip_detail
+      ? `skipped (${reason}): ${task.confluence_skip_detail}`
+      : `skipped (${reason})`;
+  }
+  return null;
+}
+
 function describeReason(task: TaskDetail): string | null {
   if (task.status === 'COMPLETED') return null;
   if (!(TERMINAL_STATUSES as readonly string[]).includes(task.status)) return null;

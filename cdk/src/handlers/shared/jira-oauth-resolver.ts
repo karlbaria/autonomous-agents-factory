@@ -127,6 +127,14 @@ export interface ResolverOptions {
    * a DDB read on every 401 would add load without changing the outcome.
    */
   readonly forceRefresh?: boolean;
+  /**
+   * Near-expiry window, in seconds, for the refresh-if-expiring decision in
+   * {@link resolveJiraOauthToken}. Defaults to {@link REFRESH_THRESHOLD_SECONDS}
+   * (60s). The Confluence warming call (Task 14 (fork), ADR-029) passes a wider
+   * window so a token is refreshed at task start when it would not outlive the
+   * task — still the ordinary refresh path, not {@link forceRefresh}.
+   */
+  readonly refreshThresholdSeconds?: number;
 }
 
 interface CacheEntry<T> {
@@ -279,6 +287,7 @@ export async function resolveJiraOauthToken(
   const ddb = options.dynamoDbClient ?? makeDocClient({ region });
   const sm = options.secretsManagerClient ?? makeClient(SecretsManagerClient, { region });
   const forceRefresh = options.forceRefresh ?? false;
+  const threshold = options.refreshThresholdSeconds ?? REFRESH_THRESHOLD_SECONDS;
 
   // ─── Step 1: Registry row ────────────────────────────────────────
   const row = await getRegistryRow(ddb, registryTableName, cloudId);
@@ -301,7 +310,7 @@ export async function resolveJiraOauthToken(
   // row above still uses its own cache — see ResolverOptions.forceRefresh.)
   const cached = forceRefresh ? undefined : tokenCache.get(row.oauth_secret_arn);
   let token: StoredOauthToken;
-  if (cached && cached.expiresAt > Date.now() && !isTokenExpiring(cached.value.expires_at)) {
+  if (cached && cached.expiresAt > Date.now() && !isTokenExpiring(cached.value.expires_at, threshold)) {
     token = cached.value;
   } else {
     const fetched = await getOauthSecret(sm, row.oauth_secret_arn);
@@ -319,7 +328,7 @@ export async function resolveJiraOauthToken(
   // `forceRefresh` refreshes regardless of `expires_at`: a 401 on a
   // not-yet-expired token means the stored access token is dead despite the
   // timestamp, so trust the 401 over the clock and rotate.
-  if (forceRefresh || isTokenExpiring(token.expires_at)) {
+  if (forceRefresh || isTokenExpiring(token.expires_at, threshold)) {
     const refreshed = await refreshJiraToken(token, sm, row.oauth_secret_arn, options);
     if (!refreshed) {
       return null;
@@ -518,7 +527,7 @@ async function refreshJiraToken(
     return null;
   }
 
-  if (!isTokenExpiring(fresh.expires_at)) {
+  if (!isTokenExpiring(fresh.expires_at, options.refreshThresholdSeconds ?? REFRESH_THRESHOLD_SECONDS)) {
     logger.info('Jira OAuth token was refreshed by a concurrent caller; using freshly-read value', {
       secret_arn: secretArn,
       cloud_id: fresh.cloud_id,

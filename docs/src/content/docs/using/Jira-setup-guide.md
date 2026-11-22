@@ -145,6 +145,8 @@ This runs the OAuth 3LO dance:
 4. If your account can access multiple Atlassian sites, the CLI lists them and asks you to pick one. It records the selected site's `cloud_id` and `site_url`.
 5. Stores the OAuth token bundle in `bgagent-jira-oauth-<cloudId>` and records the tenant in the workspace registry.
 
+> **Re-running `setup` after `bgagent confluence setup`** ([ADR-029](/sample-autonomous-cloud-coding-agents/decisions/adr-029-fork-confluence-auth-extends-jira-oauth-app)): the stored token bundle is shared with Confluence publishing. When it already carries Confluence scopes, `setup` requests them again, so the re-run keeps Confluence working. To re-authorize with Jira scopes only, pass `--drop-confluence`. If Atlassian returns a token without the Confluence scopes (for example, because they were removed from the app in the developer console), `setup` stops before saving it and the existing token stays in place.
+
 > **If `setup` hangs at "Waiting for browser callback…"** the consent redirect never reached the CLI's localhost listener. Usual causes: the consent tab was completed in a *different* browser/profile than the one `setup` opened, the tab was closed before clicking Authorize, or something else is bound to port 8080. Ctrl-C and re-run `bgagent jira setup` — re-running is safe and idempotent (it re-mints the token bundle and re-registers the tenant; nothing is half-written by an aborted attempt).
 
 ### 3. Configure the Jira webhook

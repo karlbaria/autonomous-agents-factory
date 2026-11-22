@@ -21,6 +21,8 @@ import { formatDuration, truncate } from './slack-format';
 
 /** Max length for task-failure reason text in Slack blocks. */
 const TASK_FAILED_REASON_MAX_LEN = 300;
+/** Cap on the Confluence skip detail shown in the completion message (Task 14). */
+const CONFLUENCE_SKIP_DETAIL_MAX_LEN = 300;
 import type { TaskRecord } from './types';
 
 /** A Slack Block Kit mrkdwn text object. */
@@ -97,7 +99,8 @@ export interface SlackMessage {
  */
 export function renderSlackBlocks(
   eventType: string,
-  task: Pick<TaskRecord, 'task_id' | 'repo' | 'task_description' | 'pr_url' | 'error_message' | 'cost_usd' | 'duration_s' | 'status'>,
+  task: Pick<TaskRecord, 'task_id' | 'repo' | 'task_description' | 'pr_url' | 'error_message' | 'cost_usd' | 'duration_s' | 'status'>
+    & Partial<Pick<TaskRecord, ConfluenceOutcomeField>>,
   eventMetadata?: Record<string, unknown>,
 ): SlackMessage {
   switch (eventType) {
@@ -139,24 +142,43 @@ function taskCreatedMessage(
   };
 }
 
+type ConfluenceOutcomeField =
+  'confluence_status' | 'confluence_page_url' | 'confluence_skip_reason' | 'confluence_skip_detail';
+
+/**
+ * The Confluence publish outcome for the completion message (Task 14 (fork),
+ * #57): a skip is shown with its reason, never silent. A published page gets
+ * a button below, so it needs no text line here.
+ */
+function confluenceSkipLine(task: Partial<Pick<TaskRecord, ConfluenceOutcomeField>>): string | null {
+  if (task.confluence_status !== 'skipped') return null;
+  const reason = task.confluence_skip_reason ?? 'unknown';
+  const detail = task.confluence_skip_detail ? `: ${truncate(task.confluence_skip_detail, CONFLUENCE_SKIP_DETAIL_MAX_LEN)}` : '';
+  return `:warning: _Confluence not published_ (\`${reason}\`)${detail}`;
+}
+
 function taskCompletedMessage(
-  task: Pick<TaskRecord, 'task_id' | 'repo' | 'pr_url' | 'cost_usd' | 'duration_s'>,
+  task: Pick<TaskRecord, 'task_id' | 'repo' | 'pr_url' | 'cost_usd' | 'duration_s'>
+    & Partial<Pick<TaskRecord, ConfluenceOutcomeField>>,
 ): SlackMessage {
   const parts = [`:white_check_mark: *Task completed* for \`${task.repo}\``];
   const stats: string[] = [];
   if (task.duration_s != null) stats.push(formatDuration(task.duration_s));
   if (task.cost_usd != null) stats.push(`$${Number(task.cost_usd).toFixed(2)}`);
   if (stats.length > 0) parts.push(stats.join(' · '));
+  const skipLine = confluenceSkipLine(task);
+  if (skipLine) parts.push(skipLine);
   const text = parts.join('\n');
 
   const blocks: SlackBlock[] = [section(text)];
 
-  // "View PR" button — no inline link text, so Slack won't unfurl a big preview card.
-  if (task.pr_url) {
-    blocks.push(actions(task.task_id, [
-      linkButton(`View PR ${prLabel(task.pr_url)}`, task.pr_url),
-    ]));
+  // Link buttons — no inline link text, so Slack won't unfurl a big preview card.
+  const buttons: ReturnType<typeof linkButton>[] = [];
+  if (task.pr_url) buttons.push(linkButton(`View PR ${prLabel(task.pr_url)}`, task.pr_url));
+  if (task.confluence_status === 'published' && task.confluence_page_url?.startsWith('https://')) {
+    buttons.push(linkButton('View Confluence page', task.confluence_page_url));
   }
+  if (buttons.length > 0) blocks.push(actions(task.task_id, buttons));
 
   return {
     text: `Task completed for ${task.repo}`,

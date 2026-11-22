@@ -214,6 +214,13 @@ def _deliver_plan_artifact(
     return artifact_uri
 
 
+def _artifact_str(artifacts: dict, key: str) -> str | None:
+    """A string product a step left on the run's artifacts (e.g. the
+    Confluence outcome of a deliver step, Task 14), or ``None``."""
+    value = artifacts.get(key)
+    return str(value) if value else None
+
+
 def _execute_agent_step(
     prompt: str,
     system_prompt: str,
@@ -454,6 +461,10 @@ def _run_repoless_task(
         agent_status=agent_result.status,
         pr_url=None,
         artifact_uri=artifact_uri,
+        confluence_status=_artifact_str(ctx.artifacts, "confluence_status"),
+        confluence_page_url=_artifact_str(ctx.artifacts, "confluence_page_url"),
+        confluence_skip_reason=_artifact_str(ctx.artifacts, "confluence_skip_reason"),
+        confluence_skip_detail=_artifact_str(ctx.artifacts, "confluence_skip_detail"),
         cost_usd=ctx.ledger.total_cost_usd,
         turns=turns_attempted,
         turns_attempted=turns_attempted,
