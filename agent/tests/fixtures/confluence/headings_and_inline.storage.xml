@@ -1,0 +1,1 @@
+<h1>Page title is stripped by split_title, not the converter</h1><h2>Section <strong>two</strong></h2><h6>Level six</h6><p>Plain paragraph with <strong>bold</strong>, <strong>also bold</strong>, <em>italic</em>, <em>italic too</em>, and <code>inline &lt;code&gt;</code>. A second line joins the same paragraph; snake_case_name and 2*3*4 stay literal.</p><hr />

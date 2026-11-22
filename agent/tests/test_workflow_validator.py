@@ -257,6 +257,19 @@ class TestIndividualRules:
         w = self._repo_less_deliver(target="comment", primary="artifact")
         assert "rule-11" in validate_workflow(w)
 
+    def test_rule11_s3_and_confluence_satisfies_artifact(self):
+        w = self._repo_less_deliver(target="s3_and_confluence", primary="artifact")
+        assert "rule-11" not in validate_workflow(w)
+        assert "rule-8" not in validate_workflow(w)
+
+    @pytest.mark.parametrize("primary", ["artifact", "comment"])
+    def test_rule11_confluence_alone_backs_no_outcome(self, primary):
+        # A Confluence publish can be skipped without failing the task, so it
+        # never vouches for a primary outcome on its own (Task 14, #57).
+        w = self._repo_less_deliver(target="confluence", primary=primary)
+        assert "rule-11" in validate_workflow(w)
+        assert "rule-8" not in validate_workflow(w)
+
     def test_rule11_unknown_deliverer_target_flagged(self):
         # ADR-014 addendum: target is an open string resolving to a registered
         # deliverer. An unknown name produces nothing the validator can vouch

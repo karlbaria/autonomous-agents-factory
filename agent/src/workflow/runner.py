@@ -727,6 +727,8 @@ def _handle_deliver_artifact(step: Step, ctx: StepContext) -> StepOutcome:
         data["artifact_uri"] = result.artifact_uri
     if result.comment_posted:
         data["comment_posted"] = True
+    if result.confluence is not None:
+        data.update(result.confluence.to_data())
     return StepOutcome(
         kind=step.kind,
         name=_step_key(step),

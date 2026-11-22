@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING
 from shell import log
 
 if TYPE_CHECKING:
+    from confluence.publish import ConfluenceOutcome
+
     from .runner import StepContext
 
 # Per-artifact size cap. A repo-less knowledge task's deliverable is text (the
@@ -109,6 +111,9 @@ class DeliveryResult:
 
     artifact_uri: str | None = None
     comment_posted: bool = False
+    # Set by a Confluence-publishing deliverer: what the publish did, including
+    # a skip and its reason (Task 14, issue #57). ``None`` for other targets.
+    confluence: ConfluenceOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +128,11 @@ class Deliverer:
 
     name: str
     produces: frozenset[str] = field(default_factory=frozenset)
+    # Also publishes the deliverable to the task's mapped Confluence space.
+    # Not a terminal outcome: a Confluence publish can be skipped (no mapping,
+    # token, ownership or edit clash) without failing the task, so it never
+    # satisfies ``terminal_outcomes.primary`` on its own (Task 14, issue #57).
+    publishes_confluence: bool = False
 
 
 # First-party deliverers. These three names and their produced-outcome sets match
@@ -133,6 +143,14 @@ DELIVERERS: dict[str, Deliverer] = {
     "s3": Deliverer("s3", frozenset({"artifact"})),
     "comment": Deliverer("comment", frozenset({"comment"})),
     "s3_and_comment": Deliverer("s3_and_comment", frozenset({"artifact", "comment"})),
+    # Task 14 (issue #57, ADR-029 (fork)). `confluence` produces no terminal
+    # outcome, so a workflow using it alone needs another deliver step for its
+    # primary outcome; `s3_and_confluence` keeps S3 as the always-retrievable
+    # artifact and adds the page when the task's repo is mapped.
+    "confluence": Deliverer("confluence", frozenset(), publishes_confluence=True),
+    "s3_and_confluence": Deliverer(
+        "s3_and_confluence", frozenset({"artifact"}), publishes_confluence=True
+    ),
 }
 
 # The target a ``deliver_artifact`` step uses when it omits ``target``. This is
@@ -221,6 +239,28 @@ def _post_comment(ctx: StepContext) -> bool:
     return True
 
 
+def _publish_confluence(ctx: StepContext) -> ConfluenceOutcome:
+    """Publish the deliverable to Confluence; a skip is reported, never raised.
+
+    Records the outcome as a ``confluence_published`` / ``confluence_skipped``
+    progress milestone so the reason is visible in the task's event stream.
+    ``_artifact_body`` still raises for an empty, deferring or oversized
+    deliverable — that is a broken deliverable, not a Confluence skip.
+    """
+    from config import resolve_confluence_oauth_token
+    from confluence.publish import publish_markdown
+
+    text = _artifact_body(ctx).decode("utf-8")
+    outcome = publish_markdown(
+        text,
+        ctx.config.channel_metadata,
+        resolve_token=resolve_confluence_oauth_token,
+    )
+    if ctx.progress is not None:
+        ctx.progress.write_agent_milestone(*outcome.milestone())
+    return outcome
+
+
 def deliver(target: str, ctx: StepContext) -> DeliveryResult:
     """Run the named deliverer against the step context.
 
@@ -238,7 +278,12 @@ def deliver(target: str, ctx: StepContext) -> DeliveryResult:
         artifact_uri = _upload_to_s3(ctx)
     if "comment" in DELIVERERS[target].produces:
         comment_posted = _post_comment(ctx)
-    return DeliveryResult(artifact_uri=artifact_uri, comment_posted=comment_posted)
+    # After S3 on purpose: S3 is the load-bearing deliverable and has already
+    # succeeded (or raised) before Confluence is attempted.
+    confluence = _publish_confluence(ctx) if DELIVERERS[target].publishes_confluence else None
+    return DeliveryResult(
+        artifact_uri=artifact_uri, comment_posted=comment_posted, confluence=confluence
+    )
 
 
 # Terminal outcomes that any deliver_artifact deliverer can produce (union over
