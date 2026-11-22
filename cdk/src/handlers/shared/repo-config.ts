@@ -71,6 +71,20 @@ export interface RepoConfig {
    */
   readonly default_workflow?: string;
   /**
+   * Confluence space + parent-page mapping for this repo (Task 14 (fork),
+   * issue #57), written by ``bgagent confluence map`` — same pattern as
+   * ``default_workflow`` above: optional fields on the existing RepoConfig
+   * row rather than a dedicated mapping table. ``confluence_cloud_id`` is the
+   * Atlassian tenant id (the same tenant Jira already uses); ``confluence_space_id``
+   * is the operator-entered Confluence space key, resolved to the space's
+   * opaque numeric id by the publishing adapter at publish time, not here;
+   * ``confluence_parent_page_id`` is optional and defaults to the space root
+   * when unset.
+   */
+  readonly confluence_cloud_id?: string;
+  readonly confluence_space_id?: string;
+  readonly confluence_parent_page_id?: string;
+  /**
    * Registry (#246) ``registry://`` refs for MCP servers pinned by the
    * blueprint. Resolved by the orchestrator at task start and merged into the
    * agent's ``.mcp.json``.
