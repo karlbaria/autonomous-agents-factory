@@ -36,11 +36,35 @@ const JIRA_TOKEN_ENDPOINT = 'https://auth.atlassian.com/oauth/token';
  *   the access token expires after 1h and the integration cannot
  *   self-renew.
  */
-const JIRA_OAUTH_SCOPES = [
+export const JIRA_OAUTH_SCOPES = [
   'read:jira-work',
   'write:jira-work',
   'read:jira-user',
   'offline_access',
+] as const;
+
+/**
+ * Confluence scopes (Task 14 (fork), issue #57). Confluence Cloud's v2 REST
+ * API rejects the "classic" content scopes (`read:confluence-content.all`
+ * etc.) — these are the granular, product-specific scopes it requires:
+ * - `read:page:confluence` / `write:page:confluence` — read/create/update pages
+ * - `read:space:confluence` — resolve a space key to its id
+ * - `read:label:confluence` / `write:label:confluence` — the ownership
+ *   (`factory-generated`) and lifecycle (`factory-draft`/`factory-final`)
+ *   labels
+ *
+ * Granted on the SAME Atlassian OAuth app as Jira (`bgagent confluence
+ * setup` widens an existing tenant's consent rather than creating a second
+ * app) — see ADR-0NN (fork). `offline_access` is already in
+ * {@link JIRA_OAUTH_SCOPES}; the two lists are unioned at the authorize call,
+ * not merged here, so a Jira-only install's scope list is untouched.
+ */
+export const CONFLUENCE_OAUTH_SCOPES = [
+  'read:page:confluence',
+  'write:page:confluence',
+  'read:space:confluence',
+  'read:label:confluence',
+  'write:label:confluence',
 ] as const;
 
 /**

@@ -176,8 +176,10 @@ export function openBrowser(url: string): Promise<boolean> {
 
 /**
  * Generate an opaque, URL-safe `state` value for OAuth CSRF protection.
+ * Exported for reuse by `bgagent confluence setup`, which runs the same
+ * Atlassian OAuth dance against a wider scope list.
  */
-function randomState(): string {
+export function randomState(): string {
   const STATE_BYTES = 32;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { randomBytes } = require('crypto') as typeof import('crypto');

@@ -216,6 +216,34 @@ describe('buildRepoShowLines', () => {
     expect(withoutDefault.find((l) => l.key === 'default_workflow')).toBeUndefined();
   });
 
+  // Task 14 (fork), issue #57
+  test('shows the Confluence mapping when set (parent page, then space root), and omits it when unset', () => {
+    const withParent = buildRepoShowLines(formatRepoConfigForDisplay(
+      {
+        repo: 'acme/foo',
+        status: 'active',
+        confluence_cloud_id: 'cloud-123',
+        confluence_space_id: 'ENG',
+        confluence_parent_page_id: '98765',
+      },
+      PLATFORM,
+    ));
+    expect(withParent.find((l) => l.key === 'confluence_mapping')?.text)
+      .toBe('cloud-123#ENG, parent page 98765');
+
+    const withoutParent = buildRepoShowLines(formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active', confluence_cloud_id: 'cloud-123', confluence_space_id: 'ENG' },
+      PLATFORM,
+    ));
+    expect(withoutParent.find((l) => l.key === 'confluence_mapping')?.text).toBe('cloud-123#ENG, space root');
+
+    const unmapped = buildRepoShowLines(formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active' },
+      PLATFORM,
+    ));
+    expect(unmapped.find((l) => l.key === 'confluence_mapping')).toBeUndefined();
+  });
+
   test('warns when platform stack output is missing', () => {
     const display = formatRepoConfigForDisplay(
       { repo: 'awslabs/agent-plugins', status: 'active' },

@@ -44,6 +44,10 @@ export interface RepoConfigRow {
   readonly cedar_policies?: string[];
   readonly approval_gate_cap?: number;
   readonly default_workflow?: string;
+  /** Confluence space + parent-page mapping (Task 14 (fork), issue #57), set via `bgagent confluence map`. */
+  readonly confluence_cloud_id?: string;
+  readonly confluence_space_id?: string;
+  readonly confluence_parent_page_id?: string;
 }
 
 /**
