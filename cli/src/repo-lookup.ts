@@ -46,7 +46,7 @@ export interface RepoConfigRow {
   readonly default_workflow?: string;
   /** Confluence space + parent-page mapping (Task 14 (fork), issue #57), set via `bgagent confluence map`. */
   readonly confluence_cloud_id?: string;
-  readonly confluence_space_id?: string;
+  readonly confluence_space_key?: string;
   readonly confluence_parent_page_id?: string;
 }
 

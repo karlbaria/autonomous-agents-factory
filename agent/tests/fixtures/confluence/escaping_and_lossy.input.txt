@@ -1,0 +1,11 @@
+Text with <script>alert("x")</script> & "quotes" stays text.
+
+[safe](https://example.com/?a=1&b="2") and [relative](./doc.md) and [anchor](#top)
+[unsafe](javascript:alert(1)) and [data](data:text/html,hi) stay plain text.
+
+![an image](https://example.com/i.png)
+
+> a block quote
+> > nested
+
+- [ ] a task list item

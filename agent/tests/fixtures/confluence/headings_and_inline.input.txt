@@ -1,0 +1,10 @@
+# Page title is stripped by split_title, not the converter
+
+## Section **two**
+
+###### Level six
+
+Plain paragraph with **bold**, __also bold__, *italic*, _italic too_, and `inline <code>`.
+A second line joins the same paragraph; snake_case_name and 2*3*4 stay literal.
+
+---

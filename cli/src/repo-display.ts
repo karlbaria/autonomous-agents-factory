@@ -126,7 +126,7 @@ export function formatRepoConfigForDisplay(
     'compute_type', 'runtime_arn', 'model_id', 'max_turns', 'max_budget_usd',
     'poll_interval_ms', 'approval_gate_cap', 'system_prompt_overrides',
     'egress_allowlist', 'cedar_policies', 'github_token_secret_arn', 'default_workflow',
-    'confluence_cloud_id', 'confluence_space_id', 'confluence_parent_page_id',
+    'confluence_cloud_id', 'confluence_space_key', 'confluence_parent_page_id',
   ] as const) {
     const value = config[key];
     if (value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0)) {
@@ -261,11 +261,11 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
     });
   }
   if (typeof display.blueprint_overrides.confluence_cloud_id === 'string') {
-    const spaceId = display.blueprint_overrides.confluence_space_id;
+    const spaceKey = display.blueprint_overrides.confluence_space_key;
     const parentPageId = display.blueprint_overrides.confluence_parent_page_id;
     lines.push({
       key: 'confluence_mapping',
-      text: `${display.blueprint_overrides.confluence_cloud_id}#${typeof spaceId === 'string' ? spaceId : '?'}`
+      text: `${display.blueprint_overrides.confluence_cloud_id}#${typeof spaceKey === 'string' ? spaceKey : '?'}`
         + (typeof parentPageId === 'string' ? `, parent page ${parentPageId}` : ', space root'),
     });
   }

@@ -498,7 +498,85 @@ def clear_jira_task_credentials() -> None:
         os.environ.pop(name, None)
 
 
-def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:  # noqa: C901 -- 21 when the ceiling of 15 was set; must not grow
+def _atlassian_token_is_expiring(expires_at_iso: object, threshold_seconds: int = 60) -> bool:
+    """True when a stored Atlassian ``expires_at`` is within ``threshold_seconds``.
+
+    A malformed or missing value counts as expiring, so callers fail closed.
+    """
+    from datetime import datetime
+
+    if not isinstance(expires_at_iso, str):
+        return True
+    try:
+        expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))  # noqa: FURB162 -- the rewrite is not equivalent for malformed input
+    except ValueError:
+        log("WARN", f"_is_expiring: malformed expires_at '{expires_at_iso}'; treating as expiring")
+        return True
+    if expiry.tzinfo is None:
+        log("WARN", f"_is_expiring: naive expires_at '{expires_at_iso}'; treating as expiring")
+        return True
+    return (expiry - datetime.now(UTC)).total_seconds() < threshold_seconds
+
+
+def _read_atlassian_oauth_bundle(secret_arn: str, caller: str) -> dict | None:
+    """Read one tenant's Atlassian OAuth bundle (``bgagent-jira-oauth-<cloudId>``).
+
+    Shared by the Jira and Confluence resolvers: ADR-029 (fork) puts both
+    products on one OAuth app and one secret. Read-only — the agent holds
+    ``secretsmanager:GetSecretValue`` only and never refreshes (see
+    ``resolve_jira_oauth_token``). Returns the parsed JSON object, or ``None``
+    on any failure (logged under ``caller``), so every caller fails closed.
+    """
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        log("WARN", f"{caller}: AWS_REGION not set; cannot resolve token")
+        return None
+
+    try:
+        import json
+
+        # boto3 is imported here (not just via platform_client, which imports it
+        # lazily at call time) so a missing SDK still degrades gracefully — skip
+        # the Atlassian call — instead of raising an uncaught ImportError. (#319)
+        import boto3  # noqa: F401  -- availability probe for the graceful skip below
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        from aws_session import platform_client
+    except ImportError as e:
+        log("WARN", f"{caller}: boto3 unavailable ({e}); skipping")
+        return None  # nosemgrep: py-silent-success-masking -- caller fails closed
+
+    sm = platform_client("secretsmanager", region_name=region)
+    try:
+        resp = sm.get_secret_value(SecretId=secret_arn)
+    except (ClientError, BotoCoreError) as e:
+        code = ""
+        if hasattr(e, "response"):
+            code = getattr(e, "response", {}).get("Error", {}).get("Code", "") or ""
+        is_hard_failure = code in ("AccessDeniedException", "ResourceNotFoundException")
+        severity = "ERROR" if is_hard_failure else "WARN"
+        log(severity, f"{caller} failed: {type(e).__name__}: {e}")
+        return None  # nosemgrep: py-silent-success-masking -- caller fails closed
+    try:
+        token_obj = json.loads(resp["SecretString"])
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        log(
+            "ERROR",
+            f"{caller}: secret '{secret_arn}' is not valid JSON "
+            f"({type(e).__name__}: {e}); tenant requires re-onboarding",
+        )
+        return None  # nosemgrep: py-silent-success-masking -- bad secret disables Atlassian writes
+    if not isinstance(token_obj, dict):
+        log(
+            "ERROR",
+            f"{caller}: secret '{secret_arn}' contains non-object JSON; "
+            "tenant requires re-onboarding",
+        )
+        return None
+    return token_obj
+
+
+def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:
     """Resolve Jira outbound credentials from Secrets Manager.
 
     The orchestrator stamps ``jira_oauth_secret_arn`` into the task
@@ -549,69 +627,8 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     if not secret_arn:
         return ""
 
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-    if not region:
-        log("WARN", "resolve_jira_oauth_token: AWS_REGION not set; cannot resolve token")
-        return ""
-
-    try:
-        import json
-        from datetime import datetime
-
-        # boto3 is imported here (not just via platform_client, which imports it
-        # lazily at call time) so a missing SDK still degrades gracefully — skip
-        # Jira feedback — instead of raising an uncaught ImportError. (#319)
-        import boto3  # noqa: F401  -- availability probe for the graceful skip below
-        from botocore.exceptions import BotoCoreError, ClientError
-
-        from aws_session import platform_client
-    except ImportError as e:
-        log("WARN", f"resolve_jira_oauth_token: boto3 unavailable ({e}); skipping")
-        return ""  # nosemgrep: py-silent-success-masking -- Jira feedback is advisory
-
-    sm = platform_client("secretsmanager", region_name=region)
-
-    def _fetch_token() -> dict | None:
-        resp = sm.get_secret_value(SecretId=secret_arn)
-        try:
-            return json.loads(resp["SecretString"])
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            log(
-                "ERROR",
-                f"resolve_jira_oauth_token: secret '{secret_arn}' is not valid JSON "
-                f"({type(e).__name__}: {e}); tenant requires re-onboarding",
-            )
-            return None  # nosemgrep: py-silent-success-masking -- bad secret disables writes
-
-    def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
-        try:
-            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))  # noqa: FURB162 -- the rewrite is not equivalent for malformed input
-        except ValueError:
-            log(
-                "WARN",
-                f"_is_expiring: malformed expires_at '{expires_at_iso}'; treating as expiring",
-            )
-            return True
-        return (expiry - datetime.now(UTC)).total_seconds() < threshold_seconds
-
-    try:
-        token_obj = _fetch_token()
-    except (ClientError, BotoCoreError) as e:
-        code = ""
-        if hasattr(e, "response"):
-            code = getattr(e, "response", {}).get("Error", {}).get("Code", "") or ""
-        is_hard_failure = code in ("AccessDeniedException", "ResourceNotFoundException")
-        severity = "ERROR" if is_hard_failure else "WARN"
-        log(severity, f"resolve_jira_oauth_token failed: {type(e).__name__}: {e}")
-        return ""  # nosemgrep: py-silent-success-masking -- feedback cannot fail the task
+    token_obj = _read_atlassian_oauth_bundle(secret_arn, "resolve_jira_oauth_token")
     if token_obj is None:
-        return ""
-    if not isinstance(token_obj, dict):
-        log(
-            "ERROR",
-            f"resolve_jira_oauth_token: secret '{secret_arn}' contains non-object JSON; "
-            "tenant requires re-onboarding",
-        )
         return ""
 
     app_actor_fields = (
@@ -638,7 +655,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     # without burning Atlassian's rotating refresh_token (see docstring). The
     # Lambda path owns refresh. A configured Forge app actor remains usable
     # because its signed proxy credential is independent of 3LO expiry.
-    if _is_expiring(token_obj.get("expires_at", "")):
+    if _atlassian_token_is_expiring(token_obj.get("expires_at", "")):
         suffix = (
             " Forge app-actor writes remain enabled."
             if os.environ.get("JIRA_APP_ACTOR_CONFIGURED") == "1"
@@ -849,3 +866,36 @@ def get_config() -> TaskConfig:
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def resolve_confluence_oauth_token(channel_metadata: dict[str, str] | None) -> str:
+    """Resolve the Confluence access token for this task, read-only.
+
+    ADR-029 (fork): Confluence shares the Jira tenant's OAuth app and secret
+    bundle, so this reads the same secret through
+    ``_read_atlassian_oauth_bundle``. The orchestrator stamps
+    ``confluence_oauth_secret_arn`` into ``channel_metadata`` at task creation;
+    the fan-out Lambda warms (refreshes) the token before the session starts.
+
+    Like ``resolve_jira_oauth_token`` the agent **never refreshes**: an
+    expiring/expired, missing or unreadable token fails closed with ``""`` and
+    the Confluence deliverer reports a ``token_unavailable`` skip. Unlike the
+    Jira resolver this sets no environment variable — the token is returned
+    to the one caller that needs it and never outlives the task.
+    """
+    secret_arn = (channel_metadata or {}).get("confluence_oauth_secret_arn", "")
+    if not secret_arn:
+        return ""
+    token_obj = _read_atlassian_oauth_bundle(secret_arn, "resolve_confluence_oauth_token")
+    if token_obj is None:
+        return ""
+    if _atlassian_token_is_expiring(token_obj.get("expires_at", "")):
+        log(
+            "WARN",
+            "resolve_confluence_oauth_token: stored token is expiring and the agent does "
+            "not refresh (Atlassian rotates refresh_tokens; agent lacks PutSecretValue). "
+            "Skipping Confluence delivery for this task.",
+        )
+        return ""
+    access = token_obj.get("access_token", "")
+    return access if isinstance(access, str) else ""

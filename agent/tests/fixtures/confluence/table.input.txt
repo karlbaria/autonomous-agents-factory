@@ -1,0 +1,4 @@
+| Option | Cost | Notes |
+|:-------|-----:|-------|
+| A & B | $1 | **fast** |
+| <C> | $2 | pipe \| inside |

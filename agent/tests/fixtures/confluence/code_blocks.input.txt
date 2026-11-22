@@ -1,0 +1,12 @@
+```python
+if a < b and c > d:
+    print("]]>")  # must not end the CDATA section
+```
+
+~~~
+no language, **not bold**, <b>not markup</b>
+~~~
+
+```bash; rm -rf /
+echo hi
+```

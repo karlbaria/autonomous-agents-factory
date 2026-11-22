@@ -1,0 +1,2 @@
+<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">python</ac:parameter><ac:plain-text-body><![CDATA[if a < b and c > d:
+    print("]]]]><![CDATA[>")  # must not end the CDATA section]]></ac:plain-text-body></ac:structured-macro><ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[no language, **not bold**, <b>not markup</b>]]></ac:plain-text-body></ac:structured-macro><ac:structured-macro ac:name="code"><ac:parameter ac:name="language">bash</ac:parameter><ac:plain-text-body><![CDATA[echo hi]]></ac:plain-text-body></ac:structured-macro>

@@ -52,10 +52,13 @@ export const JIRA_OAUTH_SCOPES = [
  * - `read:label:confluence` / `write:label:confluence` — the ownership
  *   (`factory-generated`) and lifecycle (`factory-draft`/`factory-final`)
  *   labels
+ * - `delete:page:confluence` — remove a page the factory just created when
+ *   labelling it fails, so an unlabelled factory page never blocks later runs
+ *   as an ownership clash
  *
  * Granted on the SAME Atlassian OAuth app as Jira (`bgagent confluence
  * setup` widens an existing tenant's consent rather than creating a second
- * app) — see ADR-0NN (fork). `offline_access` is already in
+ * app) — see ADR-029 (fork). `offline_access` is already in
  * {@link JIRA_OAUTH_SCOPES}; the two lists are unioned at the authorize call,
  * not merged here, so a Jira-only install's scope list is untouched.
  */
@@ -65,6 +68,7 @@ export const CONFLUENCE_OAUTH_SCOPES = [
   'read:space:confluence',
   'read:label:confluence',
   'write:label:confluence',
+  'delete:page:confluence',
 ] as const;
 
 /**

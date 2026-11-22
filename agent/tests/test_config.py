@@ -2,6 +2,7 @@
 
 import os
 from datetime import UTC
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from config import (
     build_config,
     clear_jira_task_credentials,
     get_config,
+    resolve_confluence_oauth_token,
     resolve_jira_oauth_token,
     resolve_linear_api_token,
 )
@@ -1184,3 +1186,106 @@ class TestResolveJiraOauthTokenNoRefresh:
         with patch("boto3.client", return_value=mock_sm):
             assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == ""
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+
+
+class TestResolveConfluenceOauthToken:
+    """ADR-029 (fork): Confluence reads the shared Jira+Confluence secret bundle,
+    read-only — never refreshes, never writes, fails closed on expiry."""
+
+    META: ClassVar[dict[str, str]] = {"confluence_oauth_secret_arn": "arn:confluence"}
+
+    def _sm(self, payload):
+        import json
+
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {
+            "SecretString": payload if isinstance(payload, str) else json.dumps(payload)
+        }
+        return mock_sm
+
+    def _future(self, seconds=12 * 3600):
+        from datetime import datetime, timedelta
+
+        return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+    @pytest.mark.parametrize("meta", [None, {}, {"jira_oauth_secret_arn": "arn:jira"}])
+    def test_no_secret_arn_returns_empty_without_sdk_call(self, monkeypatch, meta):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("JIRA_OAUTH_SECRET_ARN", "arn:env")  # not a fallback here
+        with patch("boto3.client") as mock_boto:
+            assert resolve_confluence_oauth_token(meta) == ""
+            mock_boto.assert_not_called()
+
+    def test_happy_path_returns_token_without_touching_env(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira-token-of-this-task")
+        mock_sm = self._sm({"access_token": "conf-token", "expires_at": self._future()})
+        with patch("aws_session.platform_client", return_value=mock_sm) as pc:
+            assert resolve_confluence_oauth_token(self.META) == "conf-token"
+            pc.assert_called_with("secretsmanager", region_name="us-east-1")
+        mock_sm.get_secret_value.assert_called_once_with(SecretId="arn:confluence")
+        # Read-only: no write-back, and the Jira credentials are untouched.
+        mock_sm.put_secret_value.assert_not_called()
+        assert os.environ["JIRA_API_TOKEN"] == "jira-token-of-this-task"  # noqa: S105 -- test value
+        assert "conf-token" not in os.environ.values()
+
+    @pytest.mark.parametrize("seconds", [-3600, 10])
+    def test_expiring_token_fails_closed_and_never_refreshes(self, monkeypatch, seconds):
+        from unittest.mock import patch as upatch
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_sm = self._sm(
+            {
+                "access_token": "stale",
+                "refresh_token": "rt",
+                "client_id": "c",
+                "client_secret": "s",
+                "expires_at": self._future(seconds),
+            }
+        )
+        with (
+            patch("boto3.client", return_value=mock_sm),
+            upatch("urllib.request.urlopen") as urlopen_mock,
+            upatch("requests.post") as post_mock,
+            upatch("requests.Session.request") as session_mock,
+        ):
+            assert resolve_confluence_oauth_token(self.META) == ""
+        urlopen_mock.assert_not_called()
+        post_mock.assert_not_called()
+        session_mock.assert_not_called()
+        mock_sm.put_secret_value.assert_not_called()
+
+    @pytest.mark.parametrize("stamp", [*_MALFORMED_EXPIRES_AT, "", 12345, "2099-01-01T00:00:00"])
+    def test_malformed_or_naive_expiry_fails_closed(self, monkeypatch, stamp):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_sm = self._sm({"access_token": "t", "expires_at": stamp})
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_confluence_oauth_token(self.META) == ""
+
+    @pytest.mark.parametrize(
+        "payload", ["not json", "[1, 2]", {"expires_at": "2099-01-01T00:00:00Z"}]
+    )
+    def test_unusable_secret_fails_closed(self, monkeypatch, payload):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        if isinstance(payload, dict):
+            payload = {**payload, "access_token": 42}
+        with patch("boto3.client", return_value=self._sm(payload)):
+            assert resolve_confluence_oauth_token(self.META) == ""
+
+    def test_secrets_manager_error_fails_closed(self, monkeypatch):
+        from botocore.exceptions import ClientError
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "GetSecretValue"
+        )
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_confluence_oauth_token(self.META) == ""
+
+    def test_missing_region_fails_closed(self, monkeypatch):
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        with patch("boto3.client") as mock_boto:
+            assert resolve_confluence_oauth_token(self.META) == ""
+            mock_boto.assert_not_called()

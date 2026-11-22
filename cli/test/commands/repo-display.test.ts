@@ -223,7 +223,7 @@ describe('buildRepoShowLines', () => {
         repo: 'acme/foo',
         status: 'active',
         confluence_cloud_id: 'cloud-123',
-        confluence_space_id: 'ENG',
+        confluence_space_key: 'ENG',
         confluence_parent_page_id: '98765',
       },
       PLATFORM,
@@ -232,7 +232,7 @@ describe('buildRepoShowLines', () => {
       .toBe('cloud-123#ENG, parent page 98765');
 
     const withoutParent = buildRepoShowLines(formatRepoConfigForDisplay(
-      { repo: 'acme/foo', status: 'active', confluence_cloud_id: 'cloud-123', confluence_space_id: 'ENG' },
+      { repo: 'acme/foo', status: 'active', confluence_cloud_id: 'cloud-123', confluence_space_key: 'ENG' },
       PLATFORM,
     ));
     expect(withoutParent.find((l) => l.key === 'confluence_mapping')?.text).toBe('cloud-123#ENG, space root');
