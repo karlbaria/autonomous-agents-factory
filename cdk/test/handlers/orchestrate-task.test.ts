@@ -327,6 +327,72 @@ describe('hydrateAndTransition', () => {
   });
 });
 
+describe('hydrateAndTransition — Confluence channel_metadata (Task 14 (fork), #57)', () => {
+  const hydrated = {
+    version: 1, user_prompt: 'p', sources: [], token_estimate: 1, truncated: false,
+  };
+  const research = { ...baseTask, resolved_workflow: { id: 'knowledge/web-research-v1', version: '1.0.0' } };
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  function registryReturns(cloudId: string, item: Record<string, unknown> | undefined) {
+    mockDdbSend.mockImplementation((cmd: any) => Promise.resolve(
+      cmd._type === 'Get' && cmd.input.TableName === 'RegTable' && cmd.input.Key?.jira_cloud_id === cloudId
+        ? { Item: item }
+        : {},
+    ));
+  }
+
+  test('merges the mapping and tenant secret into the agent payload', async () => {
+    process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'RegTable';
+    registryReturns('cloud-orch-1', {
+      jira_cloud_id: 'cloud-orch-1',
+      site_url: 'https://acme.atlassian.net',
+      oauth_secret_arn: 'arn:secret:bgagent-jira-oauth-cloud-orch-1',
+      status: 'active',
+    });
+    mockHydrateContext.mockResolvedValueOnce(hydrated);
+    const payload = await hydrateAndTransition(
+      { ...research, channel_metadata: { slack_channel_id: 'C1' } } as any,
+      {
+        compute_type: 'agentcore',
+        confluence_cloud_id: 'cloud-orch-1',
+        confluence_space_key: 'ENG',
+        confluence_parent_page_id: '500',
+      } as any,
+    );
+    expect(payload.channel_metadata).toEqual({
+      slack_channel_id: 'C1',
+      confluence_cloud_id: 'cloud-orch-1',
+      confluence_space_key: 'ENG',
+      confluence_parent_page_id: '500',
+      confluence_oauth_secret_arn: 'arn:secret:bgagent-jira-oauth-cloud-orch-1',
+      confluence_site_url: 'https://acme.atlassian.net',
+    });
+  });
+
+  test('adds nothing for a workflow without a Confluence deliverer', async () => {
+    process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'RegTable';
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(hydrated);
+    const payload = await hydrateAndTransition(
+      { ...baseTask, channel_metadata: { slack_channel_id: 'C1' } } as any,
+      { compute_type: 'agentcore', confluence_cloud_id: 'cloud-orch-2', confluence_space_key: 'ENG' } as any,
+    );
+    expect(payload.channel_metadata).toEqual({ slack_channel_id: 'C1' });
+  });
+
+  test('omits channel_metadata entirely when there is none and no mapping', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(hydrated);
+    const payload = await hydrateAndTransition(research as any, { compute_type: 'agentcore' } as any);
+    expect(payload).not.toHaveProperty('channel_metadata');
+  });
+});
+
 describe('emitTaskEvent — correlation envelope (#245)', () => {
   test('stamps user_id and repo as top-level fields when supplied', async () => {
     mockDdbSend.mockResolvedValue({});

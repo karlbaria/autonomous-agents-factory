@@ -55,6 +55,10 @@ describe('format', () => {
     trace: false,
     trace_s3_uri: null,
     artifact_uri: null,
+    confluence_status: null,
+    confluence_page_url: null,
+    confluence_skip_reason: null,
+    confluence_skip_detail: null,
     attachments: null,
     approval_gate_count: 0,
     approval_gate_cap: 50,
@@ -270,6 +274,29 @@ describe('format', () => {
       };
       const output = formatTaskDetail(withArtifact);
       expect(output).toContain('Artifact:    s3://artifacts-bkt/artifacts/abc123/result.md');
+    });
+
+    test('renders the Confluence page link when published (Task 14 (fork))', () => {
+      const output = formatTaskDetail({
+        ...task,
+        confluence_status: 'published',
+        confluence_page_url: 'https://acme.atlassian.net/wiki/x/1',
+      });
+      expect(output).toContain('Confluence:  https://acme.atlassian.net/wiki/x/1');
+    });
+
+    test('renders the Confluence skip reason and detail when skipped', () => {
+      const output = formatTaskDetail({
+        ...task,
+        confluence_status: 'skipped',
+        confluence_skip_reason: 'ownership_clash',
+        confluence_skip_detail: 'a page titled X exists without the label',
+      });
+      expect(output).toContain('Confluence:  skipped (ownership_clash): a page titled X exists without the label');
+    });
+
+    test('omits the Confluence line for a workflow that does not publish', () => {
+      expect(formatTaskDetail(task)).not.toContain('Confluence:');
     });
 
     test('omits Artifact line when artifact_uri is null', () => {

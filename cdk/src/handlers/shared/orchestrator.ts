@@ -22,6 +22,7 @@ import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import { resolveRepositoryBackend } from './compute-backend';
 import type { SessionHandle, SessionStatus } from './compute-strategy';
+import { resolveConfluenceChannelMetadata } from './confluence-publishing';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
 import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
@@ -604,6 +605,9 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     mcp_servers: repoConfig?.mcp_servers,
     cedar_policy_modules: repoConfig?.cedar_policy_modules,
     skills: repoConfig?.skills,
+    confluence_cloud_id: repoConfig?.confluence_cloud_id,
+    confluence_space_key: repoConfig?.confluence_space_key,
+    confluence_parent_page_id: repoConfig?.confluence_parent_page_id,
   };
 }
 
@@ -969,6 +973,15 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...resolvedCedar,
   ];
 
+  // The task's own channel_metadata plus, for a Confluence-publishing workflow
+  // on a mapped repo, the Confluence mapping + tenant secret ARN the agent's
+  // deliverer reads (Task 14 (fork), #57). Payload-only: not written back to
+  // the TaskRecord.
+  const channelMetadata: Record<string, string> = {
+    ...(task.channel_metadata ?? {}),
+    ...await resolveConfluenceChannelMetadata(task, blueprintConfig),
+  };
+
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
@@ -1056,7 +1069,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(MEMORY_ID && { memory_id: MEMORY_ID }),
     hydrated_context: hydratedContext,
     channel_source: task.channel_source,
-    ...(task.channel_metadata && Object.keys(task.channel_metadata).length > 0 && { channel_metadata: task.channel_metadata }),
+    ...(Object.keys(channelMetadata).length > 0 && { channel_metadata: channelMetadata }),
     ...(attachmentPayloads.length > 0 && { attachments: attachmentPayloads }),
   };
 

@@ -34,6 +34,7 @@ import {
   makeJiraCommand,
   openBrowser,
   renderJiraAppTemplate,
+  scopeHasConfluence,
   synchronizeJiraWebhookSecrets,
   upsertOauthSecret,
 } from '../../src/commands/jira';
@@ -1056,6 +1057,35 @@ describe('jira invite-user action', () => {
   });
 });
 
+/**
+ * Secrets Manager stub for `jira setup`: the Confluence-scope pre-scan reads
+ * `bgagent-jira-oauth-<cloudId>` by name (absent unless `existing` is given),
+ * the write path creates `arn:jira-oauth` and reads it back by ARN.
+ */
+function setupSecretsManager(opts: {
+  persisted: StoredJiraOauthToken;
+  existing?: Partial<StoredJiraOauthToken>;
+}) {
+  return (command: unknown) => {
+    if (command instanceof CreateSecretCommand) return Promise.resolve({ ARN: 'arn:jira-oauth' });
+    if (command instanceof GetSecretValueCommand) {
+      if (command.input.SecretId === 'arn:jira-oauth') {
+        return Promise.resolve({ SecretString: JSON.stringify(opts.persisted) });
+      }
+      if (opts.existing) return Promise.resolve({ SecretString: JSON.stringify(opts.existing) });
+      return Promise.reject(Object.assign(new Error('not found'), { name: 'ResourceNotFoundException' }));
+    }
+    return Promise.resolve({});
+  };
+}
+
+/** Secrets Manager calls after the pre-scan's by-name reads. */
+function smCallsAfterPreScan(): unknown[] {
+  return smSend.mock.calls
+    .map((c) => c[0])
+    .filter((c) => !(c instanceof GetSecretValueCommand && String(c.input.SecretId).startsWith('bgagent-jira-oauth-')));
+}
+
 describe('jira setup action', () => {
   let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
 
@@ -1141,17 +1171,13 @@ describe('jira setup action', () => {
       }
       return Promise.resolve({});
     });
-    smSend
-      .mockResolvedValueOnce({ ARN: 'arn:jira-oauth' })
-      .mockResolvedValueOnce({
-        SecretString: JSON.stringify(sampleToken({
-          access_token: 'new-access-token',
-          refresh_token: 'new-refresh-token',
-          cloud_id: 'cloud-123',
-        })),
-      })
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({});
+    smSend.mockImplementation(setupSecretsManager({
+      persisted: sampleToken({
+        access_token: 'new-access-token',
+        refresh_token: 'new-refresh-token',
+        cloud_id: 'cloud-123',
+      }),
+    }));
 
     try {
       const program = makeJiraCommand();
@@ -1165,19 +1191,24 @@ describe('jira setup action', () => {
         'client-secret',
       ]);
 
-      expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(ScanCommand);
-      expect(ddbSend.mock.calls[1][0]).toBeInstanceOf(UpdateCommand);
-      expect(smSend.mock.calls[0][0]).toBeInstanceOf(CreateSecretCommand);
-      expect(smSend.mock.calls[1][0]).toBeInstanceOf(GetSecretValueCommand);
+      // Scan (Confluence-scope pre-scan) and Scan (sole-tenant check), then
+      // the registry Update.
+      expect(ddbSend.mock.calls.map((c) => c[0].constructor.name)).toEqual([
+        'ScanCommand', 'ScanCommand', 'UpdateCommand',
+      ]);
+      // A same-tenant rerun reads that tenant's bundle once for the pre-scan.
+      const writes = smCallsAfterPreScan();
+      expect(writes[0]).toBeInstanceOf(CreateSecretCommand);
+      expect(writes[1]).toBeInstanceOf(GetSecretValueCommand);
 
-      const tenantWrite = smSend.mock.calls[2][0] as PutSecretValueCommand;
+      const tenantWrite = writes[2] as PutSecretValueCommand;
       expect(tenantWrite.input.SecretId).toBe('arn:jira-oauth');
       expect(JSON.parse(tenantWrite.input.SecretString as string)).toMatchObject({
         access_token: 'new-access-token',
         refresh_token: 'new-refresh-token',
         webhook_signing_secret: 'new-signing-secret',
       });
-      const stackWideWrite = smSend.mock.calls[3][0] as PutSecretValueCommand;
+      const stackWideWrite = writes[3] as PutSecretValueCommand;
       expect(stackWideWrite.input).toEqual({
         SecretId: 'arn:webhook',
         SecretString: 'new-signing-secret',
@@ -1234,7 +1265,8 @@ describe('jira setup action', () => {
         callback(null);
       },
     );
-    ddbSend.mockResolvedValueOnce({
+    // Both scans (Confluence-scope pre-scan, sole-tenant check) see the other tenant.
+    ddbSend.mockResolvedValue({
       Items: [{ jira_cloud_id: 'cloud-456', status: 'active' }],
     });
 
@@ -1250,12 +1282,10 @@ describe('jira setup action', () => {
         'client-secret',
       ])).rejects.toThrow(/multiple tenant secrets/);
 
-      expect(ddbSend).toHaveBeenCalledTimes(1);
-      expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(ScanCommand);
-      expect(
-        ddbSend.mock.calls.some(([command]) => command instanceof UpdateCommand),
-      ).toBe(false);
-      expect(smSend).not.toHaveBeenCalled();
+      expect(ddbSend).toHaveBeenCalledTimes(2);
+      expect(ddbSend.mock.calls.every(([command]) => command instanceof ScanCommand)).toBe(true);
+      // Only the pre-scan's read of the other tenant's bundle; nothing written.
+      expect(smSend.mock.calls.every(([command]) => command instanceof GetSecretValueCommand)).toBe(true);
       expect(promptSecretMock).not.toHaveBeenCalled();
     } finally {
       credsSpy.mockRestore();
@@ -1284,6 +1314,7 @@ describe('jira setup action', () => {
     // Callback returns a direct-oauth result with a state that can't match the
     // freshly generated one → setup throws right after randomState()/PKCE.
     awaitOauthCallbackMock.mockResolvedValue({ kind: 'direct-oauth', code: 'auth-code', state: 'definitely-not-the-state' });
+    ddbSend.mockResolvedValue({ Items: [] });
     try {
       const program = makeJiraCommand();
       await expect(
@@ -1752,5 +1783,144 @@ describe('synchronizeJiraWebhookSecrets', () => {
       sampleToken(),
       'new-secret',
     )).rejects.toThrow(/global failed; rollback: rollback failed/);
+  });
+});
+
+describe('jira setup keeps Confluence scopes (Task 14 (fork), #57)', () => {
+  let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    smSend.mockReset();
+    promptSecretMock.mockReset();
+    awaitOauthCallbackMock.mockReset();
+    execFileMock.mockReset();
+    cfnSend.mockReset();
+    loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({
+      region: 'us-west-2',
+      api_url: 'https://api.example.test/v1/',
+    } as ReturnType<typeof config.loadConfig>);
+  });
+
+  afterEach(() => loadConfigSpy.mockRestore());
+
+  const CONFLUENCE_SCOPE = 'read:page:confluence write:page:confluence read:space:confluence '
+    + 'read:label:confluence write:label:confluence delete:page:confluence';
+
+  /** Run `jira setup` against one active tenant whose stored bundle has `existingScope`. */
+  async function runSetup(opts: { existingScope: string; tokenScope: string; extraArgs?: string[] }) {
+    cfnSend.mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'JiraWorkspaceRegistryTableName', OutputValue: 'RegTable' },
+          { OutputKey: 'JiraWebhookSecretArn', OutputValue: 'arn:webhook' },
+        ],
+      }],
+    });
+    const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue({
+      id_token: fakeIdToken('cognito-sub-123'),
+    } as ReturnType<typeof config.loadCredentials>);
+    const logSpy = jest.spyOn(console, 'log').mockImplementation();
+    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const fetchSpy = jest.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: 'new-access-token',
+        refresh_token: 'new-refresh-token',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        scope: opts.tokenScope,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{
+        id: 'cloud-123', name: 'Acme', url: 'https://acme.atlassian.net', scopes: [],
+      }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    let completeOauth!: (value: { kind: 'direct-oauth'; code: string; state: string }) => void;
+    awaitOauthCallbackMock.mockReturnValueOnce(new Promise((resolve) => {
+      completeOauth = resolve;
+    }));
+    let authUrl = '';
+    execFileMock.mockImplementationOnce(
+      (_command: string, args: string[], callback: (err: Error | null) => void) => {
+        authUrl = args[0];
+        const state = new URL(args[0]).searchParams.get('state');
+        completeOauth({ kind: 'direct-oauth', code: 'auth-code', state: state! });
+        callback(null);
+      },
+    );
+    promptSecretMock.mockResolvedValueOnce('new-signing-secret');
+    ddbSend.mockImplementation((command: unknown) => Promise.resolve(
+      command instanceof ScanCommand ? { Items: [{ jira_cloud_id: 'cloud-123', status: 'active' }] } : {},
+    ));
+    smSend.mockImplementation(setupSecretsManager({
+      persisted: sampleToken({ scope: opts.tokenScope }),
+      existing: sampleToken({ scope: opts.existingScope }),
+    }));
+
+    let error: unknown;
+    try {
+      await makeJiraCommand().parseAsync([
+        'node', 'bgagent', 'setup', '--client-id', 'client-id', '--client-secret', 'client-secret',
+        ...(opts.extraArgs ?? []),
+      ]);
+    } catch (err) {
+      error = err;
+    } finally {
+      credsSpy.mockRestore();
+      logSpy.mockRestore();
+      writeSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+    const requested = authUrl ? new URL(authUrl).searchParams.get('scope')!.split(' ') : [];
+    const wroteSecret = smSend.mock.calls.some(
+      ([c]) => c instanceof CreateSecretCommand || c instanceof PutSecretValueCommand,
+    );
+    return { error, requested, wroteSecret };
+  }
+
+  test('scopeHasConfluence', () => {
+    expect(scopeHasConfluence('read:jira-work read:page:confluence')).toBe(true);
+    expect(scopeHasConfluence('read:jira-work write:jira-work')).toBe(false);
+    expect(scopeHasConfluence('read:confluence-content.all')).toBe(false);
+    expect(scopeHasConfluence(undefined)).toBe(false);
+  });
+
+  test('a re-run silently re-requests the Confluence scopes the stored token has', async () => {
+    const { error, requested, wroteSecret } = await runSetup({
+      existingScope: `read:jira-work write:jira-work ${CONFLUENCE_SCOPE}`,
+      tokenScope: `read:jira-work write:jira-work read:jira-user offline_access ${CONFLUENCE_SCOPE}`,
+    });
+    expect(error).toBeUndefined();
+    expect(requested).toEqual(expect.arrayContaining(['read:jira-work', ...CONFLUENCE_SCOPE.split(' ')]));
+    expect(wroteSecret).toBe(true);
+  });
+
+  test('a Jira-only tenant is re-authorized with Jira scopes only', async () => {
+    const { error, requested } = await runSetup({
+      existingScope: 'read:jira-work write:jira-work',
+      tokenScope: 'read:jira-work write:jira-work read:jira-user offline_access',
+    });
+    expect(error).toBeUndefined();
+    expect(requested.some((s) => s.endsWith(':confluence'))).toBe(false);
+  });
+
+  test('--drop-confluence re-authorizes with Jira scopes only', async () => {
+    const { error, requested, wroteSecret } = await runSetup({
+      existingScope: `read:jira-work ${CONFLUENCE_SCOPE}`,
+      tokenScope: 'read:jira-work write:jira-work read:jira-user offline_access',
+      extraArgs: ['--drop-confluence'],
+    });
+    expect(error).toBeUndefined();
+    expect(requested.some((s) => s.endsWith(':confluence'))).toBe(false);
+    expect(wroteSecret).toBe(true);
+  });
+
+  test('refuses to store a token that lost the Confluence scopes without --drop-confluence', async () => {
+    const { error, requested, wroteSecret } = await runSetup({
+      existingScope: `read:jira-work ${CONFLUENCE_SCOPE}`,
+      // The app entry no longer grants Confluence: Atlassian drops the scopes.
+      tokenScope: 'read:jira-work write:jira-work read:jira-user offline_access',
+    });
+    expect(requested).toEqual(expect.arrayContaining(CONFLUENCE_SCOPE.split(' ')));
+    expect(String(error)).toMatch(/without the Confluence scopes.*NOT saved/s);
+    expect(wroteSecret).toBe(false);
   });
 });

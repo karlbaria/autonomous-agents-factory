@@ -45,6 +45,7 @@ import type {
   DynamoDBRecord,
   DynamoDBStreamEvent,
 } from 'aws-lambda';
+import { warmConfluenceToken } from './shared/confluence-publishing';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
@@ -1841,6 +1842,24 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
   }
 }
 
+/**
+ * Confluence token warming (Task 14 (fork), #57, ADR-029 (fork)).
+ *
+ * On ``task_created`` for a workflow that publishes to Confluence, refresh
+ * the repo's mapped tenant token if it is near expiry, so the agent — which
+ * never refreshes — reads a usable token at delivery time. Independent of any
+ * Jira link and of every channel's filter; the repo and workflow come from
+ * the event's own metadata, so other tasks cost nothing. Best-effort: never
+ * throws, so it can never put the record into partial-batch retry.
+ */
+export async function maybeWarmConfluenceToken(ev: FanOutEvent): Promise<void> {
+  if (ev.event_type !== 'task_created') return;
+  const repo = ev.metadata?.repo;
+  const workflowId = ev.metadata?.resolved_workflow;
+  if (typeof repo !== 'string' || typeof workflowId !== 'string') return;
+  await warmConfluenceToken({ task_id: ev.task_id, repo, workflowId });
+}
+
 /** Exposed for testing: the per-channel dispatcher callable by the
  *  handler. Each key's absence from the routing map disables its
  *  dispatcher; the signature is uniform so adding a channel is one
@@ -2003,6 +2022,7 @@ export const handler = async (
         dropped++;
         continue;
       }
+      await maybeWarmConfluenceToken(ev);
       if (!shouldFanOut(ev, overrides)) {
         dropped++;
         continue;

@@ -497,6 +497,15 @@ class TaskResult(BaseModel):
     # or ``None`` for coding tasks / when no artifact was delivered.
     # Surfaced on TaskDetail so the user can retrieve the knowledge-task output.
     artifact_uri: str | None = None
+    # Confluence publish outcome of a Confluence-publishing deliver_artifact
+    # step (Task 14, issue #57): ``confluence_status`` is "published" or
+    # "skipped"; a published page carries its link, a skip its reason
+    # (no_mapping, token_unavailable, ...) and detail. All ``None`` when the
+    # workflow does not publish to Confluence.
+    confluence_status: str | None = None
+    confluence_page_url: str | None = None
+    confluence_skip_reason: str | None = None
+    confluence_skip_detail: str | None = None
     # True when this run advanced the PR branch HEAD (a real commit landed),
     # False when it ran but the branch is unchanged (a question-only iteration),
     # None when not a PR-iteration / unknown (no baseline sha). The Linear/Slack

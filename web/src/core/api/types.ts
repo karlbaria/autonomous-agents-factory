@@ -149,6 +149,13 @@ export interface TaskDetail {
   readonly trace: boolean;
   readonly trace_s3_uri: string | null;
   readonly artifact_uri: string | null;
+  /** Confluence publish outcome (Task 14 (fork), #57): ``published`` or
+   *  ``skipped``, with the page link or the skip reason/detail; all ``null``
+   *  for a workflow that does not publish to Confluence. */
+  readonly confluence_status: string | null;
+  readonly confluence_page_url: string | null;
+  readonly confluence_skip_reason: string | null;
+  readonly confluence_skip_detail: string | null;
   readonly attachments: AttachmentSummary[] | null;
   readonly approval_gate_count: number | null;
   readonly approval_gate_cap: number | null;

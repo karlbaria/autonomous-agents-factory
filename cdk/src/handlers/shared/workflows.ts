@@ -61,6 +61,13 @@ export interface WorkflowDescriptor {
   readonly readOnly: boolean;
   readonly requiredInputs: WorkflowRequiredInputs;
   /**
+   * Whether a `deliver_artifact` step publishes to Confluence (`confluence`,
+   * `s3_and_confluence` or `s3_comment_and_confluence` target — Task 14 (fork),
+   * issue #57). Gates the Confluence `channel_metadata` stamp in the
+   * orchestrator and the fan-out token warming. Absent ⇒ false.
+   */
+  readonly publishesConfluence?: boolean;
+  /**
    * The workflow's declared preferred Bedrock model (`agent_config.model.id` in
    * the YAML), if any. Validated against {@link WORKFLOW_MODEL_ALLOWLIST} at the
    * create-task boundary (WORKFLOWS.md rule 13). `undefined` ⇒ the workflow
@@ -176,6 +183,8 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     requiresRepo: false,
     readOnly: false,
     requiredInputs: { allOf: ['task_description'] },
+    // deliver target s3_comment_and_confluence (Task 14 (fork), #57).
+    publishesConfluence: true,
   },
 };
 
@@ -330,6 +339,15 @@ export function workflowRequiresRepo(id: string): boolean {
  */
 export function workflowIsReadOnly(id: string): boolean {
   return DESCRIPTORS[id]?.readOnly ?? false;
+}
+
+/**
+ * Whether the resolved workflow publishes its deliverable to Confluence
+ * (Task 14 (fork), issue #57). Unknown ids are `false`: no Confluence
+ * metadata is stamped and no token is warmed for them.
+ */
+export function workflowPublishesConfluence(id: string): boolean {
+  return DESCRIPTORS[id]?.publishesConfluence ?? false;
 }
 
 /**

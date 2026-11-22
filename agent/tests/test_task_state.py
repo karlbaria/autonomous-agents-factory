@@ -348,6 +348,53 @@ class TestWriteTerminalArtifactUri:
         assert "artifact_uri" not in calls[0]["UpdateExpression"]
 
 
+class TestWriteTerminalConfluenceFields:
+    """Task 14 PR 2b — the Confluence outcome is persisted so Slack and
+    ``bgagent status`` can show the page link or the skip reason."""
+
+    @staticmethod
+    def _write(monkeypatch, result):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal("t-cf", "COMPLETED", result)
+        return calls[0]
+
+    def test_skip_reason_and_detail_written(self, monkeypatch):
+        call = self._write(
+            monkeypatch,
+            {
+                "confluence_status": "skipped",
+                "confluence_skip_reason": "ownership_clash",
+                "confluence_skip_detail": "x" * 900,
+            },
+        )
+        expr = call["UpdateExpression"]
+        values = call["ExpressionAttributeValues"]
+        assert "confluence_status = :cfs" in expr
+        assert "confluence_skip_reason = :cfr" in expr
+        assert values[":cfs"] == "skipped"
+        assert values[":cfr"] == "ownership_clash"
+        assert values[":cfd"] == "x" * 500  # bounded
+        assert "confluence_page_url" not in expr
+
+    def test_page_url_written(self, monkeypatch):
+        call = self._write(
+            monkeypatch,
+            {"confluence_status": "published", "confluence_page_url": "https://a/wiki/x/1"},
+        )
+        assert call["ExpressionAttributeValues"][":cfu"] == "https://a/wiki/x/1"
+        assert "confluence_skip_reason" not in call["UpdateExpression"]
+
+    def test_nothing_written_without_confluence_fields(self, monkeypatch):
+        call = self._write(monkeypatch, {"pr_url": "https://github.com/o/r/pull/1"})
+        assert "confluence" not in call["UpdateExpression"]
+
+
 class TestWriteTerminalReplayFields:
     """#515 — write_terminal persists the verification verdict and otel_trace_id
     so the replay bundle carries them. Regression guard: build_passed/lint_passed

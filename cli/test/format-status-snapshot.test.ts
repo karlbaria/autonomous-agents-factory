@@ -64,6 +64,10 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     trace: false,
     trace_s3_uri: null,
     artifact_uri: null,
+    confluence_status: null,
+    confluence_page_url: null,
+    confluence_skip_reason: null,
+    confluence_skip_detail: null,
     attachments: null,
     approval_gate_count: 0,
     approval_gate_cap: 50,
@@ -391,6 +395,31 @@ describe('formatStatusSnapshot', () => {
     const task = buildTask({ artifact_uri: 's3://artifacts-bkt/artifacts/abc123/result.md' });
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).toContain('Artifact:      s3://artifacts-bkt/artifacts/abc123/result.md');
+  });
+
+  test('renders the Confluence skip reason (Task 14 (fork))', () => {
+    const task = buildTask({
+      confluence_status: 'skipped',
+      confluence_skip_reason: 'no_mapping',
+      confluence_skip_detail: null,
+    });
+    const rendered = formatStatusSnapshot(task, [], NOW);
+    expect(rendered).toContain('Confluence:    skipped (no_mapping)');
+  });
+
+  test('renders the Confluence page link when published', () => {
+    const task = buildTask({ confluence_status: 'published', confluence_page_url: 'https://a/wiki/x/1' });
+    expect(formatStatusSnapshot(task, [], NOW)).toContain('Confluence:    https://a/wiki/x/1');
+  });
+
+  test('renders "published" when the page link is unknown', () => {
+    const task = buildTask({ confluence_status: 'published' });
+    expect(formatStatusSnapshot(task, [], NOW)).toContain('Confluence:    published');
+  });
+
+  test('renders an unknown skip reason rather than nothing', () => {
+    const task = buildTask({ confluence_status: 'skipped' });
+    expect(formatStatusSnapshot(task, [], NOW)).toContain('Confluence:    skipped (unknown)');
   });
 
   test('omits Artifact line when artifact_uri is null', () => {

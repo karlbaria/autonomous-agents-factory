@@ -121,6 +121,84 @@ describe('renderSlackBlocks', () => {
     expect(sectionText(msg.blocks[0])).toContain('1h 1m');
   });
 
+  // Task 14 (fork), #57 — the Confluence outcome on the completion message.
+  test('task_completed shows a Confluence page button when published', () => {
+    const task = {
+      ...baseTask,
+      status: TaskStatus.COMPLETED as TaskStatusType,
+      confluence_status: 'published',
+      confluence_page_url: 'https://acme.atlassian.net/wiki/spaces/ENG/pages/9',
+    };
+    const msg = renderSlackBlocks('task_completed', task);
+    const buttons = actionsBlock(msg.blocks[1]).elements;
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).toMatchObject({
+      text: { text: 'View Confluence page' },
+      url: 'https://acme.atlassian.net/wiki/spaces/ENG/pages/9',
+    });
+    expect(sectionText(msg.blocks[0])).not.toContain('Confluence not published');
+  });
+
+  test('task_completed puts the Confluence button beside the PR button', () => {
+    const task = {
+      ...baseTask,
+      status: TaskStatus.COMPLETED as TaskStatusType,
+      pr_url: 'https://github.com/org/repo/pull/42',
+      confluence_status: 'published',
+      confluence_page_url: 'https://acme.atlassian.net/wiki/x/9',
+    };
+    const buttons = actionsBlock(renderSlackBlocks('task_completed', task).blocks[1]).elements;
+    expect(buttons.map((b) => (b as { url?: string }).url)).toEqual([
+      'https://github.com/org/repo/pull/42',
+      'https://acme.atlassian.net/wiki/x/9',
+    ]);
+  });
+
+  test('task_completed never links a non-https Confluence URL', () => {
+    const task = {
+      ...baseTask,
+      status: TaskStatus.COMPLETED as TaskStatusType,
+      confluence_status: 'published',
+      confluence_page_url: 'javascript:alert(1)',
+    };
+    expect(renderSlackBlocks('task_completed', task).blocks).toHaveLength(1);
+  });
+
+  test.each([
+    'no_mapping', 'token_unavailable', 'no_title', 'space_not_found',
+    'ownership_clash', 'human_edit_detected', 'api_error',
+  ])('task_completed shows the Confluence skip reason %s', (reason) => {
+    const task = {
+      ...baseTask,
+      status: TaskStatus.COMPLETED as TaskStatusType,
+      confluence_status: 'skipped',
+      confluence_skip_reason: reason,
+      confluence_skip_detail: 'the detail',
+    };
+    const msg = renderSlackBlocks('task_completed', task);
+    const text = sectionText(msg.blocks[0]);
+    expect(text).toContain(`Confluence not published_ (\`${reason}\`): the detail`);
+    expect(msg.blocks).toHaveLength(1);
+  });
+
+  test('task_completed truncates a long skip detail', () => {
+    const task = {
+      ...baseTask,
+      status: TaskStatus.COMPLETED as TaskStatusType,
+      confluence_status: 'skipped',
+      confluence_skip_reason: 'api_error',
+      confluence_skip_detail: 'x'.repeat(1000),
+    };
+    expect(sectionText(renderSlackBlocks('task_completed', task).blocks[0]).length).toBeLessThan(500);
+  });
+
+  test('task_completed without Confluence fields is unchanged', () => {
+    const task = { ...baseTask, status: TaskStatus.COMPLETED as TaskStatusType };
+    const msg = renderSlackBlocks('task_completed', task);
+    expect(msg.blocks).toHaveLength(1);
+    expect(sectionText(msg.blocks[0])).not.toContain('Confluence');
+  });
+
   test('formats duration in minutes and seconds', () => {
     const task = { ...baseTask, status: TaskStatus.COMPLETED as TaskStatusType, duration_s: 125 };
     const msg = renderSlackBlocks('task_completed', task);

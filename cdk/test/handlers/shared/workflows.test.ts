@@ -32,6 +32,7 @@ import {
   resolveWorkflowRef,
   resolveWorkflowRefError,
   workflowIsReadOnly,
+  workflowPublishesConfluence,
   workflowRequiresRepo,
   workflowUsesPr,
 } from '../../../src/handlers/shared/workflows';
@@ -191,6 +192,17 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
         : doc.domain === 'coding';
       expect(descriptor!.requiresRepo).toBe(resolvedRequiresRepo);
       expect(descriptor!.readOnly).toBe(Boolean(doc.read_only ?? false));
+
+      // Task 14 (fork): publishesConfluence mirrors whether any deliver_artifact
+      // step targets a Confluence-publishing deliverer (agent DELIVERERS with
+      // publishes_confluence=True).
+      const confluenceTargets = new Set(['confluence', 's3_and_confluence', 's3_comment_and_confluence']);
+      const steps = (doc.steps ?? []) as Array<Record<string, unknown>>;
+      const yamlPublishesConfluence = steps.some(
+        (step) => step.kind === 'deliver_artifact' && confluenceTargets.has(step.target as string),
+      );
+      expect(Boolean(descriptor!.publishesConfluence)).toBe(yamlPublishesConfluence);
+      expect(workflowPublishesConfluence(id)).toBe(yamlPublishesConfluence);
 
       // Rule 13 mirror: the descriptor's modelId must match the YAML's
       // agent_config.model.id (undefined when the workflow declares no model).
@@ -367,5 +379,20 @@ describe('resolveChannelDefaultWorkflow', () => {
 
   test('falls back to CODING_WORKFLOW_ID when the repo config is null (not onboarded)', () => {
     expect(resolveChannelDefaultWorkflow(null)).toBe(CODING_WORKFLOW_ID);
+  });
+});
+
+describe('workflowPublishesConfluence (Task 14 (fork), #57)', () => {
+  test('web-research-v1 publishes to Confluence', () => {
+    expect(workflowPublishesConfluence('knowledge/web-research-v1')).toBe(true);
+  });
+
+  test('coding and default workflows do not', () => {
+    expect(workflowPublishesConfluence('coding/new-task-v1')).toBe(false);
+    expect(workflowPublishesConfluence('default/agent-v1')).toBe(false);
+  });
+
+  test('an unknown id does not', () => {
+    expect(workflowPublishesConfluence('knowledge/nope-v1')).toBe(false);
   });
 });

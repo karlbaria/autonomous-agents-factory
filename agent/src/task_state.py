@@ -232,6 +232,28 @@ def write_running(task_id: str) -> None:
         log("WARN", f"[task_state] write_running failed (best-effort): {type(e).__name__}")
 
 
+# Optional string fields of a terminal write, persisted only when non-empty, as
+# (TaskRecord attribute, expression placeholder, max length):
+# - otel_trace_id — OTEL trace id for cross-plane correlation; absent on tasks
+#   that predate it and when tracing is unavailable.
+# - trace_s3_uri — the --trace artifact URI, written atomically with the
+#   terminal transition so a reader that sees the terminal status sees it too.
+# - artifact_uri — a repo-less task's delivered artifact; without it the S3
+#   object exists but TaskDetail.artifact_uri cannot surface it.
+# - confluence_* — the Confluence publish outcome (Task 14, issue #57): the page
+#   link when published, or the skip reason and detail when not, so Slack and
+#   ``bgagent status`` can show a skip instead of it being silent.
+_TERMINAL_STRING_FIELDS: tuple[tuple[str, str, int], ...] = (
+    ("otel_trace_id", ":otid", 64),
+    ("trace_s3_uri", ":ts3", 2048),
+    ("artifact_uri", ":au", 2048),
+    ("confluence_status", ":cfs", 32),
+    ("confluence_page_url", ":cfu", 2048),
+    ("confluence_skip_reason", ":cfr", 64),
+    ("confluence_skip_detail", ":cfd", 500),
+)
+
+
 def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:  # noqa: C901 -- 24 when the ceiling of 15 was set; must not grow
     """Transition a task to a terminal state (COMPLETED or FAILED).
 
@@ -324,24 +346,12 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                 # Bound the persisted answer so a verbose agent can't bloat the
                 # row; the reply renderer truncates again for display.
                 expr_values[":ans"] = str(result["answer_text"])[:2000]
-            # OTEL trace id for cross-plane correlation. Absent on tasks
-            # that predate this field and when tracing is unavailable.
-            if result.get("otel_trace_id"):
-                update_parts.append("otel_trace_id = :otid")
-                expr_values[":otid"] = result["otel_trace_id"]
-            # --trace artifact URI. Written atomically with the
-            # terminal-status transition so a consumer that reads
-            # TaskRecord.trace_s3_uri immediately after status becomes
-            # terminal sees a consistent view.
-            if result.get("trace_s3_uri"):
-                update_parts.append("trace_s3_uri = :ts3")
-                expr_values[":ts3"] = result["trace_s3_uri"]
-            # Repo-less delivered artifact URI. Persisted with the terminal
-            # write so TaskDetail.artifact_uri surfaces the deliverable
-            # — otherwise the S3 object exists but its URI is undiscoverable.
-            if result.get("artifact_uri"):
-                update_parts.append("artifact_uri = :au")
-                expr_values[":au"] = result["artifact_uri"]
+            # Optional string fields copied verbatim (bounded) when present;
+            # see _TERMINAL_STRING_FIELDS for what each one is.
+            for field_name, placeholder, max_len in _TERMINAL_STRING_FIELDS:
+                if result.get(field_name):
+                    update_parts.append(f"{field_name} = {placeholder}")
+                    expr_values[placeholder] = str(result[field_name])[:max_len]
 
         table.update_item(
             Key={"task_id": task_id},

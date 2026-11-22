@@ -53,7 +53,7 @@ OnUnresolved = Literal["fail", "pr_with_warning"]
 # (workflow.deliverers / DELIVERERS), not a closed enum — a new delivery method
 # is a registered deliverer, not a model/schema change (ADR-014 addendum
 # 2026-06-08). First-party names: s3, comment, s3_and_comment, confluence,
-# s3_and_confluence.
+# s3_and_confluence, s3_comment_and_confluence.
 DeliverTarget = str
 TerminalOutcome = Literal["pr_url", "review_posted", "artifact", "comment"]
 ConvergenceMode = Literal["test_gated", "artifact_delivered", "human_approved", "review_submitted"]

@@ -390,6 +390,59 @@ class TestRepoLessPipeline:
     @patch("repo.setup_repo")
     @patch("pipeline.task_span")
     @patch("pipeline.task_state")
+    def test_web_research_unmapped_reports_confluence_skip_and_keeps_s3(
+        self,
+        mock_task_state,
+        mock_task_span,
+        _mock_setup_repo,
+        mock_run_agent,
+        monkeypatch,
+    ):
+        """Task 14 PR 2b: web-research-v1 delivers via s3_comment_and_confluence.
+        With no Confluence mapping the S3 artifact is delivered exactly as before,
+        and the skip reason lands on the result (and so on the terminal write)."""
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+
+        async def fake_run_agent(_prompt, system_prompt, config, cwd=None, trajectory=None):
+            return AgentResult(
+                status="success",
+                turns=1,
+                cost_usd=0.01,
+                num_turns=1,
+                result_text="# Caching options\n\nFindings.",
+            )
+
+        mock_run_agent.side_effect = fake_run_agent
+        mock_task_span.return_value = self._mock_span()
+        with (
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+            patch("aws_session.tenant_client", return_value=MagicMock()),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Research caching options",
+                aws_region="us-east-1",
+                task_id="research-1",
+                resolved_workflow={"id": "knowledge/web-research-v1", "version": "1.0.0"},
+            )
+
+        assert result["status"] == "success"
+        assert result["artifact_uri"] == "s3://artifacts-bkt/artifacts/research-1/result.md"
+        assert result["confluence_status"] == "skipped"
+        assert result["confluence_skip_reason"] == "no_mapping"
+        assert result["confluence_skip_detail"]
+        assert result["confluence_page_url"] is None
+        terminal = mock_task_state.write_terminal.call_args.args[2]
+        assert terminal["confluence_skip_reason"] == "no_mapping"
+
+    @patch("runner.run_agent")
+    @patch("repo.setup_repo")
+    @patch("pipeline.task_span")
+    @patch("pipeline.task_state")
     def test_repoless_task_skips_repo_and_runs_agent(
         self,
         _mock_task_state,

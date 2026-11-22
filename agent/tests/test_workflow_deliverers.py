@@ -25,6 +25,7 @@ def test_first_party_deliverers_present():
         "s3_and_comment",
         "confluence",
         "s3_and_confluence",
+        "s3_comment_and_confluence",
     }
 
 
@@ -37,12 +38,14 @@ def test_produced_outcomes_match_first_party_contract():
     # Task 14: a Confluence publish can be skipped, so it backs no outcome itself.
     assert produced_outcomes("confluence") == frozenset()
     assert produced_outcomes("s3_and_confluence") == frozenset({"artifact"})
+    assert produced_outcomes("s3_comment_and_confluence") == frozenset({"artifact", "comment"})
 
 
 def test_only_confluence_targets_publish_to_confluence():
     assert {n for n, d in DELIVERERS.items() if d.publishes_confluence} == {
         "confluence",
         "s3_and_confluence",
+        "s3_comment_and_confluence",
     }
 
 
@@ -377,3 +380,96 @@ class TestDeliverHandlerData:
             "confluence_skip_reason": "ownership_clash",
             "confluence_skip_detail": "d",
         }
+
+
+class TestS3CommentAndConfluence:
+    """`s3_comment_and_confluence` (Task 14 PR 2b): the comment's first line
+    reports the Confluence outcome — the page link, or the skip reason."""
+
+    def _run(self, monkeypatch, outcome, text="# T\n\nbody"):
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        order: list[str] = []
+        s3 = MagicMock()
+        s3.put_object.side_effect = lambda **_k: order.append("s3")
+        progress = MagicMock()
+        progress.write_agent_milestone.side_effect = lambda name, _d: order.append(name)
+
+        def fake_publish(*_a, **_k):
+            order.append("publish")
+            return outcome
+
+        with (
+            patch("aws_session.tenant_client", return_value=s3),
+            patch("confluence.publish.publish_markdown", side_effect=fake_publish),
+        ):
+            result = deliver(
+                "s3_comment_and_confluence",
+                _ctx(text, progress=progress, channel_metadata=CONFLUENCE_META),
+            )
+        comments = [
+            c.args[1]
+            for c in progress.write_agent_milestone.call_args_list
+            if c.args[0] == "delivered_comment"
+        ]
+        return result, order, comments
+
+    def test_published_comment_leads_with_the_page_link(self, monkeypatch):
+        from confluence.publish import ConfluenceOutcome
+
+        published = ConfluenceOutcome(
+            status="published", action="created", page_id="9", page_url="https://u/9", version=1
+        )
+        result, order, comments = self._run(monkeypatch, published)
+        assert order == ["s3", "publish", "confluence_published", "delivered_comment"]
+        assert result.artifact_uri == "s3://artifacts-bkt/artifacts/task-1/result.md"
+        assert result.comment_posted is True
+        assert result.confluence == published
+        assert comments == ["Confluence: created https://u/9\n\n# T\n\nbody"]
+
+    def test_published_without_url_names_the_page(self, monkeypatch):
+        from confluence.publish import ConfluenceOutcome
+
+        published = ConfluenceOutcome(status="published", action="updated", page_id="9", version=3)
+        _, _, comments = self._run(monkeypatch, published)
+        assert comments[0].startswith("Confluence: updated page 9\n\n")
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "no_mapping",
+            "token_unavailable",
+            "no_title",
+            "space_not_found",
+            "ownership_clash",
+            "human_edit_detected",
+            "api_error",
+        ],
+    )
+    def test_skipped_comment_leads_with_the_reason(self, monkeypatch, reason):
+        from confluence.publish import ConfluenceOutcome
+
+        skip = ConfluenceOutcome(status="skipped", skip_reason=reason, detail="why")
+        result, order, comments = self._run(monkeypatch, skip)
+        assert order == ["s3", "publish", "confluence_skipped", "delivered_comment"]
+        assert result.artifact_uri is not None
+        assert comments == [f"Confluence: not published ({reason}: why)\n\n# T\n\nbody"]
+
+    def test_s3_and_comment_comment_is_unchanged(self, monkeypatch):
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        progress = MagicMock()
+        with patch("aws_session.tenant_client", return_value=MagicMock()):
+            deliver("s3_and_comment", _ctx("plain", progress=progress))
+        progress.write_agent_milestone.assert_called_once_with("delivered_comment", "plain")
+
+
+def test_web_research_uses_s3_comment_and_confluence():
+    """web-research-v1 keeps its comment and adds Confluence (Task 14 PR 2b)."""
+    from pathlib import Path
+
+    import yaml
+
+    doc = yaml.safe_load(
+        (Path(__file__).parent.parent / "workflows/knowledge/web-research-v1.yaml").read_text()
+    )
+    targets = [s.get("target") for s in doc["steps"] if s["kind"] == "deliver_artifact"]
+    assert targets == ["s3_comment_and_confluence"]

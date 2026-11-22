@@ -48,11 +48,13 @@ import {
 } from '../jira-app-actor';
 import {
   buildAuthorizationUrl,
+  CONFLUENCE_OAUTH_SCOPES,
   computeExpiresAt,
   exchangeAuthorizationCode,
   fetchAccessibleResources,
   generatePkce,
   isAccessTokenExpiring,
+  JIRA_OAUTH_SCOPES,
   jiraOauthSecretName,
   parseStoredJiraOauthToken,
   refreshAccessToken,
@@ -251,6 +253,34 @@ export async function upsertOauthSecret(
     }
     throw err;
   }
+}
+
+/** Whether an OAuth `scope` string carries any Confluence scope (Task 14, #57). */
+export function scopeHasConfluence(scope: unknown): boolean {
+  return typeof scope === 'string'
+    && scope.split(/\s+/).some((s) => (CONFLUENCE_OAUTH_SCOPES as readonly string[]).includes(s));
+}
+
+/**
+ * Whether the stored OAuth bundle of any active tenant already carries
+ * Confluence scopes (from a prior `bgagent confluence setup`). `jira setup`
+ * then re-requests them so a re-run does not silently drop Confluence access.
+ * A missing or unreadable secret counts as "no Confluence scopes".
+ */
+async function storedBundlesHaveConfluence(
+  sm: SecretsManagerClient,
+  cloudIds: readonly string[],
+): Promise<boolean> {
+  for (const cloudId of cloudIds) {
+    try {
+      const existing = await sm.send(new GetSecretValueCommand({ SecretId: jiraOauthSecretName(cloudId) }));
+      const parsed = existing.SecretString ? JSON.parse(existing.SecretString) as { scope?: unknown } : {};
+      if (scopeHasConfluence(parsed.scope)) return true;
+    } catch {
+      // No (or unreadable) bundle for this tenant: nothing to preserve.
+    }
+  }
+  return false;
 }
 
 async function listActiveJiraTenantIds(
@@ -553,6 +583,10 @@ export function makeJiraCommand(): Command {
       .option('--client-id <id>', 'Atlassian OAuth app Client ID (else prompted)')
       .option('--client-secret <secret>', 'Atlassian OAuth app Client Secret (else prompted; prefer interactive)')
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
+      .option(
+        '--drop-confluence',
+        'Re-authorize with Jira scopes only, removing Confluence access a prior `bgagent confluence setup` granted',
+      )
       .action(async (opts) => {
         const config = loadConfig();
         const region = opts.region || config.region;
@@ -608,6 +642,27 @@ export function makeJiraCommand(): Command {
           throw new CliError('Client Secret is required.');
         }
 
+        // ─── Confluence scopes (Task 14 (fork), #57) ─────────────────────
+        // ADR-029: Confluence shares this OAuth app and secret. If an active
+        // tenant's bundle already carries Confluence scopes, re-request them
+        // so this re-run does not silently downgrade the token to Jira-only;
+        // `--drop-confluence` is the explicit opt-out.
+        const preScanDdb = makeDocClient({ region });
+        const preScanSm = makeClient(SecretsManagerClient, { region });
+        const hadConfluence = await storedBundlesHaveConfluence(
+          preScanSm,
+          await listActiveJiraTenantIds(preScanDdb, workspaceRegistryTable!),
+        );
+        const keepConfluence = hadConfluence && opts.dropConfluence !== true;
+        const scopes: readonly string[] = keepConfluence
+          ? [...JIRA_OAUTH_SCOPES, ...CONFLUENCE_OAUTH_SCOPES]
+          : JIRA_OAUTH_SCOPES;
+        if (keepConfluence) {
+          console.log('  Keeping the Confluence scopes the stored token already has (pass --drop-confluence to remove them).');
+        } else if (hadConfluence) {
+          console.log('  --drop-confluence: re-authorizing with Jira scopes only; Confluence publishing will skip until `bgagent confluence setup` is re-run.');
+        }
+
         // ─── Step 1: Generate PKCE + open browser to Atlassian consent ───
         const pkce = generatePkce();
         const state = randomState();
@@ -616,6 +671,7 @@ export function makeJiraCommand(): Command {
           redirectUri: CALLBACK_URL,
           state,
           codeChallenge: pkce.codeChallenge,
+          scopes,
         });
 
         const callbackPromise = awaitOauthCallback();
@@ -712,6 +768,14 @@ export function makeJiraCommand(): Command {
         const otherActiveTenantIds = activeTenantIds.filter((id) => id !== cloudId);
         if (otherActiveTenantIds.length > 0) {
           throw multiTenantWebhookError([...otherActiveTenantIds, cloudId]);
+        }
+
+        if (keepConfluence && !scopeHasConfluence(tokenResponse.scope)) {
+          throw new CliError(
+            'Atlassian issued a token without the Confluence scopes the stored token has, so it was NOT saved '
+            + '(the existing token is unchanged). Add the Confluence scopes to the OAuth app in '
+            + 'developer.atlassian.com and re-run, or pass --drop-confluence to store a Jira-only token.',
+          );
         }
 
         // ─── Step 4: Persist token to per-tenant Secrets Manager ─────────
