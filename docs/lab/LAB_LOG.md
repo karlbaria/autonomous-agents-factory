@@ -767,10 +767,20 @@ Merged and deployed; the coding and research smoke tests both passed afterwards.
 - **Cause:** `review/probes.py::collect_probes` only picks up `test_*.py` files, and `run_probes` only knows how to run `pytest`. Any other probe is dropped without a warning.
 - **Proposed fix ([#69](https://github.com/karlbaria/autonomous-agents-factory/issues/69), not implemented yet):** run JS/TS probes with the repo's own runner (`npx vitest run` in the probe's package directory, named `*.test.jsx` so Vitest finds them). Report "probes written but not runnable" explicitly instead of saying nothing.
 
+### 11. JS/TS probes run, and Jira auto-track retries (#69/#70, #71/#72)
+
+- **JS/TS probes ([#70](https://github.com/karlbaria/autonomous-agents-factory/pull/70), closes #69):** JS/TS probes now run with the package's own runner, and a probe that can't run is reported as not runnable instead of being dropped. Merged and deployed. Live check on task `01M84K45BG8PH330DX48AZ6BD1`: one Vitest probe ran and passed, and it was committed under `frontend/src/__probes__/`. The build was green and the PR auto-merged.
+- **Jira auto-track ([#72](https://github.com/karlbaria/autonomous-agents-factory/pull/72), closes #71):** one retry for quick retryable create failures. Every skip is recorded as `jira_auto_track_skipped`, and `bgagent watch` shows the reason. Merged and deployed; a smoke test created a SHOP card.
+- **Tags:** `known-good-task14d` (#70's merge) and `known-good-task14e` (#72's merge).
+
+### 12. Fork CI: credential-free PR checks only
+
+The upstream integ, deploy and Documentation workflows are disabled on the fork. They need AWS credentials the lab doesn't use; the deploy run skipped all its jobs. The fork runs only credential-free PR checks: `build`, `security-pr` and `pull-request-lint`. Recorded in the plan's decisions log through [#73](https://github.com/karlbaria/autonomous-agents-factory/issues/73).
+
 ### Open items
 
 - ~~[#62](https://github.com/karlbaria/autonomous-agents-factory/issues/62): enforce a workflow's `allowed_tools` with a Cedar hard-deny.~~ Done in #68 (§9).
-- [#69](https://github.com/karlbaria/autonomous-agents-factory/issues/69): run JS/TS review probes and report probes that can't run (§10).
-- **Probe quality without Bash.** The owner will compare the invalid-probe rate of an adversarial run with recent runs. If it rises sharply, the fix is a narrow allowance (for example, one `py_compile` check), not general Bash.
+- ~~[#69](https://github.com/karlbaria/autonomous-agents-factory/issues/69): run JS/TS review probes and report probes that can't run (§10).~~ Done in #70 (§11).
+- **Probe quality without Bash.** The owner will compare the invalid-probe rate of an adversarial run with recent runs. If it rises sharply, the fix is a narrow allowance (for example, one `py_compile` check), not general Bash. First case found: a Python probe on the factory-shop README free-shipping task built its path from `__file__` and failed with `FileNotFoundError`. Filed as [#74](https://github.com/karlbaria/autonomous-agents-factory/issues/74).
 - **No "accept edits as baseline" for research pages.** Once a human edits a factory page, every later run skips it with `human_edit_detected`. There's no way to tell the factory "take the current version as the new baseline and keep updating". Task 15's Revise flow needs that for planning docs anyway.
 - **Workflow selection from Slack (§6).** Research tasks are API/CLI-only until Slack can choose a workflow.
