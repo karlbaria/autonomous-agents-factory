@@ -250,6 +250,21 @@ describe('renderEvent', () => {
     expect(output).toContain('customfield_10050: Component is required.');
   });
 
+  // #71: an 'unavailable' skip names the HTTP status and the proxy's error code.
+  test('renders an unavailable jira_auto_track_skipped with status and proxy code', () => {
+    const event = makeEvent({
+      event_type: 'jira_auto_track_skipped',
+      metadata: {
+        jira_project_key: 'SHOP',
+        reason: 'unavailable',
+        status: 502,
+        proxy_error_code: 'jira_request_failed',
+      },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('⚠ Jira auto-track skipped for project SHOP — Jira unavailable, HTTP 502, jira_request_failed');
+  });
+
   test('renders unknown event type with JSON metadata', () => {
     const event = makeEvent({
       event_type: 'custom_event',
