@@ -37,6 +37,21 @@ forbid (
 )
 when { context.read_only == true };
 
+// #62: once a workflow declares `agent_config.allowed_tools`, every tool
+// outside that list plus the platform tools (PLATFORM_TOOLS in
+// agent/src/policy.py) is forbidden. PolicyEngine puts the effective list in
+// `context.allowed_tools` and the called tool's name in `context.tool_name`
+// on the invoke_tool request, and only when a list is declared, so the rule
+// is dormant for legacy/batch callers that never resolved a workflow. See
+// docs/decisions/ADR-030-fork-allowed-tools-hard-deny.md.
+@tier("hard")
+@rule_id("tool_outside_allowed_tools")
+forbid (principal, action == Agent::Action::"invoke_tool", resource)
+when {
+    context has allowed_tools &&
+    !(context.allowed_tools.contains(context.tool_name))
+};
+
 // Reject `rm -rf /` and similar absolute-root destructive commands.
 @tier("hard")
 @rule_id("rm_slash")

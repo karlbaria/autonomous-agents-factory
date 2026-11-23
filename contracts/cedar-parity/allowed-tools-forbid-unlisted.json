@@ -1,0 +1,39 @@
+{
+  "name": "allowed-tools-forbid-unlisted",
+  "description": "#62: with context.allowed_tools set (knowledge/web-research-v1's list plus the platform tools), invoke_tool on a tool outside the set (Bash) is hard-denied. Pins Set.contains on a context string set identically in both bindings.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"hard\") @rule_id(\"tool_outside_allowed_tools\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource) when { context has allowed_tools && !(context.allowed_tools.contains(context.tool_name)) };",
+  "input": {
+    "principal": {
+      "type": "Agent::TaskAgent",
+      "id": "new_task"
+    },
+    "action": {
+      "type": "Agent::Action",
+      "id": "invoke_tool"
+    },
+    "resource": {
+      "type": "Agent::Tool",
+      "id": "Bash"
+    },
+    "context": {
+      "read_only": false,
+      "allowed_tools": [
+        "Glob",
+        "Grep",
+        "Read",
+        "TodoWrite",
+        "ToolSearch",
+        "WebFetch",
+        "mcp__abca__request_clarification",
+        "mcp__abca_gateway__repo_config"
+      ],
+      "tool_name": "Bash"
+    }
+  },
+  "expected": {
+    "decision": "deny",
+    "matching_rule_ids": [
+      "tool_outside_allowed_tools"
+    ]
+  }
+}

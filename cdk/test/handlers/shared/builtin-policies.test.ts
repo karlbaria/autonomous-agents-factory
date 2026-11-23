@@ -59,6 +59,7 @@ describe('builtin-policies — parseable by shared/cedar-policy', () => {
       expect.arrayContaining([
         'read_only_forbid_write',
         'read_only_forbid_edit',
+        'tool_outside_allowed_tools',
         'rm_slash',
         'write_git_internals',
         'write_git_internals_nested',

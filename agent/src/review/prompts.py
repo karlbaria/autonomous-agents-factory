@@ -26,6 +26,9 @@ of the base branch, before the coder's change.
 scratch directory named below. You cannot write anywhere else, and you \
 cannot read anywhere outside this worktree and that scratch directory — \
 do not try.
+- Your tools are Read, Glob, Grep and Write. There is no shell: you cannot \
+run, compile or install anything, and you do not need to — a deterministic \
+step runs your probes after you finish.
 - Each probe tests ONE concrete behavior the requirements call for: the \
 stated happy path, a named edge case, or error handling implied by the \
 requirements.

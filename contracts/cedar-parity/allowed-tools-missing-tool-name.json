@@ -1,0 +1,38 @@
+{
+  "name": "allowed-tools-missing-tool-name",
+  "description": "#62: allowed_tools present but tool_name OMITTED \u2014 the forbid errors at evaluation and is SKIPPED, so both engines return Allow (same native semantics as read-only-missing-attribute). Production safety does not rest on Cedar here: policy.py always sets tool_name alongside allowed_tools, and _eval_tier re-raises on diagnostics.errors \u2192 fail-closed DENY. If a binding changes this natively, this fixture failing is the early warning.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"hard\") @rule_id(\"tool_outside_allowed_tools\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource) when { context has allowed_tools && !(context.allowed_tools.contains(context.tool_name)) };",
+  "input": {
+    "principal": {
+      "type": "Agent::TaskAgent",
+      "id": "new_task"
+    },
+    "action": {
+      "type": "Agent::Action",
+      "id": "invoke_tool"
+    },
+    "resource": {
+      "type": "Agent::Tool",
+      "id": "Bash"
+    },
+    "context": {
+      "read_only": false,
+      "allowed_tools": [
+        "Glob",
+        "Grep",
+        "Read",
+        "TodoWrite",
+        "ToolSearch",
+        "WebFetch",
+        "mcp__abca__request_clarification",
+        "mcp__abca_gateway__repo_config"
+      ]
+    }
+  },
+  "expected": {
+    "decision": "allow",
+    "matching_rule_ids": [
+      "base_permit"
+    ]
+  }
+}

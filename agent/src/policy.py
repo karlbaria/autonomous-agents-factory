@@ -142,6 +142,40 @@ TOOL_GROUPS: dict[str, frozenset[str]] = {
     "file_write": frozenset({"Write", "Edit"}),
 }
 
+# #62: tools the runtime itself needs, allowed for every workflow on top of the
+# workflow's declared ``agent_config.allowed_tools``. The hard-deny rule
+# ``tool_outside_allowed_tools`` (agent/policies/hard_deny.cedar) forbids any
+# other tool once a workflow declares a list. Keep this short and explicit:
+# exact names only, no patterns. Adding a name widens every workflow's surface,
+# read-only ones included, so it needs the same review as loosening a hard-deny
+# rule. Rationale per name in docs/decisions/ADR-030-fork-allowed-tools-hard-deny.md.
+PLATFORM_TOOLS: frozenset[str] = frozenset(
+    {
+        # Loads deferred tools (e.g. WebFetch) into the session; no side effects.
+        "ToolSearch",
+        # In-session plan bookkeeping; no side effects outside the session.
+        "TodoWrite",
+        # The runner's clarify-before-spend tool (clarification_tool.py).
+        "mcp__abca__request_clarification",
+        # The AgentCore Gateway's read-only repo-config tool (gateway_tools.py).
+        "mcp__abca_gateway__repo_config",
+    }
+)
+
+
+def effective_allowed_tools(declared: Iterable[str] | None) -> frozenset[str] | None:
+    """The tools a task may call: its declared list plus :data:`PLATFORM_TOOLS`.
+
+    ``None`` when no list is declared (legacy/batch callers that never resolved
+    a workflow): the ``tool_outside_allowed_tools`` rule then stays dormant and
+    the task keeps the full surface it had before #62.
+    """
+    declared = list(declared or [])
+    if not declared:
+        return None
+    return frozenset(declared) | PLATFORM_TOOLS
+
+
 # Location of built-in policy files. Resolved relative to this module so the
 # Docker image can ship them alongside src/.
 _POLICIES_DIR = Path(__file__).resolve().parent.parent / "policies"
@@ -779,6 +813,7 @@ class PolicyEngine:
         allowed_read_roots: list[str] | None = None,
         scratch_write_root: str | None = None,
         protected_write_roots: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
     ) -> None:
         self._task_type = task_type
         self._repo = repo
@@ -806,6 +841,9 @@ class PolicyEngine:
         self._protected_write_roots = (
             [os.path.normpath(r) for r in protected_write_roots] if protected_write_roots else None
         )
+        # #62: the workflow's declared tool list plus PLATFORM_TOOLS, or None
+        # (no list declared) — then `tool_outside_allowed_tools` is dormant.
+        self._allowed_tools = effective_allowed_tools(allowed_tools)
 
         # Bounds check on approval_gate_cap (decision #13).
         if not APPROVAL_GATE_CAP_MIN <= approval_gate_cap <= APPROVAL_GATE_CAP_MAX:
@@ -1213,6 +1251,22 @@ class PolicyEngine:
             return False
         return not self._path_outside(file_path, self._protected_write_roots)
 
+    def _invoke_tool_context(self, base_context: dict, tool_name: str) -> dict:
+        """Context for the ``invoke_tool`` eval (#62).
+
+        Carries ``allowed_tools`` (a Cedar set) and ``tool_name`` only when the
+        task declares a tool list; without them the ``context has
+        allowed_tools`` guard of ``tool_outside_allowed_tools`` is false and the
+        rule never fires.
+        """
+        if self._allowed_tools is None:
+            return base_context
+        return {
+            **base_context,
+            "allowed_tools": sorted(self._allowed_tools),
+            "tool_name": tool_name,
+        }
+
     # ---- Three-outcome pipeline -------------------------------------------
 
     def evaluate_tool_use(self, tool_name: str, tool_input: dict) -> PolicyDecision:
@@ -1426,7 +1480,10 @@ class PolicyEngine:
 
         # Check tool-type eval first (invoke_tool on the real tool sentinel).
         invoke_decision, invoke_reasons = _run(
-            "invoke_tool", "Agent::Tool", tool_name, base_context
+            "invoke_tool",
+            "Agent::Tool",
+            tool_name,
+            self._invoke_tool_context(base_context, tool_name),
         )
         if invoke_decision == "deny":
             return ("deny", invoke_reasons)

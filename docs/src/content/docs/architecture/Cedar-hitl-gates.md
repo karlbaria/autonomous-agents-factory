@@ -2220,6 +2220,8 @@ Built-in policies shipped with the agent:
 
 **Hard-deny (absolute, cannot be disabled by blueprint)**: `rm_slash`, `write_git_internals`, `write_git_internals_nested`, `drop_table`. Absolute; no scope bypasses them; blueprint `disable:` cannot remove them (§5.1, finding #9).
 
+**Workflow tool surface (#62)**: `tool_outside_allowed_tools` is also a built-in hard-deny rule. Once a workflow declares `agent_config.allowed_tools`, `PolicyEngine` sends the declared list plus `policy.PLATFORM_TOOLS` (`ToolSearch`, `TodoWrite`, `mcp__abca__request_clarification`, `mcp__abca_gateway__repo_config`) as `context.allowed_tools`, and the called tool as `context.tool_name`, on the `invoke_tool` request. Any tool outside that set is denied. With no declared list the attributes are left out and the rule is dormant. See [ADR-030](/sample-autonomous-cloud-coding-agents/decisions/adr-030-fork-allowed-tools-hard-deny).
+
 **Soft-deny starter set (require approval by default, may be disabled by blueprint)**:
 - `force_push_any` — `like "*git push --force*"` — medium, 300s
 - `push_to_protected_branch` — pushes to `main`/`master`/`prod`/`release/*` (non-force) — medium, 300s
