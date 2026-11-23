@@ -35,18 +35,27 @@ FROM --platform=$TARGETPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f16356
 ARG GH_VERSION
 RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
-FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:dc1546eefcbe8caaa1f004f16ab76b204b5e1dbd58ff81b899f21cd40541232f
+FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 # Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
 COPY --from=gh-builder /out/gh /usr/local/bin/gh
+
+# Re-run the OS package upgrade below at least once a day (#66). The base digest
+# is pinned, so without this Docker reuses a cached ``apt-get upgrade`` layer
+# indefinitely and the image keeps CVEs Debian has already fixed. Callers pass
+# ``--build-arg APT_REFRESH="$(date -u +%Y%m%d)"`` (agent/mise.toml,
+# security-pr.yml, the CDK image assets): same-day rebuilds stay cached, the
+# first build of a new day re-runs the upgrade and the layers after it.
+ARG APT_REFRESH=0
 
 # Install system dependencies in multiple layers:
 #   - Node.js 24 LTS (required by Claude Code CLI)
 #   - git (repo operations)
 #   - build-essential (native compilation for some repos)
 #   - curl (downloads)
-RUN apt-get update && \
+RUN echo "apt refresh: ${APT_REFRESH}" && \
+    apt-get update && \
     # Patch any base-image CVEs that have a fix available in the
     # current Debian point release. Without this, transitive system-
     # library CVEs (e.g. libnghttp2 CVE-2026-27135) ride the base
@@ -63,6 +72,13 @@ RUN apt-get update && \
     # Cleanup early to keep peak disk usage low during builds.
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# The base image's system pip vendors its own msgpack/urllib3 copies
+# (pip/_vendor/vendor.txt), which the image scan reads. pip 26.2.2 (base
+# default) vendors msgpack 1.1.2 / urllib3 2.7.0 with HIGH CVEs; 26.3 vendors
+# fixed msgpack 1.2.4 / urllib3 2.8.0 (#66). The agent's own Python deps come
+# from uv.lock, not this pip; it stays for target repos' build commands.
+RUN python -m pip install --no-cache-dir --upgrade "pip==26.3"
 
 # Node.js 24 LTS (https://nodejs.org/en/about/previous-releases)
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \

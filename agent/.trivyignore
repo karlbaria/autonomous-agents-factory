@@ -12,3 +12,13 @@
 # which reports "main module does not need package golang.org/x/net/html".
 # Revisit when gh bumps x/net, or sooner if a newer gh release is available.
 CVE-2026-78661 exp:2027-01-15
+
+# CVE-2025-47273 — setuptools 70.3.0, found only in pip's vendor manifest
+# (/usr/local/lib/python3.13/site-packages/pip/_vendor/vendor.txt) (#66).
+# The flaw is a path traversal in setuptools.package_index (PackageIndex
+# download); pip vendors only pkg_resources from setuptools, not
+# package_index, so the vulnerable code is not in the image (checked against
+# the pip 26.3 wheel: no pip/_vendor/setuptools, only pip/_vendor/pkg_resources).
+# Even pip 26.3 still lists setuptools==70.3.0. Revisit when pip bumps its
+# vendored setuptools/pkg_resources.
+CVE-2025-47273 exp:2027-02-22
