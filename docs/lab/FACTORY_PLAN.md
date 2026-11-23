@@ -490,3 +490,9 @@ Track A (Task 3 → 4 → 5) runs first, then the MVP — the delivery factory (
 
 - **Weekly Confluence digest:** a weekly page of what the factory shipped and learned.
 - **Read-only AWS profile for investigations:** a profile scoped to read and describe calls, used instead of `factory-base` for read-only checks.
+- **Task 17.5, shared delivery gates:** deferred until a second app repo needs auto-merge or deploys (Task 17.5 above).
+- **Node 24 GitHub Actions:** bump the actions to Node 24-compatible versions ([factory-shop#34](https://github.com/karlbaria/factory-shop/issues/34)).
+- **Auto-merge not recorded on the Jira card:** watchdog merges don't reach the linked Jira issue ([factory-shop#35](https://github.com/karlbaria/factory-shop/issues/35)).
+- **Slack bot name is hardcoded:** Slack reply text says "Shoof"; the bot name should be a setting ([#9](https://github.com/karlbaria/autonomous-agents-factory/issues/9)).
+- **"Accept edits as baseline" for research pages:** once a human edits a factory page, every later run skips it with `human_edit_detected`; add a way to take the current version as the new baseline.
+- **Probe quality without Bash:** watch the probe writer's invalid-probe rate since #68 removed its Bash ([#74](https://github.com/karlbaria/autonomous-agents-factory/issues/74)).
