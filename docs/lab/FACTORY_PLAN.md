@@ -34,6 +34,7 @@
 - **2026-11-19 (Planning: Task 15.5 ships with no ABCA code change):** Narrows the "its own repo settings" language above. `build_command`/`lint_command` are already optional per-repo `RepoConfig` fields that default to `mise run build`/`mise run lint` when unset, so `factory-shop` gets build/lint gating for free from its own `mise.toml` — no CDK change. A real per-repo `default_workflow` field was considered, but the codebase deliberately keeps repo-bound workflow defaulting at each channel's call site rather than a resolver-level per-repo field; building it properly is **moved to Task 13** (see that task's new guidance bullet) rather than done here. Both `factory-shop` and `factory-sandbox-py` keep using explicit `--workflow` from the CLI for now. "Auto-merge opt-in" is a GitHub Actions repo variable (`FACTORY_AUTO_MERGE`), not an ABCA field — `factory-shop` simply has no Actions workflow yet, which is Task 17's job. Net effect: Task 15.5 is operational only (new repo, PAT scope, `set-token`, onboarding, a new Jira project/mapping) plus this plan/log write-up; no `autonomous-agents-factory` application code changes.
 - **2026-11-20:** Task 17.5 planned and deferred until a second app repo needs auto-merge or deploys.
 - **2026-11-22 (Planning: Task 15 becomes a shaped conversation):** A feature request is shaped in conversation before any research runs. When a request is vague, Jarvis asks targeted questions (buttons where possible, at most about three rounds). A detailed request skips straight to research. Shaping happens wherever the PM starts it, in a channel thread or a DM. The Confluence planning doc is the main review point, and the Slack message carries only a summary, a link and the Approve/Revise/Cancel buttons. Only the requesting PM can approve. On Approve, Jarvis re-reads the doc as edited, flags problems and asks the PM to confirm before filing. Revisions can come from a Slack reply, a direct doc edit, or both, and Jarvis never overwrites the PM's edits. Open requests expire after 7 days, with a reminder after 2 idle days. Plans over the story-count or cost threshold need a second confirmation from the PM that shows the story count and estimated cost. In team use this becomes a named second approver. Task 14 gains page read-back, edit detection and draft/final page state to support this.
+- **2026-11-23 (Fork CI):** The fork runs only credential-free PR checks: `build`, `security-pr` and `pull-request-lint`. The upstream integ, deploy and Documentation workflows are disabled on the fork. They need AWS credentials the lab doesn't use, and the deploy run skipped all its jobs.
 
 ## How to use this plan with Claude Code
 
@@ -67,6 +68,7 @@ Follow this checklist in every task from now on.
   git checkout main
   git checkout -b fix/<issue-number>-<short-description>
   ```
+- **Fast pre-deploy.** When the merged PR's GitHub `build` check was green, skip the local `mise run build` before deploying. Run only `MISE_EXPERIMENTAL=1 mise //cli:compile` and the standard `cdk:diff` below. Run the full local `mise run build` only when the PR merged without a green `build` check, or after merging several PRs without CI re-running on `main`.
 - **Diff before deploy.** Before every deploy, run `mise //cdk:diff` with the same context and give a one-line summary:
   ```bash
   AWS_PROFILE=factory-base AWS_REGION=us-east-2 ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1 \
@@ -398,11 +400,22 @@ Track A (Task 3 → 4 → 5) runs first, then the MVP — the delivery factory (
   - **Where:** wherever the PM starts, a channel thread or a DM. Jarvis continues in the same place.
   - **New pieces (ask-first items under AGENTS.md):** Slack thread-reply routing (subscribe to thread `message` events and match `thread_ts` to a planning session); a planning-session table that stores the brief and message references, not raw Slack transcripts, per Slack's data-retention guidance; the shaping Lambda and its Bedrock permissions; new button handlers in `slack-interactions.ts`.
   - **Manual Slack app step:** thread-reply routing needs new event subscriptions (`message.channels`, `message.im`) and their history scopes added to the Jarvis Slack app, then a reinstall of the app to the workspace. Flag this in the PR as an owner step.
+  - **No Jira auto-track for planning:** `knowledge/feature-planning-v1` and the shaping phase are exempt from Task 13's Jira auto-track, even on a repo whose mapping has `--auto-track`. Jira is filed only on Approve.
   - **Security:** PM messages are screened with the Bedrock guardrail, as nudges already are. Confluence page content read back is untrusted data, because anyone with edit access can change it. It is never followed as instructions, only parsed into the Jira structure.
   - Entry point: `@Jarvis I want to build X`, distinguished from today's "repo + instruction" submit parser, which currently falls back to "please include a repo" for anything it doesn't recognize as a direct coding instruction.
+  - Also route `@Jarvis research <topic> [in owner/repo]` to `knowledge/web-research-v1`. Today a Slack-submitted task always runs the repo's default coding workflow, so research is reachable only from the API or CLI. Part of Task 15's first PR.
   - Likely split into 3 PRs under one issue: (1) shaping and session state, (2) research workflow and Confluence draft, (3) review, approve and Jira filing.
-- Tests: ready-vs-vague judgment on corpus fixtures, and the shaping round cap; nothing is filed in Jira and no label is applied before confirmation; only the requesting PM can approve; the approve, revise (Slack reply, doc edit, both), cancel, reminder and expiry paths; the approval re-check flags a story with no acceptance criteria; PM edits survive a revision; Jira structure is filed from the edited doc (flat vs. parent and subtasks, correct link direction); the large-plan confirmation appears only above the threshold; the workflow writes no code and opens no PR.
+- Tests: ready-vs-vague judgment on corpus fixtures, and the shaping round cap; shaping and `knowledge/feature-planning-v1` tasks create no auto-tracked Jira card, even on an auto-track mapping; nothing is filed in Jira and no label is applied before confirmation; only the requesting PM can approve; the approve, revise (Slack reply, doc edit, both), cancel, reminder and expiry paths; the approval re-check flags a story with no acceptance criteria; PM edits survive a revision; Jira structure is filed from the edited doc (flat vs. parent and subtasks, correct link direction); the large-plan confirmation appears only above the threshold; the workflow writes no code and opens no PR.
 - Demo: `@Jarvis I want to build a tagging feature for factory-shop` gets two clarifying questions with buttons; the PM answers and a Confluence draft appears; the PM edits one story in Confluence and clicks Revise, and the edit is kept; the PM clicks Approve, the re-check passes, the epic and linked subtasks appear in Jira, the doc is marked final, and the existing orchestration starts the subtasks in dependency order.
+
+### Task 15.1: Read architecture standards from Confluence as context — Deferred (later)
+- Objective: the factory's agents follow the team's written architecture standards without anyone pasting them into each issue.
+- Guidance:
+  - Map a standards page per repo, read-only, through Task 14's adapter (read-back only; nothing is written).
+  - Give the page's content to the planner (Task 15), the coder and the reviewer as reference material, never as instructions. It is untrusted data, like any page read back from Confluence.
+  - Read only pages owned by trusted editors. A page whose owner or last editor isn't on the trusted list is skipped, with the reason recorded.
+- Tests: a mapped page reaches the planner, coder and reviewer as reference context; a page edited by an untrusted editor is skipped with a reason; instructions embedded in the page are not followed; nothing is written to Confluence.
+- Demo: a factory-shop task's reviewer cites a rule from the mapped standards page in a finding.
 
 ### Task 15.5: Add a second target app repo, `factory-shop`
 - Objective: onboard `factory-shop` as a second target app repo alongside `factory-sandbox-py`, proving the factory is repo-agnostic across more than one live repo — not swapping targets. `factory-sandbox-py` stays onboarded as the Rollback-and-safety-checklist smoke-test repo; nothing is offboarded.
@@ -472,3 +485,14 @@ Track A (Task 3 → 4 → 5) runs first, then the MVP — the delivery factory (
 - Demo: on factory-shop, a frontend-only agent PR auto-merges and a `.github/` PR shows "needs human review", both from `@v1`; demo 3 (orders table) deploys via the shared deploy action; factory-sandbox-py, onboarded with the script and checklist, auto-merges an agent PR after review and build.
 - Manual owner steps: create the repo, enable its Actions access setting, deploy `deploy-roles`, connect Amplify for any future frontend repo.
 - Effort: about 2–3 sessions.
+
+## Backlog
+
+- **Weekly Confluence digest:** a weekly page of what the factory shipped and learned.
+- **Read-only AWS profile for investigations:** a profile scoped to read and describe calls, used instead of `factory-base` for read-only checks.
+- **Task 17.5, shared delivery gates:** deferred until a second app repo needs auto-merge or deploys (Task 17.5 above).
+- **Node 24 GitHub Actions:** bump the actions to Node 24-compatible versions ([factory-shop#34](https://github.com/karlbaria/factory-shop/issues/34)).
+- **Auto-merge not recorded on the Jira card:** watchdog merges don't reach the linked Jira issue ([factory-shop#35](https://github.com/karlbaria/factory-shop/issues/35)).
+- **Slack bot name is hardcoded:** Slack reply text says "Shoof"; the bot name should be a setting ([#9](https://github.com/karlbaria/autonomous-agents-factory/issues/9)).
+- **"Accept edits as baseline" for research pages:** once a human edits a factory page, every later run skips it with `human_edit_detected`; add a way to take the current version as the new baseline.
+- **Probe quality without Bash:** watch the probe writer's invalid-probe rate since #68 removed its Bash ([#74](https://github.com/karlbaria/autonomous-agents-factory/issues/74)).
