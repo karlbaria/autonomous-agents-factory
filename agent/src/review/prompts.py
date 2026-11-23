@@ -22,10 +22,20 @@ Rules:
 - You see ONLY the original task requirements and the BASE-BRANCH code — \
 never the coder's diff or new code. Your working directory is a checkout \
 of the base branch, before the coder's change.
-- Write each probe as its own pytest file (test_*.py), directly in the \
-scratch directory named below. You cannot write anywhere else, and you \
-cannot read anywhere outside this worktree and that scratch directory — \
-do not try.
+- Write each probe as its own test file in the scratch directory named \
+below, in the test framework the code under test already uses. You cannot \
+write anywhere else, and you cannot read anywhere outside this worktree and \
+that scratch directory — do not try.
+- Python code: a pytest file named `test_<name>.py`, directly in the scratch \
+directory.
+- JavaScript/TypeScript code: a file named `<name>.test.jsx` (or `.test.js`, \
+`.test.tsx`, `.test.ts`), written for the test runner the package already \
+uses (Vitest or Jest, from its package.json). Put it in a subdirectory of \
+the scratch directory named after the package's path in the repo, e.g. \
+`<scratch>/frontend/<name>.test.jsx` for the package in `frontend/`. It will \
+run from `<package>/src/__probes__/` (or `<package>/__probes__/` if the \
+package has no `src/`), so import the code under test relative to that \
+directory, e.g. `import App from '../App'`.
 - Your tools are Read, Glob, Grep and Write. There is no shell: you cannot \
 run, compile or install anything, and you do not need to — a deterministic \
 step runs your probes after you finish.
@@ -39,7 +49,7 @@ When you are done, end your final message with a manifest in EXACTLY this \
 form (one line per probe file you wrote):
 
 PROBES:
-- <filename>: <one-line intent>
+- <path relative to the scratch directory>: <one-line intent>
 """
 
 CODE_REVIEWER_SYSTEM_PROMPT = """\
@@ -139,9 +149,9 @@ findings or probes go away by weakening them.
 Rules:
 - Fix the real problem the findings and failing probes point at, in the \
 application code. Do not edit, delete, or weaken anything under \
-`tests/review_probes/` — those are the independent reviewer's probes, not \
-yours, and any change there is reverted before the next round even looks \
-at it.
+`tests/review_probes/` or a package's `__probes__/` directory — those are \
+the independent reviewer's probes, not yours, and any change there is \
+reverted before the next round even looks at it.
 - A failing probe may be wrong (the reviewer can mark a probe invalid when \
 it tests something the task never asked for) — fix only what the \
 unresolved findings and probes genuinely call for, not every line a probe \
@@ -182,8 +192,8 @@ def code_reviewer_user_prompt(
     """
     if probe_results:
         probes_block = "\n".join(
-            f"- `{r.probe.filename}` ({r.probe.intent}): "
-            f"{'PASS' if r.passed else 'FAIL'}\n  output: {r.output[-_OUTPUT_PREVIEW_CHARS:]}"
+            f"- `{r.probe.key}` ({r.probe.intent}): {_probe_status(r)}\n"
+            f"  output: {r.output[-_OUTPUT_PREVIEW_CHARS:]}"
             for r in probe_results
         )
     else:
@@ -199,6 +209,14 @@ def code_reviewer_user_prompt(
         "task's actual requirements. A lower-severity issue is informational — report "
         "it, but still write READY if nothing else blocks.\n"
     )
+
+
+def _probe_status(result: ProbeResult) -> str:
+    """PASS / FAIL, or NOT RUNNABLE (#69) for a probe that never ran — a
+    probe that never ran says nothing about the code either way."""
+    if not result.runnable:
+        return "NOT RUNNABLE (never ran; says nothing about the code)"
+    return "PASS" if result.passed else "FAIL"
 
 
 def fixer_user_prompt(
@@ -221,14 +239,14 @@ def fixer_user_prompt(
 
     if failing_probes:
         probes_block = "\n".join(
-            f"- `{r.probe.filename}` ({r.probe.intent}):\n"
-            f"  output: {r.output[-_OUTPUT_PREVIEW_CHARS:]}"
+            f"- `{r.probe.key}` ({r.probe.intent}):\n  output: {r.output[-_OUTPUT_PREVIEW_CHARS:]}"
             for r in failing_probes
         )
         parts.append(f"## Failing probes\n\n{probes_block}\n")
 
     parts.append(
         "## Off limits\n\nDo not edit, delete, or weaken any file under "
-        "`tests/review_probes/` — the independent reviewer's probes, not yours.\n"
+        "`tests/review_probes/` or a package's `__probes__/` directory — the "
+        "independent reviewer's probes, not yours.\n"
     )
     return "\n".join(parts)

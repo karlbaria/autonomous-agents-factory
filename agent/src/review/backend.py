@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -80,7 +80,11 @@ DEFAULT_ON_UNRESOLVED = "pr_with_warning"
 _MIN_CALL_BUDGET_USD = 0.01
 
 _PROBES_COMMIT_DIR = "tests/review_probes"
-_PROBE_MANIFEST_LINE_RE = re.compile(r"^-\s*([A-Za-z0-9_.]+\.py)\s*:\s*(.+)\s*$", re.MULTILINE)
+# A manifest line names a probe file — Python or JS/TS (#69), optionally under
+# its package's scratch subdirectory — and its intent.
+_PROBE_MANIFEST_LINE_RE = re.compile(
+    r"^-\s*`?([A-Za-z0-9_./-]+\.(?:py|[jt]sx?))`?\s*:\s*(.+)\s*$", re.MULTILINE
+)
 
 
 class RoundOutcome(BaseModel):
@@ -173,26 +177,41 @@ def _parse_probe_manifest(text: str) -> dict[str, str]:
     return {m.group(1): m.group(2).strip() for m in _PROBE_MANIFEST_LINE_RE.finditer(text)}
 
 
-def _commit_passing_probes(repo_dir: str, probe_results: list[ProbeResult]) -> list[str]:
-    """Commit only the probes that pass, into ``tests/review_probes/``, as one commit.
+def _probe_commit_path(result: ProbeResult) -> str:
+    """Repo-relative path a passing probe is committed to.
 
-    Failing probes are never written to the repo — they stay as unresolved
-    findings the PR body reports instead.
+    Python probes go to ``tests/review_probes/``. A JS/TS probe (#69) is
+    committed exactly where it ran and passed — ``<package>/src/__probes__/``
+    under its runner-discoverable name — so the repo's own test runner picks it
+    up from the same place with the same config, and ``npm test`` runs a probe
+    already known to pass there.
     """
-    passing = [r.probe for r in probe_results if r.passed]
+    if result.run_path:
+        return result.run_path
+    return f"{_PROBES_COMMIT_DIR}/{result.probe.filename}"
+
+
+def _commit_passing_probes(repo_dir: str, probe_results: list[ProbeResult]) -> list[str]:
+    """Commit only the probes that pass, as one commit (see ``_probe_commit_path``).
+
+    Failing and not-runnable probes are never written to the repo — they stay
+    as unresolved findings the PR body reports instead.
+    """
+    passing = [r for r in probe_results if r.passed]
     if not passing:
         return []
 
-    dest_dir = Path(repo_dir) / _PROBES_COMMIT_DIR
-    dest_dir.mkdir(parents=True, exist_ok=True)
     committed: list[str] = []
-    for probe in passing:
-        (dest_dir / probe.filename).write_text(probe.source, encoding="utf-8")
-        committed.append(f"{_PROBES_COMMIT_DIR}/{probe.filename}")
+    for result in passing:
+        rel = _probe_commit_path(result)
+        dest = Path(repo_dir) / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(result.probe.source, encoding="utf-8")
+        committed.append(rel)
 
-    run_cmd(["git", "add", _PROBES_COMMIT_DIR], label="review-probes-add", cwd=repo_dir)
+    run_cmd(["git", "add", "--", *committed], label="review-probes-add", cwd=repo_dir)
     unchanged = run_cmd(
-        ["git", "diff", "--cached", "--quiet", "--exit-code", "--", _PROBES_COMMIT_DIR],
+        ["git", "diff", "--cached", "--quiet", "--exit-code", "--", *committed],
         label="review-probes-diff-check",
         cwd=repo_dir,
         check=False,
@@ -215,47 +234,61 @@ def _merge_probes(fresh: list[Probe], carried: list[Probe]) -> list[Probe]:
     by filename so a fresh probe that happens to reuse a carried filename
     wins (it's presumably a deliberate rewrite, not a collision).
     """
-    merged = {p.filename: p for p in carried}
-    merged.update({p.filename: p for p in fresh})
+    merged = {p.key: p for p in carried}
+    merged.update({p.key: p for p in fresh})
     return list(merged.values())
 
 
-def _snapshot_dir(path: Path) -> dict[str, bytes]:
-    """Every file under ``path``, repo-relative to it, for tamper detection.
+def _protected_probe_dirs(probe_results: list[ProbeResult], committed: list[str]) -> list[str]:
+    """Repo-relative directories the fixer may not touch.
+
+    ``tests/review_probes/`` always, plus (#69) every package's JS/TS probe
+    directory a probe ran in or was committed to.
+    """
+    dirs = {_PROBES_COMMIT_DIR}
+    dirs.update(str(PurePosixPath(r.run_path).parent) for r in probe_results if r.run_path)
+    dirs.update(str(PurePosixPath(p).parent) for p in committed)
+    return sorted(dirs)
+
+
+def _snapshot_dirs(repo: Path, rel_dirs: list[str]) -> dict[str, bytes]:
+    """Every file under ``rel_dirs``, keyed repo-relative, for tamper detection.
 
     Excludes ``__pycache__``: running the committed probes (the fixer's own
     build/test invocation, or this module's own ``run_probes``) recompiles
     their bytecode as a side effect, which is cache churn, not the fixer
     editing or deleting a probe (seen for real in a live demo run).
     """
-    if not path.is_dir():
-        return {}
-    return {
-        str(p.relative_to(path)): p.read_bytes()
-        for p in sorted(path.rglob("*"))
-        if p.is_file() and "__pycache__" not in p.relative_to(path).parts
-    }
+    snapshot: dict[str, bytes] = {}
+    for rel_dir in rel_dirs:
+        path = repo / rel_dir
+        if not path.is_dir():
+            continue
+        for p in sorted(path.rglob("*")):
+            if p.is_file() and "__pycache__" not in p.relative_to(path).parts:
+                snapshot[p.relative_to(repo).as_posix()] = p.read_bytes()
+    return snapshot
 
 
-def _restore_and_diff(path: Path, snapshot: dict[str, bytes]) -> list[str]:
-    """Restore ``path`` to ``snapshot``; return the paths that had to change.
+def _restore_and_diff(repo: Path, rel_dirs: list[str], snapshot: dict[str, bytes]) -> list[str]:
+    """Restore ``rel_dirs`` to ``snapshot``; return the repo-relative paths that had to change.
 
     Amendment 1: the fixer must not edit or delete the committed probes.
     This is the deterministic enforcement — a git-diff-and-revert step, not
     just the Cedar rule (which cannot see a Bash-written file at all).
     """
-    current = _snapshot_dir(path)
+    current = _snapshot_dirs(repo, rel_dirs)
     touched: set[str] = set()
     for rel, content in snapshot.items():
         if current.get(rel) != content:
             touched.add(rel)
-            (path / rel).parent.mkdir(parents=True, exist_ok=True)
-            (path / rel).write_bytes(content)
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel).write_bytes(content)
     for rel in current:
         if rel not in snapshot:
             touched.add(rel)
-            (path / rel).unlink(missing_ok=True)
-    return sorted(f"{_PROBES_COMMIT_DIR}/{rel}" for rel in touched)
+            (repo / rel).unlink(missing_ok=True)
+    return sorted(touched)
 
 
 def _commit_fixer_changes(repo_dir: str) -> None:
@@ -455,14 +488,14 @@ def _run_fixer(
     issue_text: str,
     findings: list[Finding],
     failing_probes: list[ProbeResult],
-    probes_dir: Path,
+    protected_dirs: list[Path],
 ) -> None:
     """Run the fixer against the coder's checkout (Task 5 amendment 3).
 
     Full coder-shaped access (the same tools, the same model) to the same
     ``setup.repo_dir`` — unlike the two reviewer calls, this one mutates the
     code. ``protected_write_roots`` is the Cedar defense-in-depth layer
-    (amendment 1); the caller still snapshots/reverts ``probes_dir`` itself,
+    (amendment 1); the caller still snapshots/reverts ``protected_dirs`` itself,
     since a Bash-written file never reaches that rule at all.
     """
     remaining = ledger.remaining_budget(config.max_budget_usd)
@@ -479,7 +512,7 @@ def _run_fixer(
             "policy_principal": "fixer",
             "allowed_read_roots": None,
             "scratch_write_root": None,
-            "protected_write_roots": [str(probes_dir)],
+            "protected_write_roots": [str(d) for d in protected_dirs],
         }
     )
     user_prompt = fixer_user_prompt(issue_text, findings, failing_probes)
@@ -546,11 +579,11 @@ def _run_one_round(
         )
 
     probes = _merge_probes(fresh_probes, carried_probes)
-    probe_results: list[ProbeResult] = []
-    if probes:
-        probe_results = run_probes(probes, setup.repo_dir)
-        passed = sum(1 for r in probe_results if r.passed)
-        _milestone(progress, "review_probes_run", f"count={len(probe_results)} passed={passed}")
+    probe_results = run_probes(probes, setup.repo_dir)
+    # Always emitted (#69), even for zero probes, so "nothing ran" is visible
+    # rather than inferred from a missing event. Not-runnable probes are their
+    # own count: neither passed nor failed.
+    _milestone(progress, "review_probes_run", _probe_counts(probe_results))
 
     try:
         outcome = _run_code_reviewer(
@@ -606,6 +639,13 @@ def _run_one_round(
         stale_sha=stale_sha,
         reverted_probe_paths=reverted_probe_paths,
     )
+
+
+def _probe_counts(probe_results: list[ProbeResult]) -> str:
+    passed = sum(1 for r in probe_results if r.passed)
+    failed = sum(1 for r in probe_results if r.failed)
+    not_runnable = sum(1 for r in probe_results if not r.runnable)
+    return f"count={len(probe_results)} passed={passed} failed={failed} not_runnable={not_runnable}"
 
 
 def run_review_and_fix(
@@ -678,8 +718,9 @@ def run_review_and_fix(
             parse_error=round_outcome.parse_error,
         )
 
-    probes_dir = Path(setup.repo_dir) / _PROBES_COMMIT_DIR
+    repo = Path(setup.repo_dir)
     rounds: list[RoundOutcome] = []
+    committed_so_far: list[str] = []
     carried_probes: list[Probe] = []
     reverted_paths: list[str] = []
     stopped_reason: str | None = None
@@ -702,12 +743,15 @@ def run_review_and_fix(
         )
         rounds.append(round_outcome)
         reverted_paths = []
-        failed_count = sum(1 for r in round_outcome.probe_results if not r.passed)
+        committed_so_far.extend(round_outcome.committed_probe_paths)
+        failed_count = sum(1 for r in round_outcome.probe_results if r.failed)
+        not_runnable_count = sum(1 for r in round_outcome.probe_results if not r.runnable)
         _milestone(
             progress,
             "review_round",
             f"round {round_number}: verdict={round_outcome.verdict} "
-            f"findings={len(round_outcome.findings)} probes_failed={failed_count}",
+            f"findings={len(round_outcome.findings)} probes_failed={failed_count} "
+            f"probes_not_runnable={not_runnable_count}",
         )
 
         if round_outcome.verdict == "READY":
@@ -723,10 +767,11 @@ def run_review_and_fix(
         carried_probes = [
             r.probe
             for r in round_outcome.probe_results
-            if not r.passed and r.probe.filename not in round_outcome.invalid_probes
+            if r.failed and r.probe.filename not in round_outcome.invalid_probes
         ]
-        failing_probes = [r for r in round_outcome.probe_results if not r.passed]
-        snapshot = _snapshot_dir(probes_dir)
+        failing_probes = [r for r in round_outcome.probe_results if r.failed]
+        protected = _protected_probe_dirs(round_outcome.probe_results, committed_so_far)
+        snapshot = _snapshot_dirs(repo, protected)
         try:
             _run_fixer(
                 config=config,
@@ -737,11 +782,11 @@ def run_review_and_fix(
                 issue_text=issue_text,
                 findings=round_outcome.findings,
                 failing_probes=failing_probes,
-                probes_dir=probes_dir,
+                protected_dirs=[repo / d for d in protected],
             )
         except Exception as e:
             log("WARN", f"review_and_fix: fixer phase failed (round {round_number}): {e}")
-        reverted_paths = _restore_and_diff(probes_dir, snapshot)
+        reverted_paths = _restore_and_diff(repo, protected, snapshot)
         if reverted_paths:
             log(
                 "WARN",
