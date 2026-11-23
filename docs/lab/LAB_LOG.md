@@ -748,9 +748,29 @@ Merged and deployed; the coding and research smoke tests both passed afterwards.
 
 - `known-good-task14` at `60d18bf` (#65's merge): Task 14 complete, with the routing (#63) and Jira lifecycle (#65) fixes.
 - `known-good-task14b` at `0ce4bcc` (#67's merge): the same plus the refreshed agent image, deployed and smoke-tested.
+- `known-good-task14c` at `fe36819` (#68's merge): the same plus the `allowed_tools` hard-deny (§9), deployed and verified.
+
+### 9. `allowed_tools` is enforced (#62 / #68)
+
+- **Hard-deny:** a new built-in Cedar rule, `tool_outside_allowed_tools`, denies any tool outside a workflow's declared `allowed_tools` ([ADR-030 (fork)](../decisions/ADR-030-fork-allowed-tools-hard-deny.md)). The list travels in the Cedar request context. `--pre-approve` can't bypass the rule, and a blueprint `disable:` can't remove it. With no declared list the rule stays dormant. The runner also hides the known SDK tools outside the list from the model.
+- **Platform tools:** an explicit list of exact names, no patterns, allowed in every workflow: `ToolSearch`, `TodoWrite`, `mcp__abca__request_clarification`, `mcp__abca_gateway__repo_config` (`policy.PLATFORM_TOOLS`).
+- **Coding lists:** unchanged. They were checked against the tool calls of the last 41 coding tasks, which used only listed tools or platform tools.
+- **Review calls held to their declared lists:**
+  - The probe writer keeps `[Read, Glob, Grep, Write]`. It had been running Bash in 22 of 23 adversarial runs, which also got around its ADR-025 path confinement.
+  - The code reviewer keeps `[Read, Glob, Grep]`.
+- **Verified:** merged, deployed, and checked on task `01M83JHCQ68D4ETPV9KD446ZJ7` (factory-shop PR #42). There were no policy denials and the coding path was unchanged.
+
+### 10. Finding: JavaScript probes are never run (#69)
+
+- **What we saw:** on factory-shop's React/Vitest frontend, the probe writer writes `.jsx` probes. On `01M83JHCQ68D4ETPV9KD446ZJ7` it wrote four `test_continue_shopping_*.jsx` files. None of them ran: there was no `review_probes_run` event, and the round reported `probes_failed=0`.
+- **Effect:** factory-shop PRs #12, #13, #30 and #42 show reviewer findings only, with no probe results.
+- **Cause:** `review/probes.py::collect_probes` only picks up `test_*.py` files, and `run_probes` only knows how to run `pytest`. Any other probe is dropped without a warning.
+- **Proposed fix ([#69](https://github.com/karlbaria/autonomous-agents-factory/issues/69), not implemented yet):** run JS/TS probes with the repo's own runner (`npx vitest run` in the probe's package directory, named `*.test.jsx` so Vitest finds them). Report "probes written but not runnable" explicitly instead of saying nothing.
 
 ### Open items
 
-- [#62](https://github.com/karlbaria/autonomous-agents-factory/issues/62): enforce a workflow's `allowed_tools` with a Cedar hard-deny. The demo agent ran `Bash` despite `web-research-v1`'s `[Read, Glob, Grep, WebFetch]`, because the SDK's allow-list only auto-approves. Must land before Task 15's repo-aware, read-only planning workflow.
+- ~~[#62](https://github.com/karlbaria/autonomous-agents-factory/issues/62): enforce a workflow's `allowed_tools` with a Cedar hard-deny.~~ Done in #68 (§9).
+- [#69](https://github.com/karlbaria/autonomous-agents-factory/issues/69): run JS/TS review probes and report probes that can't run (§10).
+- **Probe quality without Bash.** The owner will compare the invalid-probe rate of an adversarial run with recent runs. If it rises sharply, the fix is a narrow allowance (for example, one `py_compile` check), not general Bash.
 - **No "accept edits as baseline" for research pages.** Once a human edits a factory page, every later run skips it with `human_edit_detected`. There's no way to tell the factory "take the current version as the new baseline and keep updating". Task 15's Revise flow needs that for planning docs anyway.
 - **Workflow selection from Slack (§6).** Research tasks are API/CLI-only until Slack can choose a workflow.
