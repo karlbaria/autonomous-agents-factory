@@ -139,6 +139,21 @@ function linearVaultWorkloadName(stack: Stack): string {
 }
 
 /** Properties for {@link AgentStack}. */
+
+/**
+ * Daily OS-package refresh for the agent image (#66). ``APT_REFRESH`` busts
+ * the Docker layer cache of the Dockerfile's ``apt-get upgrade`` layer once a
+ * day, so a rebuilt image picks up Debian's security fixes even though the
+ * base digest is pinned. Build args are excluded from the asset hash
+ * (``invalidation.buildArgs: false``): the date never changes the template or
+ * forces a redeploy on its own — CDK still rebuilds only when the image's
+ * source changes, and that rebuild then gets the current day's packages.
+ */
+const AGENT_IMAGE_REFRESH_OPTIONS = {
+  buildArgs: { APT_REFRESH: new Date().toISOString().slice(0, 10).replace(/-/g, '') },
+  invalidation: { buildArgs: false },
+} as const;
+
 export interface AgentStackProps extends StackProps {
   /**
    * Availability-zone *names* to pin the AgentCore VPC (and therefore the
@@ -566,7 +581,10 @@ export class AgentStack extends Stack {
     let runtime: agentcore.Runtime | undefined;
     let agentLogGroup: logs.ILogGroup | undefined;
     if (agentCoreEnabled) {
-      const artifact = agentcore.AgentRuntimeArtifact.fromAsset(repoRoot, { file: 'agent/Dockerfile' });
+      const artifact = agentcore.AgentRuntimeArtifact.fromAsset(repoRoot, {
+        file: 'agent/Dockerfile',
+        ...AGENT_IMAGE_REFRESH_OPTIONS,
+      });
       const runtimeEnvironmentVariables = {
         GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
         AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
@@ -1090,6 +1108,7 @@ export class AgentStack extends Stack {
           directory: repoRoot,
           file: 'agent/Dockerfile',
           platform: ecr_assets.Platform.LINUX_ARM64,
+          ...AGENT_IMAGE_REFRESH_OPTIONS,
         }),
         taskTable: taskTable.table,
         taskEventsTable: taskEventsTable.table,
