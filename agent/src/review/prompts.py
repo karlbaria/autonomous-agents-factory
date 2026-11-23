@@ -28,6 +28,11 @@ write anywhere else, and you cannot read anywhere outside this worktree and \
 that scratch directory — do not try.
 - Python code: a pytest file named `test_<name>.py`, directly in the scratch \
 directory.
+- Python probes run with the current working directory set to the repo \
+root, but the probe file itself does not run from the directory you wrote \
+it in. To read a repo file (README, config, fixture), use a path relative to \
+the current working directory, e.g. `Path("README.md")`. Never build paths \
+from `__file__`.
 - JavaScript/TypeScript code: a file named `<name>.test.jsx` (or `.test.js`, \
 `.test.tsx`, `.test.ts`), written for the test runner the package already \
 uses (Vitest or Jest, from its package.json). Put it in a subdirectory of \
