@@ -6,6 +6,7 @@ from review.findings import Finding
 from review.probes import Probe, ProbeResult
 from review.prompts import (
     CODE_REVIEWER_SYSTEM_PROMPT,
+    PROBE_WRITER_SYSTEM_PROMPT,
     code_reviewer_user_prompt,
     fixer_user_prompt,
     probe_writer_user_prompt,
@@ -154,3 +155,11 @@ class TestCodeReviewerSystemPromptInvalidProbes:
         assert "INVALID_PROBES:" in CODE_REVIEWER_SYSTEM_PROMPT
         assert "filename" in CODE_REVIEWER_SYSTEM_PROMPT
         assert "reason" in CODE_REVIEWER_SYSTEM_PROMPT
+
+
+class TestProbeWriterSystemPrompt:
+    def test_tells_python_probes_to_read_repo_files_relative_to_cwd(self):
+        # #74: a probe that built its README path from __file__ missed the file.
+        assert "relative to the current working directory" in PROBE_WRITER_SYSTEM_PROMPT
+        assert 'Path("README.md")' in PROBE_WRITER_SYSTEM_PROMPT
+        assert "Never build paths from `__file__`" in PROBE_WRITER_SYSTEM_PROMPT

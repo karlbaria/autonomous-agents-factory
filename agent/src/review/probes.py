@@ -8,8 +8,9 @@ probe is never left to a model's self-report.
 
 Two kinds of probe run (#69):
 
-- **Python** (``test_*.py``) — ``pytest`` from a temp directory at the repo
-  root, as before.
+- **Python** (``test_*.py``) — ``pytest``, with the probe in a temp directory
+  inside the repo and cwd and ``--rootdir`` both the repo root (#74), so a
+  probe opens repo files with cwd-relative paths, never via ``__file__``.
 - **JavaScript / TypeScript** (``.js``/``.jsx``/``.ts``/``.tsx``) — the
   probe's package's own test runner (Vitest, else Jest, from its
   ``package.json``). The probe is copied temporarily into the package
@@ -191,8 +192,13 @@ def _run_pytest_probe(probe: Probe, repo_dir: str, tmp_dir: Path, timeout_s: int
         # sys.executable -m pytest always 404s there. PATH resolution
         # finds the TARGET REPO's pytest instead — mise shims it after
         # the repo's own build step installs it.
+        #
+        # cwd and --rootdir are both the repo root, on purpose (#74): the
+        # probe file itself sits in a temp subdirectory, so the probe writer
+        # is told to open repo files relative to cwd (``Path("README.md")``),
+        # never via ``__file__``. Don't move cwd to tmp_dir.
         passed, output = _run(
-            ["pytest", str(probe_path), "-q"],
+            ["pytest", str(probe_path), "-q", f"--rootdir={repo_dir}"],
             f"review-probe:{probe.filename}",
             repo_dir,
             timeout_s,

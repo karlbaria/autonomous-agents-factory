@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
+import review.probes as probes_mod
 from review.probes import Probe, collect_probes, run_probes
 
 
@@ -93,3 +95,51 @@ class TestRunProbes:
         )
         results = run_probes([probe], str(tmp_path))
         assert results[0].passed is False
+
+
+class TestPythonProbeWorkingDirectory:
+    """#74: Python probes run with cwd and --rootdir at the repo root."""
+
+    def test_probe_reads_repo_file_relative_to_cwd(self, tmp_path):
+        (tmp_path / "README.md").write_text("Free shipping over $50\n", encoding="utf-8")
+        probe = Probe(
+            id="readme",
+            intent="README states the free-shipping threshold",
+            filename="test_readme_free_shipping.py",
+            source=(
+                "from pathlib import Path\n\n"
+                "def test_readme_free_shipping():\n"
+                '    assert "$50" in Path("README.md").read_text()\n'
+            ),
+        )
+        results = run_probes([probe], str(tmp_path))
+        assert results[0].passed is True, results[0].output
+
+    def test_probe_cwd_is_repo_root(self, tmp_path):
+        probe = Probe(
+            id="cwd",
+            intent="cwd is the repo root",
+            filename="test_cwd.py",
+            source=(
+                "from pathlib import Path\n\n"
+                "def test_cwd():\n"
+                f"    assert Path.cwd().resolve() == Path({str(tmp_path)!r}).resolve()\n"
+            ),
+        )
+        results = run_probes([probe], str(tmp_path))
+        assert results[0].passed is True, results[0].output
+
+    def test_pytest_command_pins_rootdir_and_cwd(self, tmp_path, monkeypatch):
+        calls: list[tuple[list[str], str]] = []
+
+        def fake_run_cmd(cmd, *, label, cwd, timeout, check):
+            calls.append((cmd, cwd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(probes_mod, "run_cmd", fake_run_cmd)
+        probe = Probe(id="p", intent="x", filename="test_p.py", source="def test_p():\n    pass\n")
+        run_probes([probe], str(tmp_path))
+        cmd, cwd = calls[0]
+        assert cmd[0] == "pytest"
+        assert f"--rootdir={tmp_path}" in cmd
+        assert cwd == str(tmp_path)
