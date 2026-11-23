@@ -1,0 +1,28 @@
+{
+  "name": "allowed-tools-dormant-without-list",
+  "description": "#62: when context OMITS allowed_tools (no workflow list declared \u2014 legacy/batch callers), the `context has allowed_tools` guard is false and the rule does not fire, with no evaluation error: both engines allow. This is the intended dormant path, not a fail-open.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"hard\") @rule_id(\"tool_outside_allowed_tools\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource) when { context has allowed_tools && !(context.allowed_tools.contains(context.tool_name)) };",
+  "input": {
+    "principal": {
+      "type": "Agent::TaskAgent",
+      "id": "new_task"
+    },
+    "action": {
+      "type": "Agent::Action",
+      "id": "invoke_tool"
+    },
+    "resource": {
+      "type": "Agent::Tool",
+      "id": "Bash"
+    },
+    "context": {
+      "read_only": false
+    }
+  },
+  "expected": {
+    "decision": "allow",
+    "matching_rule_ids": [
+      "base_permit"
+    ]
+  }
+}

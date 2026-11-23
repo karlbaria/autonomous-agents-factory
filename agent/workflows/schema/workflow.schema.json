@@ -100,7 +100,7 @@
         },
         "allowed_tools": {
           "type": "array",
-          "description": "Built-in tools exposed to the agent SDK (Bash, Read, Write, Edit, Glob, Grep, WebFetch). Cedar still gates per-call. read_only workflows must exclude Write/Edit. Replaces the hardcoded list in runner.py.",
+          "description": "The tools the agent may call (Bash, Read, Write, Edit, Glob, Grep, WebFetch, or an exact MCP tool name). Enforced: the Cedar hard-deny tool_outside_allowed_tools forbids any other tool except the platform tools (policy.PLATFORM_TOOLS), and Cedar still gates each allowed call. read_only workflows must exclude Write/Edit. See ADR-030.",
           "items": { "type": "string" },
           "uniqueItems": true
         },

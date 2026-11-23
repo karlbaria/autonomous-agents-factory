@@ -46,7 +46,13 @@ class Call(NamedTuple):
     # keys off this PolicyEngine constructor option — None for every row
     # except the one that exists for it.
     protected_write_roots: tuple[str, ...] | None = None
+    # #62: the workflow's declared agent_config.allowed_tools — None for every
+    # row except the ones for tool_outside_allowed_tools.
+    allowed_tools: tuple[str, ...] | None = None
 
+
+# knowledge/web-research-v1's declared list (agent/workflows/knowledge/).
+_WEB_RESEARCH_TOOLS = ("Read", "Glob", "Grep", "WebFetch")
 
 # rule id -> (tier, calls it must catch, a similar call it must leave alone)
 #
@@ -66,6 +72,19 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
         "hard",
         [Call("Edit", "src/main.py", read_only=True)],
         Call("Edit", "src/main.py"),
+    ),
+    "tool_outside_allowed_tools": (
+        "hard",
+        [
+            Call("Bash", "git log --oneline", allowed_tools=_WEB_RESEARCH_TOOLS),
+            Call("Bash", "cat README.md", allowed_tools=_WEB_RESEARCH_TOOLS),
+            Call("Write", "notes.md", allowed_tools=_WEB_RESEARCH_TOOLS),
+            Call("Edit", "src/main.py", allowed_tools=_WEB_RESEARCH_TOOLS),
+            Call("NotebookEdit", "analysis.ipynb", allowed_tools=_WEB_RESEARCH_TOOLS),
+            # A repo .mcp.json tool: not in any list, not a platform tool.
+            Call("mcp__repo-server__query", "", allowed_tools=_WEB_RESEARCH_TOOLS),
+        ],
+        Call("Read", "README.md", allowed_tools=_WEB_RESEARCH_TOOLS),
     ),
     "rm_slash": (
         "hard",
@@ -231,9 +250,10 @@ def _decide(call: Call, task_type: str = "new_task") -> PolicyDecision:
         protected_write_roots=(
             list(call.protected_write_roots) if call.protected_write_roots else None
         ),
+        allowed_tools=list(call.allowed_tools) if call.allowed_tools else None,
     )
     key = "command" if call.tool == "Bash" else "file_path"
-    return engine.evaluate_tool_use(call.tool, {key: call.target})
+    return engine.evaluate_tool_use(call.tool, {key: call.target} if call.target else {})
 
 
 def _rules_behind(decision: PolicyDecision) -> list[str]:

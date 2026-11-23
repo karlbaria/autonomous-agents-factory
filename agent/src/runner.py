@@ -38,6 +38,7 @@ from clarification_tool import (
 from config import AGENT_WORKSPACE
 from gateway_tools import GATEWAY_SERVER_NAME, build_gateway_server
 from models import AgentResult, TaskConfig, TokenUsage
+from policy import PLATFORM_TOOLS
 from progress_writer import _ProgressWriter
 from shell import log, log_error_cw, truncate
 from telemetry import _TrajectoryWriter
@@ -291,6 +292,9 @@ def _initialize_policy_engine_and_hooks(
         allowed_read_roots=config.allowed_read_roots,
         scratch_write_root=config.scratch_write_root,
         protected_write_roots=config.protected_write_roots,
+        # #62: arms the `tool_outside_allowed_tools` hard-deny. Empty (no
+        # workflow list) leaves it dormant — see policy.effective_allowed_tools.
+        allowed_tools=list(config.allowed_tools) or None,
         **engine_kwargs,
     )
     # Surface the resolved cap + its source so operators can distinguish a
@@ -394,6 +398,65 @@ _DISALLOWED_TOOLS = [
 ]
 
 
+# #62 second layer: the SDK built-in tools the pinned Claude Code CLI ships
+# (beyond _DISALLOWED_TOOLS). When a workflow declares ``allowed_tools``, every
+# name here that is outside the effective list is also passed to
+# ``disallowed_tools`` so the model never sees it. The Cedar rule
+# ``tool_outside_allowed_tools`` stays the enforcement of record: this catalog
+# only knows the names written into it, while the rule denies any name (an MCP
+# tool from a repo's ``.mcp.json``, a tool a newer CLI adds).
+_KNOWN_SDK_TOOLS = (
+    "AskUserQuestion",
+    "Bash",
+    "BashOutput",
+    "Edit",
+    "EnterPlanMode",
+    "EnterWorktree",
+    "ExitPlanMode",
+    "ExitWorktree",
+    "Glob",
+    "Grep",
+    "KillShell",
+    "LSP",
+    "ListMcpResourcesTool",
+    "MultiEdit",
+    "NotebookEdit",
+    "NotebookRead",
+    "Read",
+    "ReadMcpResourceTool",
+    "Skill",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
+    "TaskUpdate",
+    "TodoWrite",
+    "ToolSearch",
+    "WebFetch",
+    "WebSearch",
+    "Write",
+)
+
+
+def _resolve_disallowed_tools(config: TaskConfig) -> list[str]:
+    """Resolve the SDK ``disallowed_tools`` (hidden from the model) list.
+
+    Always :data:`_DISALLOWED_TOOLS`. When the workflow declares
+    ``allowed_tools`` (#62), also every :data:`_KNOWN_SDK_TOOLS` name outside
+    the SDK surface :func:`_resolve_allowed_tools` returns and outside
+    ``PLATFORM_TOOLS`` — so a workflow without ``Bash`` in its list never shows
+    ``Bash``, and a read-only one never shows ``Write``/``Edit``. An empty list
+    (legacy/batch callers) hides nothing more than today.
+    """
+    hidden = list(_DISALLOWED_TOOLS)
+    if not config.allowed_tools:
+        return hidden
+    surface = set(_resolve_allowed_tools(config)) | PLATFORM_TOOLS
+    hidden.extend(t for t in _KNOWN_SDK_TOOLS if t not in surface and t not in hidden)
+    return hidden
+
+
 def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
     """Resolve the SDK ``allowed_tools`` (auto-approve) list for a task.
 
@@ -406,13 +469,13 @@ def _resolve_allowed_tools(config: TaskConfig) -> list[str]:
     IMPORTANT: this list only governs auto-approval, NOT the reachable surface.
     Per the Agent SDK, a tool omitted here is not blocked — it falls through to
     ``permission_mode`` (``bypassPermissions`` ⇒ allowed). The actual surface
-    lock is ``_DISALLOWED_TOOLS`` passed to ``disallowed_tools``. NOTE the Cedar
-    PreToolUse hooks are NOT a backstop for an unknown tool name: the engine
-    default-permits on no-match (``policy.py``), so it only denies the specific
-    actions it has ``forbid`` rules for (e.g. Write/Edit under read_only) —
-    ``Workflow``/``Task``/``Agent`` match nothing and would be allowed. So
-    ``disallowed_tools`` is the ONLY thing keeping them out; do not rely on this
-    allow-list, nor on Cedar, to remove a tool from the surface.
+    lock is ``disallowed_tools`` (:func:`_resolve_disallowed_tools`) plus, when
+    the workflow declares a list, the Cedar hard-deny ``tool_outside_allowed_tools``
+    (#62), which the runner arms by passing the same declared list to
+    ``PolicyEngine``. Without a declared list Cedar is NOT a backstop for an
+    unknown tool name: the engine default-permits on no-match (``policy.py``),
+    so ``Workflow``/``Task``/``Agent`` would be allowed and ``disallowed_tools``
+    is the only thing keeping them out.
     """
     tools = list(config.allowed_tools) if config.allowed_tools else list(_FULL_TOOL_SURFACE)
     if config.read_only:
@@ -622,8 +685,10 @@ async def run_agent(  # noqa: C901 -- 37 when the ceiling of 15 was set; must no
         # Hard surface lock (NOT allowed_tools — that is auto-approve only). Keeps
         # off-session/defer vectors out of the model's context even under
         # bypassPermissions, so a one-shot headless task cannot launch detached
-        # work it has no supervisor to await. See _DISALLOWED_TOOLS.
-        disallowed_tools=list(_DISALLOWED_TOOLS),
+        # work it has no supervisor to await. See _DISALLOWED_TOOLS. With a
+        # workflow tool list it also hides every known tool outside it (#62);
+        # the Cedar hard-deny is the enforcement of record.
+        disallowed_tools=_resolve_disallowed_tools(config),
         permission_mode="bypassPermissions",
         cwd=cwd,
         max_turns=config.max_turns,

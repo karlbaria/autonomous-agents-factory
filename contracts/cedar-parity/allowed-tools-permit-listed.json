@@ -1,0 +1,39 @@
+{
+  "name": "allowed-tools-permit-listed",
+  "description": "#62: a tool inside context.allowed_tools (Read) is not caught by tool_outside_allowed_tools; the base permit wins. Locks against a catch-all regression.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"hard\") @rule_id(\"tool_outside_allowed_tools\")\nforbid (principal, action == Agent::Action::\"invoke_tool\", resource) when { context has allowed_tools && !(context.allowed_tools.contains(context.tool_name)) };",
+  "input": {
+    "principal": {
+      "type": "Agent::TaskAgent",
+      "id": "new_task"
+    },
+    "action": {
+      "type": "Agent::Action",
+      "id": "invoke_tool"
+    },
+    "resource": {
+      "type": "Agent::Tool",
+      "id": "Read"
+    },
+    "context": {
+      "read_only": false,
+      "allowed_tools": [
+        "Glob",
+        "Grep",
+        "Read",
+        "TodoWrite",
+        "ToolSearch",
+        "WebFetch",
+        "mcp__abca__request_clarification",
+        "mcp__abca_gateway__repo_config"
+      ],
+      "tool_name": "Read"
+    }
+  },
+  "expected": {
+    "decision": "allow",
+    "matching_rule_ids": [
+      "base_permit"
+    ]
+  }
+}
