@@ -185,6 +185,58 @@ def _assert_clone_root(repo_dir: str) -> None:
         )
 
 
+# Push URL set on a context-only clone so any ``git push`` fails fast instead of
+# reaching GitHub (#61). Not a valid URL scheme on purpose.
+CONTEXT_CLONE_PUSH_URL = "no-push://context-only-clone"
+
+
+def clone_for_context(config: TaskConfig, progress: Any = None) -> RepoSetup:
+    """Shallow, read-only clone of the task's repo, for context only (#61).
+
+    For a ``knowledge`` workflow that was given a repo: the agent may read the
+    repository, but the task produces an artifact, not a change. So, unlike
+    :func:`setup_repo`: no branch, no ``mise install``, no baseline build or
+    lint, and a depth-1 clone. The push URL is replaced with
+    :data:`CONTEXT_CLONE_PUSH_URL`, so a push fails instead of reaching GitHub;
+    the caller also removes the GitHub token from the environment once the
+    clone exists. Raises on a failed clone, like :func:`setup_repo`; the caller
+    decides whether to continue without the checkout.
+    """
+    repo_dir = f"{AGENT_WORKSPACE}/{config.task_id}"
+    notes: list[str] = ["read-only context clone: no branch, no build, push disabled"]
+    _prepare_clone_dir(repo_dir, notes)
+    run_cmd(
+        ["git", "config", "--global", "--add", "safe.directory", repo_dir],
+        label="safe-directory",
+    )
+    log("SETUP", f"Cloning {config.repo_url} (read-only context, depth 1)...")
+    clone_result = run_cmd_with_backoff(
+        ["gh", "repo", "clone", config.repo_url, repo_dir, "--", "--depth", "1"],
+        label="clone",
+        on_retry=_clone_backoff_reporter(progress, "clone"),
+    )
+    if clone_result.returncode != 0:
+        _fail_setup_command("clone", config.repo_url, clone_result.stderr, progress)
+    _assert_clone_root(repo_dir)
+    push_off = run_cmd(
+        ["git", "-C", repo_dir, "remote", "set-url", "--push", "origin", CONTEXT_CLONE_PUSH_URL],
+        label="disable-push",
+        check=False,
+    )
+    if push_off.returncode != 0:
+        raise RuntimeError(
+            "could not disable pushes on the read-only context clone; refusing to "
+            "hand the agent a pushable checkout"
+        )
+    return RepoSetup(
+        repo_dir=repo_dir,
+        branch="",
+        notes=notes,
+        build_before=True,
+        lint_before=True,
+    )
+
+
 def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: C901 -- 28 when the ceiling of 15 was set; must not grow
     """Clone repo, create branch, configure git auth, run mise install.
 
