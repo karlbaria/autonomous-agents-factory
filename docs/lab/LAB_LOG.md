@@ -670,3 +670,87 @@ Tags the completed Task 17: the `factory/review` status ([#47](https://github.co
 ## Housekeeping: removed the unused Linear feature (#53)
 
 Confirmed read-only against the live `backgroundagent-dev-factory` stack that Linear was never connected since Task 2 deployed it: zero Linear workspace registry entries, zero project mappings, zero of 35 tasks with `channel_source: linear`. Set `"linear": false` in `abca.deployment.backgroundagent-dev-factory.json` ([#54](https://github.com/karlbaria/autonomous-agents-factory/pull/54)). `cdk:diff` showed 35 net resources removed (4 Linear DynamoDB tables, the Linear webhook secret, the Linear Cognito authorizer, 4 Linear Lambda functions with their IAM roles/policies, and every `/linear/*` API Gateway resource, plus version-churn on the orchestrator Lambda, the API deployment, and the Bedrock guardrail — all traced to Linear in code, not just by name). Merged and deployed: the stack is now at **440/490 resources** (was 475), and a Slack smoke test passed post-deploy. Closes [#53](https://github.com/karlbaria/autonomous-agents-factory/issues/53); the nested-stack-split half of that issue stays tracking-only unless the limit is approached again.
+
+## Task 14: Confluence publishing for generated documentation
+
+A `knowledge/web-research-v1` task run against a mapped repo now writes its report to a Confluence page in that repo's space. A second run updates the same page, and a page someone has edited by hand is left alone with a visible reason. The auto-tracked Jira card moves To Do → In Progress → Done, and its final comment links the page. Shipped in six PRs: three under [#57](https://github.com/karlbaria/autonomous-agents-factory/issues/57) and one for each of three follow-up issues found by the demo and the image scan.
+
+### 1. What shipped
+
+- **[#58](https://github.com/karlbaria/autonomous-agents-factory/pull/58) (PR 1): auth and mapping.**
+  - `bgagent confluence setup` widens the existing Jira OAuth app's consent to Confluence's scopes. It reuses the stored client credentials in the same `bgagent-jira-oauth-<cloudId>` secret.
+  - `bgagent confluence map` writes the repo → space/parent-page mapping.
+  - [ADR-029 (fork)](../decisions/ADR-029-fork-confluence-auth-extends-jira-oauth-app.md) records the decisions: one Atlassian app, no Forge actor for Confluence, and a label (not a title prefix) for draft/final.
+- **[#59](https://github.com/karlbaria/autonomous-agents-factory/pull/59) (PR 2a): agent side.**
+  - A hand-rolled markdown → Confluence storage-format converter. It XHTML-escapes all text and splits `]]>` inside code blocks so they can't close their CDATA section early.
+  - A small Confluence v2 client (space lookup, find/create/update/delete page, labels, the `factory.lastWrittenVersion` content property, and read-back for Task 15).
+  - The `confluence` / `s3_and_confluence` deliverers with the ownership guard (`factory-generated` label) and human-edit detection.
+  - `resolve_confluence_oauth_token`: read-only and fails closed, sharing one secret-reading helper with the Jira resolver.
+- **[#60](https://github.com/karlbaria/autonomous-agents-factory/pull/60) (PR 2b): platform side.**
+  - The orchestrator stamps the mapping and the tenant's secret ARN into the agent payload's `channel_metadata`.
+  - The fan-out Lambda warms the token on `task_created`, only for workflows that publish to Confluence.
+  - Skip reasons show up in `bgagent status` and the Slack completion message.
+  - New target `s3_comment_and_confluence`, whose comment leads with the page link or the skip reason; `web-research-v1` switched to it.
+  - `bgagent jira setup` no longer drops Confluence scopes on a rerun (`--drop-confluence` opts out).
+- **[#63](https://github.com/karlbaria/autonomous-agents-factory/pull/63) ([#61](https://github.com/karlbaria/autonomous-agents-factory/issues/61)):** the knowledge-path routing fix (§3).
+- **[#65](https://github.com/karlbaria/autonomous-agents-factory/pull/65) ([#64](https://github.com/karlbaria/autonomous-agents-factory/issues/64)):** the Jira lifecycle and comment fixes (§4).
+- **[#67](https://github.com/karlbaria/autonomous-agents-factory/pull/67) ([#66](https://github.com/karlbaria/autonomous-agents-factory/issues/66)):** the agent image refresh (§5).
+
+### 2. Design pivots made during implementation
+
+- **Mapping on `RepoConfig`, not a new table.** The planned `ConfluenceSpaceMappingTable` added one root-stack resource. Two synthetic CDK census stress profiles were already at CloudFormation's 490-resource ceiling, and one more resource tipped them over (the real stack has about 50 spare). The mapping became three optional fields on the existing RepoConfig row (`confluence_cloud_id`, `confluence_space_key`, `confluence_parent_page_id`), the same pattern Task 13 used for `default_workflow`: zero new resources.
+- **`confluence_space_id` → `confluence_space_key`.** The field holds the operator-entered space key (`SD`), not Confluence's numeric space id, which the agent resolves at publish time. Renamed in #59 before anything was deployed or written.
+- **Granular v2 scopes, six of them.** Confluence's v2 API rejects the classic content scopes, so the app uses `read:page`/`write:page`, `read:space`, `read:label`/`write:label` and, added in #59, `delete:page`. Labels are written through the v1 endpoint, because v2 has no label write.
+- **Label-or-delete after create.** A page the factory creates but fails to label would block every later run as an `ownership_clash`. Labelling (and the version marker) is retried once; if it fails again, the new page is deleted. This is what `delete:page` is for.
+- **45-minute token-warming window.** Warming at task start with the resolver's default 60-second threshold meant a task that started with a few minutes of token life left would always skip Confluence. The warm call now refreshes if the token expires within 45 minutes (`refreshThresholdSeconds`, still not `forceRefresh`). The agent's own read-side check stays at 60 seconds. With hour-long Atlassian tokens this refreshes at most about every 15 minutes, not the "about once an hour" first assumed.
+
+### 3. Knowledge-path bug: a repo sent research down the coding path (#61)
+
+The first demo (`01M830XPP5T3M5TPSRF9TPVVZ1`, `web-research-v1 --repo karlbaria/factory-shop`, where the repo is only there so the mapping resolves) ended FAILED with `deliverable=lost`, and no page was published.
+
+- **What happened:** with a repo set, `pipeline.run_task` took the coding path (clone + branch, only `run_agent` through the workflow runner). `deliver_artifact` was skipped without any error, and the delivery gate then failed the task for having no PR.
+- **Why the obvious fix was wrong:** ADR-029 assumed a `requires_repo: false` workflow could carry a repo purely for lookup. Routing on `requires_repo` alone would have broken `default/agent-v1`, which upstream deliberately clones and PRs when given a repo. `domain` is what tells them apart (`knowledge` vs `hybrid`).
+- **The fix:** a `knowledge` workflow given a repo now runs its full step list with a **read-only context clone**: depth 1, no branch, no build, push URL disabled. The agent gets no GitHub token; it had to be blanked on the config itself, not just the environment, because the runner re-exports it on every agent run. The agent can still read the repo. A failed clone is a visible milestone, not a failed task.
+
+### 4. Jira gaps on the knowledge path (#64)
+
+The demo after #63 published the page, but the auto-tracked SHOP card stayed in To Do, and the final comment had no link.
+
+- **Start reactions:** the knowledge path now runs the same start reactions as the coding path (credentials, "Starting" comment, In Progress), through one shared helper.
+- **Done transition:** a new `transition_task_done` moves the card to Done when the delivery landed. "Landed" counts a `no_mapping` skip as success (Confluence isn't configured for that repo; owner decision). Every other skip reason, or a failed task, leaves the card In Progress.
+- **Terminal comment:** the fan-out's comment adds a linked `Confluence: <page>`, or `Confluence not published (<reason>): <detail>`, from the fields the agent saves on the task record.
+
+### 5. Agent base image (#66 / #67)
+
+The image scan had failed since #63 with 75 HIGH Debian CVEs (krb5, kernel headers), all already fixed upstream. The Dockerfile did run `apt-get upgrade`, but Docker reused that layer from the cache: the base digest was pinned, and `CACHE_BUST` sits after it.
+
+- **Digest bump:** `python:3.13-slim` moved to the current trixie digest.
+- **Daily refresh:** a new `APT_REFRESH` build arg (the UTC date) sits before the upgrade layer. It's passed by the local scan, `security-pr.yml` and both CDK image assets; the CDK assets keep it out of the asset hash, so it never forces a redeploy on its own.
+- **pip pinned to 26.3:** the no-cache rebuild then exposed the new base's pip 26.2.2 shipping its own old copies of msgpack and urllib3. 26.3 ships fixed versions.
+- **One dated `.trivyignore` entry:** CVE-2025-47273, setuptools 70.3.0 in pip's vendor manifest. pip includes only `pkg_resources`, not the vulnerable `setuptools.package_index`; the entry expires 2027-02-22.
+
+Merged and deployed; the coding and research smoke tests both passed afterwards.
+
+### 6. Live findings
+
+- **A trashed page's title doesn't block re-creating it.** Confluence created a new page with the same title as one in the trash. This answers the open question from #59: the delete in the label-or-delete rollback moves the page to the trash, and the next run can still create the page cleanly.
+- **The Slack bot's display name only updated after reinstalling the Slack app**, not on the app-config change alone.
+- **Slack can't select a workflow.** A Slack-submitted task always runs the repo's `default_workflow`, so `web-research-v1` isn't reachable from Slack today. The demo tasks were submitted through the API.
+
+### 7. Demo, confirmed end to end
+
+- **Create:** `web-research-v1 --repo karlbaria/factory-shop` created "Product search UX best practices" under the mapped `SD` space, labelled `factory-generated` + `factory-draft`.
+- **Update:** a second run updated the same page to version 2.
+- **Human edit detected:** after a manual edit in Confluence, a third run reported `human_edit_detected` and left the page untouched.
+- **Jira:** the SHOP card went To Do → In Progress at the start and → Done after the published run, with the page link in the final comment.
+
+### 8. Tags
+
+- `known-good-task14` at `60d18bf` (#65's merge): Task 14 complete, with the routing (#63) and Jira lifecycle (#65) fixes.
+- `known-good-task14b` at `0ce4bcc` (#67's merge): the same plus the refreshed agent image, deployed and smoke-tested.
+
+### Open items
+
+- [#62](https://github.com/karlbaria/autonomous-agents-factory/issues/62): enforce a workflow's `allowed_tools` with a Cedar hard-deny. The demo agent ran `Bash` despite `web-research-v1`'s `[Read, Glob, Grep, WebFetch]`, because the SDK's allow-list only auto-approves. Must land before Task 15's repo-aware, read-only planning workflow.
+- **No "accept edits as baseline" for research pages.** Once a human edits a factory page, every later run skips it with `human_edit_detected`. There's no way to tell the factory "take the current version as the new baseline and keep updating". Task 15's Revise flow needs that for planning docs anyway.
+- **Workflow selection from Slack (§6).** Research tasks are API/CLI-only until Slack can choose a workflow.
