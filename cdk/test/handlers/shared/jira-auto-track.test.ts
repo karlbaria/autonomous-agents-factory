@@ -193,13 +193,94 @@ describe('createAutoTrackedJiraIssue', () => {
       });
     });
 
-    test('a non-400 failure (e.g. Jira outage) skips as unavailable', async () => {
+    test('a non-400 failure (e.g. Jira outage) skips as unavailable after one retry', async () => {
       resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
-      global.fetch = jest.fn().mockResolvedValue(mockResponse(503, '{"error":"jira_request_failed"}')) as unknown as typeof fetch;
+      const fetchMock = jest.fn().mockResolvedValue(mockResponse(503, '{"error":"jira_request_failed"}'));
+      global.fetch = fetchMock as unknown as typeof fetch;
 
-      const result = await createAutoTrackedJiraIssue(PARAMS);
+      const result = await createAutoTrackedJiraIssue({ ...PARAMS, retryDelayMs: 0 });
 
-      expect(result).toEqual({ kind: 'skipped', reason: 'unavailable' });
+      expect(result).toEqual({
+        kind: 'skipped',
+        reason: 'unavailable',
+        status: 503,
+        proxyErrorCode: 'jira_request_failed',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    // Issue #71: the regression — task 01M84K45BG8PH330DX48AZ6BD1 lost its
+    // SHOP card to a single Forge proxy 502.
+    test('retries once after a 502 jira_request_failed and creates the issue', async () => {
+      resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
+      const fetchMock = jest.fn()
+        .mockResolvedValueOnce(mockResponse(502, '{"error":"jira_request_failed"}'))
+        .mockResolvedValueOnce(mockResponse(201, '{"key":"SHOP-28"}'));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await createAutoTrackedJiraIssue({ ...PARAMS, retryDelayMs: 0 });
+
+      expect(result).toEqual({
+        kind: 'created',
+        issueKey: 'SHOP-28',
+        oauthSecretArn: 'arn:secret:acme',
+        siteUrl: 'https://acme.atlassian.net',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(resolveJiraOutboundAuthMock).toHaveBeenCalledTimes(1); // auth resolved once
+    });
+
+    test('waits the retry delay before the second attempt', async () => {
+      resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
+      const fetchMock = jest.fn()
+        .mockResolvedValueOnce(mockResponse(502, '{"error":"jira_request_failed"}'))
+        .mockResolvedValueOnce(mockResponse(201, '{"key":"SHOP-29"}'));
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+
+      await createAutoTrackedJiraIssue({ ...PARAMS, retryDelayMs: 25 });
+
+      expect(setTimeoutSpy.mock.calls.some(([, ms]) => ms === 25)).toBe(true);
+    });
+
+    test('a non-retryable rejection (400 proxy_not_configured) is not retried', async () => {
+      resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
+      const fetchMock = jest.fn().mockResolvedValue(mockResponse(400, '{"error":"proxy_not_configured"}'));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await createAutoTrackedJiraIssue({ ...PARAMS, retryDelayMs: 0 });
+
+      expect(result).toEqual({
+        kind: 'skipped',
+        reason: 'unavailable',
+        status: 400,
+        proxyErrorCode: 'proxy_not_configured',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('a field-error rejection is not retried', async () => {
+      resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
+      const fetchMock = jest.fn().mockResolvedValue(
+        mockResponse(400, '{"errors":{"customfield_10050":"Component is required."}}'),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await createAutoTrackedJiraIssue({ ...PARAMS, retryDelayMs: 0 });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('a slow failure (first attempt past the retry window) is not retried', async () => {
+      resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
+      const fetchMock = jest.fn().mockResolvedValue(mockResponse(502, '{"error":"jira_request_failed"}'));
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const now = jest.spyOn(Date, 'now');
+      now.mockReturnValueOnce(1_000_000).mockReturnValue(1_000_000 + 4_000);
+
+      await createAutoTrackedJiraIssue({ ...PARAMS, retryDelayMs: 0 });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -254,11 +335,37 @@ describe('createAutoTrackedJiraIssue', () => {
 
     test('a network failure skips as unavailable rather than throwing', async () => {
       resolveJiraOutboundAuthMock.mockResolvedValueOnce(OAUTH_AUTH);
-      global.fetch = jest.fn().mockRejectedValue(new Error('network down')) as unknown as typeof fetch;
+      const fetchMock = jest.fn().mockRejectedValue(new Error('network down'));
+      global.fetch = fetchMock as unknown as typeof fetch;
 
-      const result = await createAutoTrackedJiraIssue(PARAMS);
+      const result = await createAutoTrackedJiraIssue({ ...PARAMS, retryDelayMs: 0 });
 
       expect(result).toEqual({ kind: 'skipped', reason: 'unavailable' });
+      expect(fetchMock).toHaveBeenCalledTimes(2); // retried once
+    });
+
+    test('a 503 then a 201 creates the issue on the retry', async () => {
+      resolveJiraOutboundAuthMock.mockResolvedValueOnce(OAUTH_AUTH);
+      const fetchMock = jest.fn()
+        .mockResolvedValueOnce(mockResponse(503, 'Service Unavailable'))
+        .mockResolvedValueOnce(mockResponse(201, '{"key":"SHOP-30"}'));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await createAutoTrackedJiraIssue({ ...PARAMS, retryDelayMs: 0 });
+
+      expect(result).toMatchObject({ kind: 'created', issueKey: 'SHOP-30' });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    test('a 404 is not retried', async () => {
+      resolveJiraOutboundAuthMock.mockResolvedValueOnce(OAUTH_AUTH);
+      const fetchMock = jest.fn().mockResolvedValue(mockResponse(404, 'Not Found'));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await createAutoTrackedJiraIssue({ ...PARAMS, retryDelayMs: 0 });
+
+      expect(result).toEqual({ kind: 'skipped', reason: 'unavailable', status: 404 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -369,13 +476,91 @@ describe('resolveJiraAutoTrack', () => {
       event_type: 'jira_auto_track_skipped',
       metadata: {
         jira_project_key: 'SHOP',
+        reason: 'unknown_required_fields',
         jira_errors: { customfield_10050: 'Component is required.' },
+      },
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1); // a field-error rejection is never retried
+  });
+
+  test('a 502 then a success stamps the Jira link (issue #71 regression)', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }] });
+    resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(mockResponse(502, '{"error":"jira_request_failed"}'))
+      .mockResolvedValueOnce(mockResponse(201, '{"key":"SHOP-28"}'));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await resolveJiraAutoTrack({
+      ...BASE_PARAMS,
+      repo: 'karlbaria/factory-shop',
+      channelSource: 'api',
+      retryDelayMs: 0,
+    });
+
+    expect(result.channelMetadata).toMatchObject({
+      jira_cloud_id: 'cloud-1',
+      jira_issue_key: 'SHOP-28',
+      jira_oauth_secret_arn: 'arn:secret:acme',
+      jira_site_url: 'https://acme.atlassian.net',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(ddbSend).toHaveBeenCalledTimes(1); // the Scan only — no skip event
+  });
+
+  test('two 502s leave the task unlinked but write a visible skip event with status and code', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }] });
+    ddbSend.mockResolvedValueOnce({});
+    resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(502, '{"error":"jira_request_failed"}'));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await resolveJiraAutoTrack({
+      ...BASE_PARAMS,
+      repo: 'karlbaria/factory-shop',
+      channelSource: 'api',
+      retryDelayMs: 0,
+    });
+
+    expect(result).toEqual({ channelMetadata: BASE_PARAMS.channelMetadata });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(ddbSend.mock.calls[1][0].input.Item).toMatchObject({
+      event_type: 'jira_auto_track_skipped',
+      metadata: {
+        jira_project_key: 'SHOP',
+        reason: 'unavailable',
+        status: 502,
+        proxy_error_code: 'jira_request_failed',
       },
     });
   });
 
-  test('leaves channelMetadata unchanged and writes no event when Jira is simply unavailable', async () => {
+  test('a non-retryable 400 is tried once and still writes a skip event', async () => {
     ddbSend.mockResolvedValueOnce({ Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }] });
+    ddbSend.mockResolvedValueOnce({});
+    resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(400, '{"error":"proxy_not_configured"}'));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await resolveJiraAutoTrack({
+      ...BASE_PARAMS,
+      repo: 'karlbaria/factory-shop',
+      channelSource: 'api',
+      retryDelayMs: 0,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ddbSend.mock.calls[1][0].input.Item.metadata).toEqual({
+      jira_project_key: 'SHOP',
+      reason: 'unavailable',
+      status: 400,
+      proxy_error_code: 'proxy_not_configured',
+    });
+  });
+
+  test('leaves channelMetadata unchanged and writes a skip event when outbound auth is unavailable', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }] });
+    ddbSend.mockResolvedValueOnce({});
     resolveJiraOutboundAuthMock.mockResolvedValueOnce(null);
 
     const result = await resolveJiraAutoTrack({
@@ -385,6 +570,23 @@ describe('resolveJiraAutoTrack', () => {
     });
 
     expect(result).toEqual({ channelMetadata: BASE_PARAMS.channelMetadata });
-    expect(ddbSend).toHaveBeenCalledTimes(1); // the Scan only — no event write for a quiet skip
+    // Issue #71: no longer a quiet skip.
+    expect(ddbSend).toHaveBeenCalledTimes(2);
+    expect(ddbSend.mock.calls[1][0].input.Item.metadata).toEqual({
+      jira_project_key: 'SHOP',
+      reason: 'unavailable',
+    });
+  });
+
+  test('a failed skip-event write never fails task creation', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }] });
+    ddbSend.mockRejectedValueOnce(new Error('DDB down'));
+    resolveJiraOutboundAuthMock.mockResolvedValueOnce(null);
+
+    await expect(resolveJiraAutoTrack({
+      ...BASE_PARAMS,
+      repo: 'karlbaria/factory-shop',
+      channelSource: 'api',
+    })).resolves.toEqual({ channelMetadata: BASE_PARAMS.channelMetadata });
   });
 });

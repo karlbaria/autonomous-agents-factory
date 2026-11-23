@@ -45,6 +45,14 @@ import { computeTtlEpoch } from './validation';
 
 const ddb = makeDocClient();
 const REQUEST_TIMEOUT_MS = 5000;
+/** Issue #71: wait before the single retry of a retryable create failure. */
+const CREATE_RETRY_DELAY_MS = 1000;
+/** Issue #71: retry only when the first attempt failed fast. A failure that
+ *  took longer (a client-side timeout at REQUEST_TIMEOUT_MS) is not retried:
+ *  it would push CreateTaskFn toward its 15 s timeout, and a timed-out
+ *  request is the case most likely to have created the issue anyway. Worst
+ *  case with a retry: ~3 s + 1 s + 5 s. */
+const CREATE_RETRY_MAX_FIRST_ATTEMPT_MS = 3000;
 
 /**
  * Atlassian cross-region REST gateway base — same host the legacy 3LO
@@ -117,6 +125,8 @@ export interface CreateAutoTrackedIssueParams {
    *  non-empty line) — not pre-built ADF, so callers don't need their own
    *  ADF builder just to describe a task. */
   readonly description?: string;
+  /** Test seam: the wait before the single retry (default 1 s). */
+  readonly retryDelayMs?: number;
 }
 
 /** Minimal plain-text -> ADF conversion: one paragraph per non-empty line.
@@ -149,12 +159,28 @@ export type CreateAutoTrackedIssueResult =
   // `errors` map — the caller surfaces this reason verbatim rather than the
   // parsed-but-unusable response.
   | { readonly kind: 'skipped'; readonly reason: 'unknown_required_fields'; readonly jiraErrors: Record<string, string> }
-  | { readonly kind: 'skipped'; readonly reason: 'unavailable' };
+  // Issue #71: `status` / `proxyErrorCode` (when the create got that far)
+  // are recorded on the visible jira_auto_track_skipped event.
+  | {
+    readonly kind: 'skipped';
+    readonly reason: 'unavailable';
+    readonly status?: number;
+    readonly proxyErrorCode?: string;
+  };
 
 interface CreateIssueHttpOutcome {
   readonly ok: boolean;
   readonly status?: number;
   readonly body?: string;
+  /** A 429/5xx or a network error: worth one more attempt (issue #71). */
+  readonly retryable?: boolean;
+  /** The Forge proxy's own error code (`{"error": "..."}`), app path only. */
+  readonly proxyErrorCode?: string;
+}
+
+/** 429, 5xx, or no response at all (network error / timeout). */
+function isRetryableStatus(status: number | undefined): boolean {
+  return status === undefined || status === 429 || status >= 500;
 }
 
 async function requestCreateIssueViaOauth(
@@ -176,13 +202,18 @@ async function requestCreateIssueViaOauth(
       body: JSON.stringify({ fields }),
       signal: controller.signal,
     });
-    return { ok: resp.ok, status: resp.status, body: await resp.text() };
+    return {
+      ok: resp.ok,
+      status: resp.status,
+      body: await resp.text(),
+      retryable: !resp.ok && isRetryableStatus(resp.status),
+    };
   } catch (err) {
     logger.warn('Jira auto-track OAuth create-issue request failed', {
       jira_cloud_id: cloudId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return { ok: false };
+    return { ok: false, retryable: true };
   } finally {
     clearTimeout(timer);
   }
@@ -233,27 +264,56 @@ export async function createAutoTrackedJiraIssue(
 
   const descriptionAdf = params.description !== undefined ? textToAdfDocument(params.description) : undefined;
 
-  let outcome: CreateIssueHttpOutcome;
-  if (resolved.kind === 'app') {
-    const appResult = await requestJiraAppActor(resolved.appActor, {
-      version: 1,
-      operation: 'create_issue',
-      cloud_id: params.cloudId,
-      project_key: params.projectKey,
-      issue_type_name: DEFAULT_ISSUE_TYPE_NAME,
-      summary: params.summary,
-      ...(descriptionAdf !== undefined && { body: descriptionAdf }),
-    });
-    outcome = appResult.ok
-      ? { ok: true, status: appResult.status, body: appResult.body }
-      : { ok: false, status: appResult.status, body: appResult.body };
-  } else {
-    outcome = await requestCreateIssueViaOauth(resolved.accessToken, params.cloudId, {
+  const attempt = async (): Promise<CreateIssueHttpOutcome> => {
+    if (resolved.kind === 'app') {
+      const appResult = await requestJiraAppActor(resolved.appActor, {
+        version: 1,
+        operation: 'create_issue',
+        cloud_id: params.cloudId,
+        project_key: params.projectKey,
+        issue_type_name: DEFAULT_ISSUE_TYPE_NAME,
+        summary: params.summary,
+        ...(descriptionAdf !== undefined && { body: descriptionAdf }),
+      });
+      return appResult.ok
+        ? { ok: true, status: appResult.status, body: appResult.body }
+        : {
+          ok: false,
+          status: appResult.status,
+          body: appResult.body,
+          retryable: appResult.retryable,
+          proxyErrorCode: appResult.errorCode,
+        };
+    }
+    return requestCreateIssueViaOauth(resolved.accessToken, params.cloudId, {
       project: { key: params.projectKey },
       issuetype: { name: DEFAULT_ISSUE_TYPE_NAME },
       summary: params.summary,
       ...(descriptionAdf !== undefined && { description: descriptionAdf }),
     });
+  };
+
+  // Issue #71: one transient failure (e.g. the Forge proxy's 502
+  // jira_request_failed) used to lose the card for good. Retry exactly once,
+  // and only a fast, retryable failure — never a 4xx, never Jira's
+  // field-error rejection. A rare duplicate card is acceptable (owner
+  // decision on #71); a silently missing one is not.
+  const startedAt = Date.now();
+  let outcome = await attempt();
+  if (
+    !outcome.ok
+    && outcome.retryable
+    && !parseJiraFieldErrors(outcome.body)
+    && Date.now() - startedAt <= CREATE_RETRY_MAX_FIRST_ATTEMPT_MS
+  ) {
+    logger.warn('Jira auto-track issue create failed; retrying once', {
+      jira_cloud_id: params.cloudId,
+      project_key: params.projectKey,
+      status: outcome.status,
+      proxy_error_code: outcome.proxyErrorCode,
+    });
+    await new Promise((resolve) => setTimeout(resolve, params.retryDelayMs ?? CREATE_RETRY_DELAY_MS));
+    outcome = await attempt();
   }
 
   if (outcome.ok) {
@@ -281,8 +341,14 @@ export async function createAutoTrackedJiraIssue(
     jira_cloud_id: params.cloudId,
     project_key: params.projectKey,
     status: outcome.status,
+    proxy_error_code: outcome.proxyErrorCode,
   });
-  return { kind: 'skipped', reason: 'unavailable' };
+  return {
+    kind: 'skipped',
+    reason: 'unavailable',
+    ...(outcome.status !== undefined && { status: outcome.status }),
+    ...(outcome.proxyErrorCode !== undefined && { proxyErrorCode: outcome.proxyErrorCode }),
+  };
 }
 
 /** Jira's own `summary` field limit. */
@@ -305,6 +371,8 @@ export interface ResolveJiraAutoTrackParams {
   readonly eventsTableName: string;
   readonly now: string;
   readonly taskRetentionDays: number;
+  /** Test seam passed to createAutoTrackedJiraIssue (default 1 s). */
+  readonly retryDelayMs?: number;
 }
 
 export interface JiraAutoTrackResult {
@@ -347,6 +415,7 @@ export async function resolveJiraAutoTrack(
     registryTableName: mapping.registryTableName,
     summary,
     description,
+    retryDelayMs: params.retryDelayMs,
   });
 
   if (result.kind === 'created') {
@@ -379,22 +448,38 @@ export async function resolveJiraAutoTrack(
       jira_project_key: mapping.projectKey,
       jira_errors: result.jiraErrors,
     });
-    await writeJiraAutoTrackSkippedEvent(params, mapping.projectKey, result.jiraErrors);
   }
-  // 'unavailable' (outage, misconfigured tenant, network) is already logged
-  // above in createAutoTrackedJiraIssue — no extra noise here.
+  // Issue #71: every skip is visible on the task, not only the field-error
+  // one — an 'unavailable' skip (outage, misconfigured tenant, network)
+  // used to leave no trace, so a task without a card was indistinguishable
+  // from one that never qualified.
+  await writeJiraAutoTrackSkippedEvent(params, mapping.projectKey, skipEventDetails(result));
 
   return { channelMetadata: params.channelMetadata };
 }
 
-/** Visible milestone for the one auto-track outcome the owner asked to
- *  surface: the mapped project rejected the create over a field it needs
- *  that this task couldn't supply. Best-effort, like every other task event
- *  write in `create-task-core.ts` — event loss here never fails the task. */
+type SkippedResult = Extract<CreateAutoTrackedIssueResult, { kind: 'skipped' }>;
+
+/** The skip event's reason-specific fields. */
+function skipEventDetails(result: SkippedResult): Record<string, unknown> {
+  if (result.reason === 'unknown_required_fields') {
+    return { reason: result.reason, jira_errors: result.jiraErrors };
+  }
+  return {
+    reason: result.reason,
+    ...(result.status !== undefined && { status: result.status }),
+    ...(result.proxyErrorCode !== undefined && { proxy_error_code: result.proxyErrorCode }),
+  };
+}
+
+/** Visible milestone for every auto-track skip on a qualifying task (issue
+ *  #71; originally only the field-error one). Best-effort, like every other
+ *  task event write in `create-task-core.ts` — event loss here never fails
+ *  the task. */
 async function writeJiraAutoTrackSkippedEvent(
   params: ResolveJiraAutoTrackParams,
   projectKey: string,
-  jiraErrors: Record<string, string>,
+  details: Record<string, unknown>,
 ): Promise<void> {
   try {
     await ddb.send(new PutCommand({
@@ -407,7 +492,7 @@ async function writeJiraAutoTrackSkippedEvent(
         ttl: computeTtlEpoch(params.taskRetentionDays),
         metadata: {
           jira_project_key: projectKey,
-          jira_errors: jiraErrors,
+          ...details,
         },
       },
     }));

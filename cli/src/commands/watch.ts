@@ -239,14 +239,20 @@ export function renderEvent(event: TaskEvent): string {
       return line;
     }
     case 'jira_auto_track_skipped': {
-      // Task 13 (fork) PR 2: the mapped Jira project needed a field (or a
-      // valid issue type) this task couldn't supply, so the issue was never
-      // created — the task itself still ran normally.
+      // Task 13 (fork) PR 2: the issue was never created — the task itself
+      // still ran normally. Either the mapped project needed a field this
+      // task couldn't supply (jira_errors), or, since #71, Jira was
+      // unavailable even after one retry (reason/status/proxy_error_code).
       const projectKey = String(meta.jira_project_key ?? '?');
       const errors = (meta.jira_errors && typeof meta.jira_errors === 'object')
         ? Object.entries(meta.jira_errors as Record<string, string>).map(([field, msg]) => `${field}: ${msg}`).join('; ')
         : '';
-      return `[${time}] ⚠ Jira auto-track skipped for project ${projectKey}${errors ? ` — ${errors}` : ''}`;
+      const unavailable = meta.reason === 'unavailable'
+        ? ['Jira unavailable', meta.status !== undefined ? `HTTP ${String(meta.status)}` : '', meta.proxy_error_code ? String(meta.proxy_error_code) : '']
+          .filter(Boolean).join(', ')
+        : '';
+      const detail = errors || unavailable;
+      return `[${time}] ⚠ Jira auto-track skipped for project ${projectKey}${detail ? ` — ${detail}` : ''}`;
     }
     default:
       return `[${time}] ${event.event_type}: ${JSON.stringify(meta)}`;
