@@ -771,7 +771,7 @@ Merged and deployed; the coding and research smoke tests both passed afterwards.
 
 - **JS/TS probes ([#70](https://github.com/karlbaria/autonomous-agents-factory/pull/70), closes #69):** JS/TS probes now run with the package's own runner, and a probe that can't run is reported as not runnable instead of being dropped. Merged and deployed. Live check on task `01M84K45BG8PH330DX48AZ6BD1`: one Vitest probe ran and passed, and it was committed under `frontend/src/__probes__/`. The build was green and the PR auto-merged.
 - **Jira auto-track ([#72](https://github.com/karlbaria/autonomous-agents-factory/pull/72), closes #71):** one retry for quick retryable create failures. Every skip is recorded as `jira_auto_track_skipped`, and `bgagent watch` shows the reason. Merged and deployed; a smoke test created a SHOP card.
-- **Tags:** `known-good-task14d` (#70's merge) and `known-good-task14e` (#72's merge).
+- **Tags:** `known-good-task14d` at `e5fabb8` (#70's merge) and `known-good-task14e` at `d12c68c` (#72's merge plus this LAB_LOG note).
 
 ### 12. Fork CI: credential-free PR checks only
 
