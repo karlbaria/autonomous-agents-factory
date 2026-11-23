@@ -2,6 +2,7 @@
 
 **Status:** accepted
 **Date:** 2026-11-18
+**Last-updated:** 2026-11-23
 **Implementation:** [autonomous-agents-factory#20](https://github.com/karlbaria/autonomous-agents-factory/issues/20). Addendum to [ADR-025 (fork)](./ADR-025-fork-two-call-reviewer.md) — Factory Lab Task 5 (`docs/lab/FACTORY_PLAN.md`). "(fork)" marks this ADR as a **fork** of that plan doc's Task 5 text: six points were amended by the repo owner before implementation (see "Fork points" below), so this document — not the plan doc — is the record of what actually shipped.
 
 ## Context
@@ -47,3 +48,10 @@ Approved by the repo owner before implementation, amending `FACTORY_PLAN.md`'s T
 - [ADR-025 (fork): Two-call independent reviewer, advisory mode](./ADR-025-fork-two-call-reviewer.md)
 - `docs/lab/FACTORY_PLAN.md` — Task 5 (the adversarial fix loop)
 - [autonomous-agents-factory#20](https://github.com/karlbaria/autonomous-agents-factory/issues/20)
+
+## Changelog
+
+- **2026-11-23 — JS/TS probes ([#69](https://github.com/karlbaria/autonomous-agents-factory/issues/69)).** Refinement: the fixer's protected set now covers JS/TS probes as well as `tests/review_probes/`.
+  - The snapshot-and-revert (`_snapshot_dirs` / `_restore_and_diff`) and the `review_fixer_write_protected_root` Cedar roots also cover every package's `__probes__/` directory that a probe ran in or was committed to (see ADR-025's changelog).
+  - Reverted paths are now reported repo-relative.
+  - A not-runnable probe is not a failing probe: it is never carried into the next round or handed to the fixer.

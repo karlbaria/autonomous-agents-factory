@@ -588,17 +588,37 @@ def _render_round_probes_and_findings(round_outcome: dict) -> list[str]:
             "**Probes** (written from the issue alone, before the probe writer "
             "ever saw this diff):\n"
         )
+        not_runnable = 0
         for r in probe_results:
             probe = r.get("probe", {})
+            name = (
+                f"{probe['package_dir']}/{probe.get('filename')}"
+                if probe.get("package_dir")
+                else probe.get("filename")
+            )
+            if r.get("runnable", True) is False:
+                # #69: written but never run — neither a pass nor a fail.
+                not_runnable += 1
+                lines.append(
+                    f"- ⚠️ NOT RUNNABLE `{name}` — {probe.get('intent')} "
+                    f"_({(r.get('output') or '').strip()})_"
+                )
+                continue
             mark = "✅ PASS" if r.get("passed") else "❌ FAIL"
-            lines.append(f"- {mark} `{probe.get('filename')}` — {probe.get('intent')}")
+            lines.append(f"- {mark} `{name}` — {probe.get('intent')}")
+        if not_runnable:
+            lines.append(
+                f"\n{not_runnable} probe(s) were written but could not be run, so they "
+                "say nothing about this change."
+            )
         lines.append("")
 
     committed = round_outcome.get("committed_probe_paths") or []
     if committed:
+        places = sorted({p.rsplit("/", 1)[0] + "/" for p in committed})
         lines.append(
-            f"{len(committed)} passing probe(s) committed to `tests/review_probes/` "
-            "in a separate commit.\n"
+            f"{len(committed)} passing probe(s) committed to "
+            f"{', '.join(f'`{d}`' for d in places)} in a separate commit.\n"
         )
 
     # Task 5 amendment 1 (ADR-026 (fork)): the fixer tried to edit/delete a

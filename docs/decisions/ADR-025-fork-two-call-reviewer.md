@@ -2,6 +2,7 @@
 
 **Status:** accepted
 **Date:** 2026-11-18
+**Last-updated:** 2026-11-23
 **Implementation:** Shipped ([autonomous-agents-factory#15](https://github.com/karlbaria/autonomous-agents-factory/issues/15)). Addendum to [ADR-014](./ADR-014-workflow-driven-tasks.md) — Factory Lab Task 4 (`docs/lab/FACTORY_PLAN.md`). "(fork)" marks this ADR as a **fork** of that plan doc's Task 4 text: four points were amended by the repo owner before implementation (see "Fork points" below), so this document — not the plan doc — is the record of what actually shipped.
 
 ## Context
@@ -47,3 +48,12 @@ Approved by the repo owner before implementation, amending `FACTORY_PLAN.md`'s T
 - [ADR-014: Workflow-driven tasks with an agent-side step runner](./ADR-014-workflow-driven-tasks.md)
 - `docs/lab/FACTORY_PLAN.md` — Task 4 (original plan) and Task 5 (the adversarial fix loop, deferred)
 - [autonomous-agents-factory#15](https://github.com/karlbaria/autonomous-agents-factory/issues/15)
+
+## Changelog
+
+- **2026-11-23 — JS/TS probes ([#69](https://github.com/karlbaria/autonomous-agents-factory/issues/69)).** Refinement: the deterministic step is no longer pytest-only.
+  - **Python probes** (`test_*.py`) run with `pytest` and are committed to `tests/review_probes/`, as before.
+  - **JS/TS probes** (`*.test.jsx`/`.tsx`/`.js`/`.ts`) run with the probe's package's own runner: Vitest, else Jest, read from its `package.json`, using `node_modules/.bin`. The probe writer names the package by writing the probe into a scratch subdirectory with the package's path (`<scratch>/frontend/…`). A probe at the scratch root goes to the repo's only package that has a runner. The probe is copied temporarily into `<package>/src/__probes__/` (or `<package>/__probes__/` if the package has no `src/`), so its relative imports resolve and the runner's config applies. It is removed after the run.
+  - **Where passing JS/TS probes are committed:** exactly the path where they ran and passed. That path is inside the package and matched by the repo's own test runner, so `npm test` runs probes already known to pass there and doesn't break.
+  - **Probes that can't run** (no package or runner found, the runner not installed, an unknown file kind) are reported **not runnable**, with the reason. This shows in the `review_probes_run` milestone (`not_runnable=N`, now emitted even for zero probes), in the code reviewer's input and in the PR body. Such probes are counted neither as passed nor as failed, and they are not committed.
+  - The probe-writer prompt now asks for the repo's own framework, and for `*.test.jsx`/`.tsx` names for JS/TS.

@@ -549,6 +549,54 @@ new Blueprint(this, 'CustomBlueprint', {
 });
 ```
 
+### Review readiness
+
+Workflows with an independent review (`coding/new-task-adversarial-v1`, `coding/new-task-verified-v1`) have a probe writer write tests from the task's requirements alone. A deterministic step runs those tests against the agent's change. A repository is review-ready when that step can run its probes, so check this when you onboard a repository for those workflows.
+
+**Supported probe runners**
+
+| Code under test | Runner | What the repository needs |
+|---|---|---|
+| Python | `pytest` | `pytest` on the agent's `PATH` after the repository's build step, for example as a dev dependency the build installs. Probes are `test_*.py` files. |
+| JavaScript / TypeScript | Vitest | `vitest` in the package's `devDependencies` or `dependencies`, and installed, so that `node_modules/.bin/vitest` exists in the package or a parent folder (workspace hoisting works). |
+| JavaScript / TypeScript | Jest | The same for `jest`. Vitest wins when a package depends on both. |
+
+**How the package is detected**
+
+A JavaScript or TypeScript probe belongs to one package: a folder with a `package.json` that depends on Vitest or Jest. The probe writer is told to put each probe in a scratch subfolder named after the package's path in the repository, for example `frontend/` for the package in `frontend/`. For a probe without a package folder:
+
+1. The repository root is used if its `package.json` has a runner.
+2. Otherwise the step uses the repository's only package that has a runner. It searches up to four folder levels deep and skips `node_modules`, `dist`, `build` and `cdk.out`.
+3. If more than one package has a runner, the probe isn't run, and the review reports why.
+
+**Where JavaScript probes run and are committed**
+
+- **Run:** each probe is copied for the duration of its run into `<package>/src/__probes__/`, or `<package>/__probes__/` when the package has no `src/` folder. Relative imports resolve from there: a probe imports `../App` for `src/App.jsx`. The package's own runner config applies, such as `vite.config.js` with `environment` and `setupFiles`.
+- **Command:** `vitest run src/__probes__/<name>` from the package folder; with Jest, `jest --ci --runTestsByPath ...`.
+- **Names:** a probe not named `*.test.*` or `*.spec.*` is run as `<name>.test.<ext>`, because that is what the runners find by default.
+- **Commit:** a probe that passes is committed at that same path, in the same separate commit as before. Because the path is inside the package and matched by the runner, `npm test` picks it up and runs a test already known to pass there. Python probes are committed to `tests/review_probes/`. Failing probes are never committed.
+
+**Lint and type checks**
+
+Committed JavaScript probes sit in source that your linter and type checker cover: `eslint .` and a `tsconfig.json` that includes `src/` will see them. Choose one:
+
+- Exclude the probe folders, for example `ignores: ['**/__probes__/**']` in an ESLint flat config (and an `exclude` entry in `tsconfig.json` if `tsc` checks test files).
+- Keep probes lint-clean by making sure your lint rules allow test globals (`test`, `expect`) in `*.test.*` files.
+
+A probe the reviewer committed shouldn't make your lint step fail.
+
+**"Probes written but not runnable"**
+
+A review lists a probe as **⚠️ NOT RUNNABLE**, with a reason, when it was written but couldn't be run. The `review_probes_run` event reports these probes as `not_runnable=N`. They count as neither passed nor failed and say nothing about the change. The reasons and how to fix them:
+
+| Reason in the review | How to make the repository runnable |
+|---|---|
+| `` `vitest` is not installed for `frontend` `` | Make the repository's build step install dependencies (for example `npm ci` in that package) so `node_modules/.bin/vitest` exists before the review runs. |
+| `no package in the repo depends on vitest or jest` | Add Vitest or Jest as a dev dependency of the package that holds the code. |
+| `` `infra` has no package.json that depends on vitest or jest `` | That package has no test runner (for example a CDK package with only `tsc`). Add one if you want probes there; otherwise this is expected. |
+| `several packages have a test runner` | The probe was written without a package folder in a repository with more than one tested package. The probe writer is asked for one; if this repeats, raise it. |
+| `no probe runner for .<ext> files` / `pytest only runs files named test_*.py` | The probe is in a language or file name the step can't run. Only pytest, Vitest and Jest are supported. |
+
 ### Add a CLAUDE.md to your repository
 
 The agent automatically loads project-level instructions from `CLAUDE.md` at the repository root (or `.claude/CLAUDE.md`). This is the most effective way to improve agent output for a specific repo - tell it your build commands, coding conventions, architecture boundaries, and constraints. See the [Prompt guide](./PROMPT_GUIDE.md) for examples and best practices.
