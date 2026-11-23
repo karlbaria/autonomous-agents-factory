@@ -332,6 +332,47 @@ def _should_post_start_comment(channel_source: str | None, workflow_id: str) -> 
     return channel_source != "jira" or workflow_id != "coding/pr-iteration-v1"
 
 
+_CONTEXT_REPO_PROMPT = """
+
+## Repository context (read-only)
+
+The repository `{repo}` is checked out in your working directory as read-only
+context for this task. Read it as needed. Do not modify, commit or push
+anything: this task delivers your final message as its artifact, not a change
+to the repository, and pushing is disabled."""
+
+# GitHub credentials removed from the environment once the context clone
+# exists, so nothing the agent runs can push or open a PR with them (#61).
+_GITHUB_TOKEN_ENV_VARS = ("GITHUB_TOKEN", "GH_TOKEN")
+
+
+def _context_checkout(config, progress):
+    """Read-only context clone for a knowledge workflow given a repo (#61).
+
+    Returns the ``RepoSetup``, or ``None`` when the clone fails: the
+    deliverable does not depend on the checkout, so the task continues without
+    it and the failure is a visible ``repo_context_unavailable`` milestone. The
+    GitHub token is only in the environment for the clone itself.
+    """
+    from repo import clone_for_context
+
+    for name in _GITHUB_TOKEN_ENV_VARS:
+        os.environ[name] = config.github_token
+    try:
+        setup = clone_for_context(config, progress)
+    except Exception as e:  # any clone failure: continue without the checkout
+        log("WARN", f"read-only context clone of {config.repo_url} failed: {e}")
+        progress.write_agent_milestone("repo_context_unavailable", str(e)[:500])
+        return None  # nosemgrep: py-silent-success-masking -- reported as a milestone
+    finally:
+        for name in _GITHUB_TOKEN_ENV_VARS:
+            os.environ.pop(name, None)
+    progress.write_agent_milestone(
+        "repo_setup", f"read-only context clone of {config.repo_url}; no branch, push disabled"
+    )
+    return setup
+
+
 def _run_repoless_task(
     *,
     config,
@@ -343,8 +384,14 @@ def _run_repoless_task(
     start_time: float,
     memory_id: str,
     system_prompt_overrides: str,
+    context_repo: bool = False,
 ) -> dict:
     """Run a repo-less workflow (#248 Phase 3) and return the result dict.
+
+    With ``context_repo`` (#61, a ``knowledge`` workflow given a repo), the repo
+    is first cloned read-only for context (:func:`_context_checkout`) and the
+    agent runs inside it; everything else — the full step list, delivery,
+    success by ``terminal_outcomes`` — is unchanged.
 
     No clone / build / PR: the workflow runner drives the full repo-less step
     list (``hydrate_context`` → ``run_agent`` → ``deliver_artifact``) inside the
@@ -361,13 +408,25 @@ def _run_repoless_task(
     wf = load_workflow(workflow_id)
     system_prompt = build_repoless_system_prompt(config, hc, system_prompt_overrides)
 
+    setup = _context_checkout(config, progress) if context_repo else None
+    step_config = config
+    if context_repo:
+        # The agent never gets the GitHub token: runner._setup_agent_env
+        # re-exports config.github_token into the CLI's environment on every
+        # run, so blank it on the config the steps see, not just in os.environ.
+        step_config = config.model_copy(update={"github_token": ""})
+    if setup is not None:
+        system_prompt += _CONTEXT_REPO_PROMPT.format(repo=config.repo_url)
+
     ctx = StepContext(
         workflow=wf,
-        config=config,
+        config=step_config,
         hydrated=hc,
         progress=progress,
         trajectory=trajectory,
-        setup=None,  # repo-less: no RepoSetup
+        # None for a repo-less task; the read-only context clone for #61. The
+        # run_agent handler uses its repo_dir as the agent's cwd.
+        setup=setup,
         system_prompt=system_prompt,
         user_prompt=prompt,
     )
@@ -1096,8 +1155,21 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # path only when no repo was actually supplied; when a repo IS present
             # it is hydrated as context exactly like a coding task (clone → build →
             # PR), honoring the repo-bound prompt the orchestrator built.
-            if not config.requires_repo and not config.repo_url:
+            #
+            # Exception (#61): a ``knowledge`` workflow given a repo — e.g.
+            # web-research-v1, where the repo selects the Confluence space
+            # mapping — produces an artifact, never a PR. It runs the workflow's
+            # full step list (incl. deliver_artifact) like a repo-less task, with
+            # a read-only context clone as the agent's working directory.
+            # default/agent-v1 (hybrid) keeps the repo-bound behaviour above.
+            context_repo = bool(
+                not config.requires_repo
+                and config.repo_url
+                and config.workflow_domain == "knowledge"
+            )
+            if not config.requires_repo and (not config.repo_url or context_repo):
                 return _run_repoless_task(
+                    context_repo=context_repo,
                     config=config,
                     prompt=prompt,
                     hc=hc,

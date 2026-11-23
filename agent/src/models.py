@@ -199,6 +199,11 @@ class TaskConfig(BaseModel):
     # working unchanged; a workflow that wants to restrict tools MUST declare a
     # non-empty list (every shipped workflow does).
     allowed_tools: list[str] = Field(default_factory=list)
+    # The resolved workflow's ``domain`` (coding | knowledge | hybrid), or ""
+    # when the workflow file could not be loaded. A ``knowledge`` workflow that
+    # is given a repo treats it as read-only context, not a clone/branch/PR
+    # target (#61): see ``pipeline.run_task``.
+    workflow_domain: str = ""
     # Whether the resolved workflow requires a repo. False for repo-less
     # knowledge workflows: the pipeline skips clone/build/PR and drives the agent
     # + deliver_artifact steps through the workflow runner. Defaults True so
