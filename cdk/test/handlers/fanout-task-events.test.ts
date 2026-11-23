@@ -2280,6 +2280,31 @@ describe('fanout-task-events: Jira dispatcher', () => {
     expect(text).toContain('t-jira');
   });
 
+  test('task_completed includes the Confluence page link saved on the task (#64)', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      pr_url: undefined,
+      confluence_status: 'published',
+      confluence_page_url: 'https://acme.atlassian.net/wiki/x/9',
+    });
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+    const text = adfText(mockPostIssueCommentAdf.mock.calls[0][2]);
+    expect(text).toContain('Confluence: https://acme.atlassian.net/wiki/x/9');
+  });
+
+  test('task_completed includes the Confluence skip reason saved on the task (#64)', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      pr_url: undefined,
+      confluence_status: 'skipped',
+      confluence_skip_reason: 'token_unavailable',
+      confluence_skip_detail: 'no usable token',
+    });
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+    const text = adfText(mockPostIssueCommentAdf.mock.calls[0][2]);
+    expect(text).toContain('Confluence not published (token_unavailable): no usable token');
+  });
+
   test('task_failed without PR renders ❌ frame', async () => {
     mockGet({ ...TASK_RECORD_JIRA, pr_url: undefined, error_message: 'Generic crash' });
 
@@ -2741,6 +2766,65 @@ describe('renderJiraFinalStatusComment', () => {
   /** Flatten the renderer's ADF-paragraph output to a single string. */
   const flatten = (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) =>
     paragraphs.map((runs) => runs.map((r) => r.text).join('')).join('\n');
+
+  // Task 14 (fork), #64 — the Confluence line of the terminal comment.
+  const base = {
+    eventType: 'task_completed',
+    prUrl: null,
+    costUsd: 0.24,
+    turns: 12,
+    maxTurns: 40,
+    durationS: 80,
+    taskId: 't-conf',
+    errorTitle: null,
+  };
+
+  test('a published page renders a linked Confluence paragraph before the task id', () => {
+    const url = 'https://acme.atlassian.net/wiki/spaces/SD/pages/786445/Product';
+    const paragraphs = renderJiraFinalStatusComment({
+      ...base, confluenceStatus: 'published', confluencePageUrl: url,
+    });
+    const text = flatten(paragraphs);
+    expect(text).toContain(`Confluence: ${url}`);
+    expect(paragraphs.flat().find((r) => r.text === url)).toEqual({ text: url, href: url });
+    expect(text.indexOf('Confluence:')).toBeLessThan(text.indexOf('task t-conf'));
+    expect(renderJiraFinalStatusText({ ...base, confluenceStatus: 'published', confluencePageUrl: url }))
+      .toContain(`Confluence: [${url}](${url})`);
+  });
+
+  test('a published page with a non-https URL is not linked', () => {
+    const paragraphs = renderJiraFinalStatusComment({
+      ...base, confluenceStatus: 'published', confluencePageUrl: 'javascript:alert(1)',
+    });
+    expect(paragraphs.flat().some((r) => 'href' in r)).toBe(false);
+    expect(flatten(paragraphs)).toContain('Confluence: page published');
+  });
+
+  test.each([
+    'token_unavailable', 'human_edit_detected', 'ownership_clash',
+    'space_not_found', 'no_title', 'api_error', 'no_mapping',
+  ])('a %s skip renders the reason and detail', (reason) => {
+    const text = flatten(renderJiraFinalStatusComment({
+      ...base, confluenceStatus: 'skipped', confluenceSkipReason: reason, confluenceSkipDetail: 'the detail',
+    }));
+    expect(text).toContain(`Confluence not published (${reason}): the detail`);
+  });
+
+  test('a long skip detail is truncated', () => {
+    const text = flatten(renderJiraFinalStatusComment({
+      ...base, confluenceStatus: 'skipped', confluenceSkipReason: 'api_error', confluenceSkipDetail: 'x'.repeat(1000),
+    }));
+    const line = text.split('\n').find((l) => l.startsWith('Confluence not published'))!;
+    expect(line.length).toBeLessThan(400);
+  });
+
+  test('a task without Confluence fields renders exactly as before', () => {
+    const withFields = renderJiraFinalStatusComment({
+      ...base, confluenceStatus: null, confluencePageUrl: null, confluenceSkipReason: null, confluenceSkipDetail: null,
+    });
+    expect(withFields).toEqual(renderJiraFinalStatusComment(base));
+    expect(flatten(withFields)).not.toContain('Confluence');
+  });
 
   test('all metrics null → renders em-dash placeholders', () => {
     const text = flatten(renderJiraFinalStatusComment({

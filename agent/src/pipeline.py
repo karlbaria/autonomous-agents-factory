@@ -29,6 +29,7 @@ from context import assemble_prompt, fetch_github_issue
 from jira_reactions import (
     comment_task_started,
     transition_pr_opened,
+    transition_task_done,
     transition_task_started,
 )
 from linear_reactions import react_task_finished, react_task_started
@@ -327,6 +328,43 @@ def _apply_unresolved_review_failure(
     )
 
 
+def _jira_start_reactions(config) -> None:
+    """Jira start reactions, shared by the coding and knowledge paths (#64).
+
+    Resolves the Jira credentials (keyed on the task actually carrying a Jira
+    link, not on ``channel_source == "jira"`` — an auto-tracked Slack/API task
+    carries the same link, issue #34), posts the "Starting" comment through the
+    Forge app actor or the legacy OAuth fallback, and moves the card To Do →
+    In Progress (issue #572). Each call is a no-op for a task with no Jira link
+    and best-effort: failures are logged, never raised.
+    """
+    has_jira_link = bool((config.channel_metadata or {}).get("jira_cloud_id"))
+    if config.channel_source != "linear" and (config.channel_source == "jira" or has_jira_link):
+        resolve_jira_oauth_token(config.channel_metadata)
+    workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+    if _should_post_start_comment(config.channel_source, workflow_id):
+        comment_task_started(config.channel_source, config.channel_metadata)
+    transition_task_started(config.channel_source, config.channel_metadata)
+
+
+def _delivery_completes_card(overall_status: str, artifacts: dict) -> bool:
+    """Whether a knowledge task's outcome moves its Jira card to Done (#64).
+
+    Done needs a successful task whose delivery landed. If the workflow
+    publishes to Confluence, that means the page was published, or the repo has
+    no Confluence mapping at all (``no_mapping``: nothing to publish, which is
+    still success — owner decision). Any other skip reason (token, clash, edit,
+    space, title, API error) leaves the card In Progress; the terminal comment
+    shows the reason.
+    """
+    if overall_status != "success":
+        return False
+    status = artifacts.get("confluence_status")
+    if status is None or status == "published":
+        return True
+    return status == "skipped" and artifacts.get("confluence_skip_reason") == "no_mapping"
+
+
 def _should_post_start_comment(channel_source: str | None, workflow_id: str) -> bool:
     """Avoid duplicating the platform-owned Jira iteration acknowledgement."""
     return channel_source != "jira" or workflow_id != "coding/pr-iteration-v1"
@@ -403,6 +441,10 @@ def _run_repoless_task(
     """
     from prompt_builder import build_repoless_system_prompt
     from workflow import StepContext, load_workflow, run_workflow
+
+    # Same Jira start reactions as the coding path's Early ACK (#64), before
+    # the context clone and the agent run.
+    _jira_start_reactions(config)
 
     workflow_id = (config.resolved_workflow or {}).get("id", "default/agent-v1")
     wf = load_workflow(workflow_id)
@@ -493,6 +535,11 @@ def _run_repoless_task(
             "requires a retrievable S3 key (WORKFLOWS.md success contract)."
         )
         log("WARN", result_error)
+
+    # Delivered → Jira Done (#64). Otherwise the card stays In Progress and the
+    # fan-out's terminal comment carries the reason.
+    if _delivery_completes_card(overall_status, ctx.artifacts):
+        transition_task_done(config.channel_source, config.channel_metadata)
 
     trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
 
@@ -1221,11 +1268,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # jira_cloud_id/jira_oauth_secret_arn once its outbound issue is
             # created, and needs the same credentials jira_reactions.py reads
             # to post comments and transition the issue.
-            has_jira_link = bool((config.channel_metadata or {}).get("jira_cloud_id"))
             if config.channel_source == "linear":
                 resolve_linear_api_token(config.channel_metadata)
-            elif config.channel_source == "jira" or has_jira_link:
-                resolve_jira_oauth_token(config.channel_metadata)
 
             # 👀 on the Linear issue — acknowledges the task is picked up.
             # No-op for non-Linear tasks. Best-effort; failures are logged
@@ -1244,29 +1288,10 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 transition_state=linear_transition_state,
             )
 
-            # "Starting" comment on the Jira issue through the Forge app actor
-            # (or legacy OAuth fallback). No-op for a task with no Jira link
-            # (channel_metadata.jira_cloud_id/jira_issue_key) — covers both
-            # Jira-origin and auto-tracked (issue #32) tasks the same way.
-            # Best-effort; failures are logged, never block.
-            workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
-            if _should_post_start_comment(config.channel_source, workflow_id):
-                comment_task_started(
-                    config.channel_source,
-                    config.channel_metadata,
-                )
-
-            # Move the Jira card To Do → In Progress so the board reflects that
-            # work has started (issue #572). No-op for a task with no Jira
-            # link — same gate as the start comment above (issue #32).
-            # Best-effort; failures are logged and never block the pipeline.
-            # Part of the Early-ACK block (moved before setup_repo with the 👀
-            # and start comment) so board state updates immediately, not after
-            # the multi-minute baseline build.
-            transition_task_started(
-                config.channel_source,
-                config.channel_metadata,
-            )
+            # Jira start reactions: resolve credentials, "Starting" comment,
+            # To Do → In Progress (issues #32, #572). Shared with the knowledge
+            # path (#64); see _jira_start_reactions.
+            _jira_start_reactions(config)
 
             # Setup repo (deterministic pre-hooks). A failure/timeout/OOM in the
             # pre-agent baseline build raises here; it needs no local handler —

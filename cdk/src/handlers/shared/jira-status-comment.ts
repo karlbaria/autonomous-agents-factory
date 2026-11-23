@@ -28,6 +28,42 @@ export interface JiraFinalStatusInput {
   readonly durationS: number | null;
   readonly taskId: string;
   readonly errorTitle: string | null;
+  /** Confluence publish outcome from the task record (Task 14 (fork), #64);
+   *  absent for workflows that do not publish to Confluence. */
+  readonly confluenceStatus?: string | null;
+  readonly confluencePageUrl?: string | null;
+  readonly confluenceSkipReason?: string | null;
+  readonly confluenceSkipDetail?: string | null;
+}
+
+/** Cap on the Confluence skip detail in the terminal comment. */
+const CONFLUENCE_SKIP_DETAIL_MAX_LEN = 300;
+
+/**
+ * The Confluence line of the terminal comment (#64): the linked page when
+ * published (``https://`` only), the reason and detail when skipped, nothing
+ * for a workflow that does not publish to Confluence.
+ */
+function confluenceParagraph(args: JiraFinalStatusInput): AdfParagraph | null {
+  if (args.confluenceStatus === 'published') {
+    const url = args.confluencePageUrl;
+    if (url && url.startsWith('https://')) {
+      return [{ text: 'Confluence: ' }, { text: url, href: url }];
+    }
+    return [{ text: 'Confluence: page published' }];
+  }
+  if (args.confluenceStatus === 'skipped') {
+    const reason = args.confluenceSkipReason ?? 'unknown';
+    const raw = args.confluenceSkipDetail ?? '';
+    const detail = raw.length > CONFLUENCE_SKIP_DETAIL_MAX_LEN
+      ? `${raw.slice(0, CONFLUENCE_SKIP_DETAIL_MAX_LEN - 1)}…`
+      : raw;
+    return [
+      { text: `Confluence not published (${reason})`, strong: true },
+      ...(detail ? [{ text: `: ${detail}` }] : []),
+    ];
+  }
+  return null;
 }
 
 export type JiraFinishedPointerKind = 'result' | 'details' | 'answer';
@@ -95,6 +131,8 @@ export function renderJiraFinalStatusComment(
       { text: args.prUrl, href: args.prUrl },
     ]);
   }
+  const confluence = confluenceParagraph(args);
+  if (confluence) paragraphs.push(confluence);
   paragraphs.push([{ text: `task ${args.taskId}`, em: true }]);
   return paragraphs;
 }
