@@ -712,3 +712,74 @@ class TestTransitionFailureIsSwallowed:
         ):
             transition_task_started("jira", JIRA_META)  # must not raise
             post.assert_not_called()
+
+
+class TestDoneTransitionSelection:
+    """#64: a knowledge task whose deliverable landed moves the card to Done."""
+
+    def _run(self, monkeypatch, issue, meta=None):
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
+        ):
+            jira_reactions.transition_task_done("jira", meta or JIRA_META)
+        return post
+
+    def test_prefers_a_destination_named_done(self, monkeypatch):
+        issue = _issue_resp(
+            _transition("31", "Closed", category="done"),
+            _transition("41", "Done", category="done"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
+        post = self._run(monkeypatch, issue)
+        assert post.call_args[1]["json"] == {"transition": {"id": "41"}}
+
+    def test_falls_back_to_done_category(self, monkeypatch):
+        issue = _issue_resp(
+            _transition("21", "In Review", category="indeterminate"),
+            _transition("31", "Shipped", category="done"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
+        post = self._run(monkeypatch, issue)
+        assert post.call_args[1]["json"] == {"transition": {"id": "31"}}
+
+    def test_honours_the_override(self, monkeypatch):
+        issue = _issue_resp(
+            _transition("41", "Done", category="done"),
+            _transition("51", "Published", category="indeterminate"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
+        post = self._run(monkeypatch, issue, {**JIRA_META, "jira_status_on_done": "Published"})
+        assert post.call_args[1]["json"] == {"transition": {"id": "51"}}
+
+    def test_skips_an_already_done_card(self, monkeypatch):
+        issue = _issue_resp(
+            _transition("41", "Done", category="done"),
+            current_name="Done",
+            current_category="done",
+        )
+        post = self._run(monkeypatch, issue)
+        post.assert_not_called()
+
+    def test_no_done_destination_skips(self, monkeypatch):
+        issue = _issue_resp(
+            _transition("21", "In Review", category="indeterminate"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
+        post = self._run(monkeypatch, issue)
+        post.assert_not_called()
+
+    def test_no_jira_link_is_noop(self, monkeypatch):
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        with (
+            patch("jira_reactions.requests.get") as get,
+            patch("jira_reactions.requests.post") as post,
+        ):
+            jira_reactions.transition_task_done("api", {})
+        get.assert_not_called()
+        post.assert_not_called()

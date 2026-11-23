@@ -1675,6 +1675,11 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     ),
     taskId: task.task_id,
     errorTitle: classification?.title ?? null,
+    // Task 14 (fork), #64: the Confluence outcome the agent saved on the task.
+    confluenceStatus: task.confluence_status ?? null,
+    confluencePageUrl: task.confluence_page_url ?? null,
+    confluenceSkipReason: task.confluence_skip_reason ?? null,
+    confluenceSkipDetail: task.confluence_skip_detail ?? null,
   });
 
   if (isIteration && iterationReplyId) {

@@ -745,6 +745,38 @@ def transition_pr_opened(
     )
 
 
+#: Jira ``statusCategory.key`` for the Done band.
+_DONE_CATEGORY = "done"
+
+#: Preferred destination name for the delivered transition (matched
+#: case-insensitively before the ``done`` category fallback).
+_DONE_STATUS_NAME = "done"
+
+
+def transition_task_done(
+    channel_source: str,
+    channel_metadata: dict[str, str] | None,
+) -> None:
+    """Move the Jira issue to Done once a knowledge task's deliverable landed (#64).
+
+    Only the knowledge (workflow-runner) path calls this: a coding task's card
+    stops at In Review and a human merge finishes it. Resolution:
+    ``jira_status_on_done`` override → a destination named ``Done`` → any
+    ``done``-category destination. Skips if the issue is already Done.
+    Best-effort; no-op for a task with no Jira link in ``channel_metadata``.
+    """
+    override = (channel_metadata or {}).get("jira_status_on_done")
+    _transition(
+        channel_source,
+        channel_metadata,
+        lifecycle="done",
+        override=override,
+        prefer_names=() if override else (_DONE_STATUS_NAME,),
+        fallback_category=None if override else _DONE_CATEGORY,
+        max_source_rank=None if override else _CATEGORY_RANK[_DONE_CATEGORY],
+    )
+
+
 def _reset_state_for_testing() -> None:
     """Test-only: reset the auth circuit-breaker module state."""
     global _consecutive_auth_failures, _auth_circuit_open
