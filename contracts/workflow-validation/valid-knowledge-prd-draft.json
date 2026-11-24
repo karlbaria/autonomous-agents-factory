@@ -1,0 +1,78 @@
+{
+  "name": "valid-knowledge-prd-draft",
+  "description": "The shipped read-only PRD draft workflow (Task 15 (fork), #82 PR 3c): repo context only (Read, Glob, Grep), no write tools, no PR.",
+  "workflow": {
+    "id": "knowledge/prd-draft-v1",
+    "version": "1.0.0",
+    "domain": "knowledge",
+    "description": "Draft a product requirements document for a feature idea, informed by what the repo's app already does, and deliver it to S3 and to the repo's mapped Confluence space for the product manager to review.",
+    "guidance": "Select for \"I want to build X\" / \"plan X\" ideas against a repo: the output is a PRD for the product manager, never code or a technical design.",
+    "requires_repo": false,
+    "read_only": true,
+    "prompt": {
+      "template": "registry://prompt/prd-draft-workflow",
+      "placeholders": [
+        "task_description",
+        "memory_context",
+        "max_turns"
+      ]
+    },
+    "hydration": {
+      "sources": [
+        "task_description",
+        "attachments",
+        "memory"
+      ]
+    },
+    "agent_config": {
+      "tier": "read-only",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep"
+      ],
+      "cedar_policy_modules": [
+        "builtin/hard_deny"
+      ]
+    },
+    "repo_config": {
+      "discover": false
+    },
+    "required_inputs": {
+      "all_of": [
+        "task_description"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "hydrate_context",
+        "name": "context"
+      },
+      {
+        "kind": "run_agent",
+        "name": "draft"
+      },
+      {
+        "kind": "deliver_artifact",
+        "name": "deliver",
+        "target": "s3_comment_and_confluence_prd"
+      }
+    ],
+    "terminal_outcomes": {
+      "primary": "artifact"
+    },
+    "limits": {
+      "max_turns": 30
+    },
+    "promotion_gate": {
+      "requires": [
+        "tests:agent/prd_draft"
+      ]
+    },
+    "status": "production"
+  },
+  "expected": {
+    "valid": true,
+    "violations": []
+  }
+}

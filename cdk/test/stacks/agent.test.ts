@@ -841,6 +841,29 @@ describe('AgentStack', () => {
     expect(asJson).toContain('secretsmanager:PutSecretValue');
   });
 
+  // Task 15 (fork), #82 PR 3c: the fan-out reads a delivered design page for
+  // its story count through the refreshing resolver. A refresh rotates the
+  // refresh token (#84), so the fan-out must be able to write the secret back,
+  // or the tenant would have to reconnect.
+  test('the fan-out can read design pages and persist a refreshed Jira OAuth token', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const fanOut = Object.entries(fns).find(([id]) => id.startsWith('FanOutConsumerFanOutFn'));
+    expect(fanOut).toBeDefined();
+    const vars = (fanOut![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.REPO_TABLE_NAME).toBeDefined();
+
+    const policies = template.findResources('AWS::IAM::Policy');
+    const statements = Object.entries(policies)
+      .filter(([logicalId]) => logicalId.startsWith('FanOutConsumerFanOutFn'))
+      .flatMap(([, policy]) => (policy as { Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } } })
+        .Properties.PolicyDocument.Statement);
+    const oauth = statements.find((s) => JSON.stringify(s.Resource).includes('bgagent-jira-oauth-*'));
+    expect(oauth).toBeDefined();
+    expect(oauth!.Action).toEqual(expect.arrayContaining(['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue']));
+  });
+
   // Task 13 (fork) PR 2: the direct-API and Slack Lambdas can resolve an
   // opted-in Jira project mapping and create the issue through whichever
   // outbound identity the tenant has configured. Scoped to exactly these
