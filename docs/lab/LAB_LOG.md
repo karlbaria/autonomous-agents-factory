@@ -793,9 +793,46 @@ The upstream integ, deploy and Documentation workflows are disabled on the fork.
 - ~~[#69](https://github.com/karlbaria/autonomous-agents-factory/issues/69): run JS/TS review probes and report probes that can't run (§10).~~ Done in #70 (§11).
 - **Probe quality without Bash.** The owner will compare the invalid-probe rate of an adversarial run with recent runs. If it rises sharply, the fix is a narrow allowance (for example, one `py_compile` check), not general Bash. The first case (a Python probe that built its path from `__file__`, [#74](https://github.com/karlbaria/autonomous-agents-factory/issues/74)) was fixed in #76 (§13).
 - **No "accept edits as baseline" for research pages.** Once a human edits a factory page, every later run skips it with `human_edit_detected`. There's no way to tell the factory "take the current version as the new baseline and keep updating". Task 15's Revise flow needs that for planning docs anyway.
-- **Workflow selection from Slack (§6).** Research tasks are API/CLI-only until Slack can choose a workflow.
+- ~~**Workflow selection from Slack (§6).** Research tasks are API/CLI-only until Slack can choose a workflow.~~ Done in [#83](https://github.com/karlbaria/autonomous-agents-factory/pull/83) (Task 15 PR 1).
 - **A held task's question isn't visible for CLI/API tasks.** `bgagent status` omits it, and an auto-tracked Jira card gets a generic "task completed" comment and stays In Progress. Fix both together: the comment should carry the question, and the card should read as waiting for input.
 - **`bgagent status` shows the last call's cost and turns,** not the task totals.
 - **The adversarial reviewer returned READY on a diff that invented a feature (§13);** watch for repeats.
 - **Deterministic merge gate for flagged PRs** (`flag_concern` tool → `needs-human` label → watchdog skip): in Task 15 PR 3's scope.
 - **Optional: path-filtered CI for agent-only PRs,** if the ~15-minute build becomes a bottleneck.
+- **Reviewer findings JSON sometimes fails to parse (invalid escape),** which forces a NOT_READY round on a correct diff (~$0.20 extra on the Task 15 PR 1 coding demo). Watch for repeats; fix the parser or the prompt if it happens again.
+
+## Task 15: Feature-planning workflow — PR 1 (Slack intent routing + read-only planning)
+
+[#82](https://github.com/karlbaria/autonomous-agents-factory/issues/82), PR 1 of 3. [#83](https://github.com/karlbaria/autonomous-agents-factory/pull/83) merged and deployed. It adds no CDK resources and no IAM changes: a synth of `main` and the branch in the same context showed the same resource counts and no IAM statement differences, only Lambda code, the agent image and the usual version rotations.
+
+### 1. What shipped
+
+- **Slack routing.** A message that starts with `research` (after the mention, any letter case, whole word) runs `knowledge/web-research-v1`. One that starts with `i want to build` or `plan` runs the new `knowledge/feature-planning-v1`. Anything else goes to the repo's default workflow, as before. Research and planning need a repo (`owner/repo` or the channel default) and say why when there is none.
+- **Planning is read-only:** `[Read, Glob, Grep]`, no WebFetch, no Bash/Write/Edit, no PR. It reads a read-only context clone of the repo.
+- **The plan page:** `Plan: <feature> · <6-char task id>` under the mapped SD parent, labelled `factory-generated`, `factory-draft` and `factory-plan`. The deliverer sets the title; research pages are unchanged.
+- **No Jira auto-track for planning,** even on SHOP's `--auto-track` mapping. The skip is recorded as `jira_auto_track_skipped` with `reason: workflow_exempt`, and `bgagent watch` shows it.
+- **Slack completion:** "Planning draft ready" plus the page button, for planning tasks only.
+
+### 2. Demo results
+
+All three were submitted from Slack against `karlbaria/factory-shop`.
+
+- **Planning** — task `01M85Z3DDVEA6D0Q1DM285GPB6` (`knowledge/feature-planning-v1`, "a wishlist where customers can save products for later and move them to the cart"): COMPLETED in 47 s, $0.18. Published [Plan: Customer wishlist (save for later, move to cart) · 85GPB6](https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015867/Plan+Customer+wishlist+save+for+later+move+to+cart+85GPB6) with the shape, stories, risks and success criteria. No Jira card (`jira_auto_track_skipped`, `reason: workflow_exempt`, project SHOP), no PR.
+- **Research** — task `01M85Z234ECMGQTRMGE4JANZXN` (`knowledge/web-research-v1`, "current best practices for React Testing Library queries"): COMPLETED in 73 s, $0.21. Published [React Testing Library query best practices (late 2026), checked against factory-shop](https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015846/React+Testing+Library+query+best+practices+late+2026+checked+against+factory-shop). Its auto-tracked Jira card moved to Done (seen on the board; the task's events don't record the transition).
+- **Coding** — task `01M85Z2EMFWSBQMDCXPQ7MQ0Y6` (`coding/new-task-adversarial-v1`, the README pytest note): COMPLETED in 181 s, $0.43, `build_passed: true`. PR [factory-shop#51](https://github.com/karlbaria/factory-shop/pull/51) — adversarial review round 1 NOT_READY with 0 findings (the reviewer JSON parse failure, see the Task 14 open items), round 2 READY with 1 finding. **Merged** (auto-merge, 2026-11-24 05:10 UTC).
+
+### 3. Design decisions recorded in #82
+
+- The decisions and deferred items are in [#82](https://github.com/karlbaria/autonomous-agents-factory/issues/82)'s **Decisions** and **Deferred** sections.
+- **Entry points:** an idea in Slack (PR 1–2), an existing PRD page (PR 2, `plan from <url>`), and an epic with subtasks already in Jira (works today through authored-subtask orchestration).
+
+### 4. Known limits until PR 2
+
+- **Don't use `plan from <url>` yet.** PR 1 routes it to planning with the URL as plain text (planning has no WebFetch), and the URL's `SD/pages` segment could be read as `owner/repo`.
+- **No clarifying questions or thread replies.** A vague request is planned as written, with its assumptions listed under Risks.
+- **The Slack summary shows the headline and the page button, not the page title.** The title isn't on the task record.
+- **A stray leading "In ,".** Removing the repo from "In karlbaria/factory-shop, add X" leaves "In , add X". The coding demo's description was "In , add a one-line note…", and the agent noted `Task says "In ," (blank)`. PR 2 strips the leading `in`/`for <repo>,` form as well as the trailing one.
+
+### 5. Tag
+
+`known-good-task15-pr1` at the commit of this LAB_LOG entry.
