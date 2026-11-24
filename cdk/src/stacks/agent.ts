@@ -1933,6 +1933,23 @@ export class AgentStack extends Stack {
           resources: [jiraOauthSecretArn],
         }));
       }
+
+      // Task 15 (fork), #82 PR 2a: `@Shoof plan from <Confluence page URL>`.
+      // The Slack command processor reads the PRD page with the tenant's
+      // shared Jira+Confluence 3LO token (confluence-prd.ts), using the
+      // registry read and GetSecretValue granted just above. Reading it goes
+      // through the shared resolver, which refreshes an expiring token in
+      // place, and Atlassian rotates the refresh token on every use: a
+      // refresh that cannot be written back would leave the tenant's stored
+      // refresh token dead. So this one Lambda also gets Put, scoped like the
+      // orchestrator, Jira webhook processor, heartbeat and fan-out above.
+      // Its guardrail grant already exists (createTaskCore screening).
+      if (slackIntegration) {
+        slackIntegration.commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['secretsmanager:PutSecretValue'],
+          resources: [jiraOauthSecretArn],
+        }));
+      }
     }
 
     // --- Fan-out plane consumer ---

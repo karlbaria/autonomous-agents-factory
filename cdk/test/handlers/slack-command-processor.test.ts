@@ -44,6 +44,13 @@ jest.mock('../../src/handlers/shared/repo-config', () => ({
   lookupRepo: (...args: unknown[]) => lookupRepoMock(...args),
 }));
 
+// #82 PR 2a: the PRD page read (its own checks are in confluence-prd.test.ts).
+const readPrdPageMock = jest.fn();
+jest.mock('../../src/handlers/shared/confluence-prd', () => ({
+  ...jest.requireActual('../../src/handlers/shared/confluence-prd'),
+  readPrdPage: (...args: unknown[]) => readPrdPageMock(...args),
+}));
+
 const fetchMock = jest.fn();
 (global as unknown as { fetch: unknown }).fetch = fetchMock;
 
@@ -97,6 +104,7 @@ describe('slack-command-processor handler', () => {
     smSend.mockReset();
     fetchMock.mockReset();
     createTaskCoreMock.mockReset();
+    readPrdPageMock.mockReset();
     // Default: no per-repo default_workflow — tasks pin CODING_WORKFLOW_ID,
     // unchanged from before Task 13 (fork). Overridden per-case below.
     lookupRepoMock.mockReset();
@@ -329,6 +337,86 @@ describe('slack-command-processor handler', () => {
       ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes(expected),
     );
     expect(reply).toBeTruthy();
+  });
+
+  // ─── #82 PR 2a: plan from an existing Confluence PRD ──────────────────────
+
+  const PRD_URL = 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015867/Wishlist+PRD';
+  const SHOP_CONFIG = {
+    repo: 'karlbaria/factory-shop', status: 'active', confluence_cloud_id: 'cloud-1', confluence_space_key: 'SD',
+  };
+
+  function postedTexts(): string[] {
+    return fetchMock.mock.calls
+      .filter(([url]) => String(url).includes('chat.postMessage'))
+      .map(([, opts]) => JSON.parse((opts as { body: string }).body).text as string);
+  }
+
+  test('"plan from <url>" hands the screened PRD to planning between the markers', async () => {
+    mockLinkedPublicChannel();
+    lookupRepoMock.mockResolvedValueOnce({ onboarded: true, config: SHOP_CONFIG });
+    readPrdPageMock.mockResolvedValueOnce({
+      ok: true, pageUrl: PRD_URL, title: 'Wishlist PRD', text: 'Customers lose items they like.', truncated: false,
+    });
+    await handler(mention({ text: `submit karlbaria/factory-shop plan from <${PRD_URL}>` }));
+    expect(readPrdPageMock).toHaveBeenCalledWith(PRD_URL, SHOP_CONFIG);
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [reqBody] = createTaskCoreMock.mock.calls[0];
+    expect(reqBody.repo).toBe('karlbaria/factory-shop');
+    expect(reqBody.workflow_ref).toBe('knowledge/feature-planning-v1');
+    const description = reqBody.task_description as string;
+    expect(description).toContain(`PRD page ${PRD_URL}`);
+    expect(description).toMatch(/<<<BEGIN_PRD_PAGE>>>\nTitle: Wishlist PRD\n\nCustomers lose items they like\.\n<<<END_PRD_PAGE>>>$/);
+    expect(postedTexts().some((t) => t.includes('longer than'))).toBe(false);
+  });
+
+  test('a note after the link travels outside the markers', async () => {
+    mockLinkedPublicChannel();
+    lookupRepoMock.mockResolvedValueOnce({ onboarded: true, config: SHOP_CONFIG });
+    readPrdPageMock.mockResolvedValueOnce({ ok: true, pageUrl: PRD_URL, title: 'T', text: 'Body.', truncated: false });
+    await handler(mention({ text: `submit karlbaria/factory-shop plan from <${PRD_URL}|PRD>, mobile first` }));
+    const description = createTaskCoreMock.mock.calls[0][0].task_description as string;
+    expect(description.split('<<<BEGIN_PRD_PAGE>>>')[0]).toContain("Requester's note: mobile first");
+  });
+
+  test('an oversized PRD is planned from its first part, with a visible note', async () => {
+    mockLinkedPublicChannel();
+    lookupRepoMock.mockResolvedValueOnce({ onboarded: true, config: SHOP_CONFIG });
+    readPrdPageMock.mockResolvedValueOnce({ ok: true, pageUrl: PRD_URL, title: 'T', text: 'x'.repeat(8000), truncated: true });
+    // The truncation reply looks up the bot token again.
+    ddbSend.mockResolvedValue({ Item: { status: 'active' } });
+    await handler(mention({ text: `submit karlbaria/factory-shop plan from <${PRD_URL}>` }));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][0].task_description).toContain('only the first 8,000 are included');
+    expect(postedTexts().some((t) => t.includes('longer than 8,000 characters'))).toBe(true);
+  });
+
+  test.each([
+    ['other_space', "I can only read PRD pages in this repo's Confluence space (SD)."],
+    ['other_host', 'I can only read PRD pages on karlvb.atlassian.net.'],
+    ['blocked', "That PRD page was blocked by content policy, so I didn't use it."],
+    ['screening_unavailable', "Content screening is unavailable, so I can't use that PRD page right now."],
+  ])('a rejected PRD (%s) creates no task and says why', async (reason, message) => {
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
+    ddbSend.mockResolvedValue({ Item: { status: 'active' } });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ ok: true, channel: { is_private: false, is_member: true } }),
+    });
+    lookupRepoMock.mockResolvedValueOnce({ onboarded: true, config: SHOP_CONFIG });
+    readPrdPageMock.mockResolvedValueOnce({ ok: false, reason, message });
+    await handler(mention({ text: `submit karlbaria/factory-shop plan from <${PRD_URL}>` }));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(postedTexts()).toContain(`:x: Task not created. ${message}`);
+    expect(fetchMock.mock.calls.some(([url, opts]) => String(url).includes('reactions.add')
+      && JSON.parse((opts as { body: string }).body).name === 'x')).toBe(true);
+  });
+
+  test('an ordinary plan message reads no page', async () => {
+    mockLinkedPublicChannel();
+    await handler(mention({ text: 'submit org/repo plan a tagging feature' }));
+    expect(readPrdPageMock).not.toHaveBeenCalled();
+    expect(createTaskCoreMock.mock.calls[0][0].task_description).toBe('a tagging feature');
   });
 
   test('mention submit in private channel bot is not in — replies with invite hint', async () => {

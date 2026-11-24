@@ -19,6 +19,7 @@
 
 import * as crypto from 'crypto';
 import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { buildPrdTaskDescription, PRD_MAX_CHARS, readPrdPage } from './shared/confluence-prd';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
 import { lookupRepo } from './shared/repo-config';
@@ -134,7 +135,8 @@ export async function handler(raw: RawEvent): Promise<void> {
           + '*Research a topic* (write-up to the repo\'s Confluence space):\n'
           + '> `@Shoof research <topic> in org/repo`\n\n'
           + '*Plan a feature* (draft planning doc in Confluence, no code changes):\n'
-          + '> `@Shoof I want to build <feature> in org/repo` or `@Shoof plan <feature> in org/repo`\n\n'
+          + '> `@Shoof I want to build <feature> in org/repo` or `@Shoof plan <feature> in org/repo`\n'
+          + '> From an existing PRD page in the repo\'s Confluence space: `@Shoof plan from <Confluence page URL> in org/repo`\n\n'
           + '*Private submissions:* DM Shoof directly.\n\n'
           + '*Cancel a task:* Use the Cancel button in the thread.\n\n'
           + '*Link your account:* `/bgagent link` — one-time setup.\n\n'
@@ -267,12 +269,32 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
   const { config: slackTaskRepoConfig } = await lookupRepo(repo);
   const intent = classifySlackIntent(description ?? '');
 
+  // #82 PR 2a: `plan from <url>` — the PRD page is the brief. It is read,
+  // checked against the repo's Confluence mapping and screened here, before
+  // the task exists; anything wrong is a reply, not a task.
+  let taskDescription = intent.description || undefined;
+  if (intent.prdUrl) {
+    const prd = await readPrdPage(intent.prdUrl, slackTaskRepoConfig);
+    if (!prd.ok) {
+      await reply(`:x: Task not created. ${prd.message}`);
+      if (event.mention_thread_ts) {
+        await swapReaction(event.team_id, event.channel_id, event.mention_thread_ts, 'eyes', 'x');
+      }
+      return;
+    }
+    if (prd.truncated) {
+      const cap = PRD_MAX_CHARS.toLocaleString('en-US');
+      await reply(`:information_source: That PRD page is longer than ${cap} characters, so planning uses only the first ${cap}.`);
+    }
+    taskDescription = buildPrdTaskDescription(prd, taskDescription);
+  }
+
   // Create the task through the shared core.
   const result = await createTaskCore(
     {
       repo,
       issue_number: issueNumber,
-      task_description: intent.description || undefined,
+      task_description: taskDescription,
       workflow_ref: intent.workflowId ?? resolveChannelDefaultWorkflow(slackTaskRepoConfig),
       ...(attachments.length > 0 && { attachments }),
     },

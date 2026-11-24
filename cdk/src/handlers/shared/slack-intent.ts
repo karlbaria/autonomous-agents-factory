@@ -23,6 +23,8 @@
  *
  * - `research …` → `knowledge/web-research-v1`
  * - `i want to build …` / `plan …` → `knowledge/feature-planning-v1`
+ * - `plan from <url> …` (#82 PR 2a) → `knowledge/feature-planning-v1`, with
+ *   the link returned as {@link SlackIntent.prdUrl}: the page is the brief.
  * - anything else → no workflow of its own: the caller uses the repo's
  *   default (`resolveChannelDefaultWorkflow`), exactly as before.
  *
@@ -44,8 +46,27 @@ export interface SlackIntent {
    * The task description to submit. For `research` / `plan`, the text after
    * the leading keyword, with a trailing `in` / `for` (left behind when the
    * repo token was removed) stripped. For `default`, the input unchanged.
+   * For `plan from <url>`, whatever follows the link (an optional note).
    */
   readonly description: string;
+  /**
+   * The page link of a `plan from <url>` message (#82 PR 2a), unvalidated:
+   * the caller checks it against the repo's Confluence mapping before
+   * reading anything.
+   */
+  readonly prdUrl?: string;
+}
+
+/**
+ * `plan from` and a link, as Slack sends it (`<https://…>` or
+ * `<https://…|label>`) or bare. Checked before the generic `plan` rule, which
+ * would otherwise take `from <url>` as the feature to plan.
+ */
+const PLAN_FROM_URL_PATTERN = /^plan\s+from\s+(?:<(https?:\/\/[^|>\s]+)(?:\|[^>]*)?>|(https?:\/\/[^\s<>]*[^\s<>,.;:!?)]))(?=[\s:,;-]|$)[\s:,-]*/i;
+
+/** Slack escapes `&`, `<` and `>` in message text. */
+function unescapeSlackUrl(url: string): string {
+  return url.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 }
 
 /** Leading keyword (whole words), then any `:` / `,` / `-` separator. */
@@ -61,6 +82,15 @@ const TRAILING_PREPOSITION = /(?:^|\s+)(?:in|for)$/i;
 /** Classify a Slack task description by its leading words. */
 export function classifySlackIntent(description: string): SlackIntent {
   const text = description.trim();
+  const planFrom = PLAN_FROM_URL_PATTERN.exec(text);
+  if (planFrom) {
+    return {
+      kind: 'plan',
+      workflowId: FEATURE_PLANNING_WORKFLOW_ID,
+      description: text.slice(planFrom[0].length).replace(TRAILING_PREPOSITION, '').trim(),
+      prdUrl: unescapeSlackUrl(planFrom[1] ?? planFrom[2]),
+    };
+  }
   for (const { kind, pattern, workflowId } of INTENT_PATTERNS) {
     const match = pattern.exec(text);
     if (match) {

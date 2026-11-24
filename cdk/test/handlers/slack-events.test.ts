@@ -260,7 +260,53 @@ describe('slack-events handler', () => {
     expect(lambdaSend).toHaveBeenCalledTimes(1);
     const [invokeCmd] = lambdaSend.mock.calls[0];
     const payload = JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload));
-    expect(payload.text).toBe('submit karlbaria/factory-shop add a GET /api/products/count endpoint in');
+    // #82 PR 2a: the trailing `in` that pointed at the repo goes with it.
+    expect(payload.text).toBe('submit karlbaria/factory-shop add a GET /api/products/count endpoint');
+  });
+
+  // #82 PR 2a: description cleanup and Confluence links.
+  describe('repo removal (#82 PR 2a)', () => {
+    async function forwardedText(text: string): Promise<string> {
+      fetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+      lambdaSend.mockResolvedValueOnce({});
+      smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+        if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
+          return Promise.resolve({ SecretString: SIGNING_SECRET });
+        }
+        return Promise.resolve({ SecretString: 'xoxb-bot' });
+      });
+      const body = JSON.stringify({
+        type: 'event_callback',
+        team_id: 'T1',
+        event: { type: 'app_mention', user: 'U1', channel: 'C1', text: `<@BOT> ${text}`, ts: '1234.0100' },
+      });
+      const result = await handler(signedEvent(body));
+      expect(result.statusCode).toBe(200);
+      expect(lambdaSend).toHaveBeenCalledTimes(1);
+      const [invokeCmd] = lambdaSend.mock.calls[0];
+      return JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload)).text;
+    }
+
+    test('leading form: "In owner/repo, add X" becomes "add X"', async () => {
+      expect(await forwardedText('In karlbaria/factory-shop, add a coupon field'))
+        .toBe('submit karlbaria/factory-shop add a coupon field');
+    });
+
+    test('trailing form: "I want to build X in owner/repo" keeps PR 1 behaviour', async () => {
+      expect(await forwardedText('I want to build a tagging feature in karlbaria/factory-shop'))
+        .toBe('submit karlbaria/factory-shop I want to build a tagging feature');
+    });
+
+    test('a Confluence page URL is never taken as owner/repo', async () => {
+      const url = 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015867/Wishlist+PRD';
+      expect(await forwardedText(`plan from <${url}> in karlbaria/factory-shop`))
+        .toBe(`submit karlbaria/factory-shop plan from <${url}>`);
+    });
+
+    test('a Confluence page URL with no repo forwards the whole text (channel default)', async () => {
+      const url = 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015867';
+      expect(await forwardedText(`plan from <${url}>`)).toBe(`submit plan from <${url}>`);
+    });
   });
 
   // Two real, non-URL-path candidates — don't guess; ask in-thread instead.

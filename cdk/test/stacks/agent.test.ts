@@ -847,7 +847,7 @@ describe('AgentStack', () => {
   test.each([
     'TaskApiCreateTaskFn',
     'SlackIntegrationCommandProcessorFn',
-  ] as const)('%s can resolve a Jira auto-track mapping and read (not write) the OAuth secret', (prefix) => {
+  ] as const)('%s can resolve a Jira auto-track mapping and read the OAuth secret', (prefix) => {
     const fns = template.findResources('AWS::Lambda::Function');
     const fn = Object.entries(fns).find(([id]) => id.startsWith(prefix));
     expect(fn).toBeDefined();
@@ -861,7 +861,28 @@ describe('AgentStack', () => {
     const asJson = JSON.stringify(fnPolicies.map(([, policy]) => policy));
     expect(asJson).toContain('bgagent-jira-oauth-*');
     expect(asJson).toContain('secretsmanager:GetSecretValue');
+  });
+
+  test('the direct-API create-task Lambda cannot write the OAuth secret', () => {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const asJson = JSON.stringify(Object.entries(policies)
+      .filter(([logicalId]) => logicalId.startsWith('TaskApiCreateTaskFn')).map(([, policy]) => policy));
     expect(asJson).not.toContain('secretsmanager:PutSecretValue');
+  });
+
+  // Task 15 (fork), #82 PR 2a: `plan from <Confluence page URL>` reads the PRD
+  // through the refreshing resolver, so the Slack processor can write the
+  // rotated token back — on the Jira OAuth prefix only.
+  test('the Slack command processor can write back a refreshed Jira OAuth token, and nothing else', () => {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const statements = Object.entries(policies)
+      .filter(([logicalId]) => logicalId.startsWith('SlackIntegrationCommandProcessorFn'))
+      .flatMap(([, policy]) => (policy as { Properties: { PolicyDocument: { Statement: Array<{ Action: string | string[]; Resource: unknown }> } } })
+        .Properties.PolicyDocument.Statement);
+    const puts = statements.filter((st) => ([] as string[]).concat(st.Action).includes('secretsmanager:PutSecretValue'));
+    expect(puts).toHaveLength(1);
+    expect(([] as string[]).concat(puts[0].Action)).toEqual(['secretsmanager:PutSecretValue']);
+    expect(JSON.stringify(puts[0].Resource)).toContain('bgagent-jira-oauth-*');
   });
 
   test('webhook-create-task.ts is NOT wired for Jira auto-tracking (scoped to slack + api only)', () => {
