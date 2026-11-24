@@ -23,6 +23,7 @@ import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
 import { lookupRepo } from './shared/repo-config';
 import { slackFetch } from './shared/slack-api';
+import { classifySlackIntent, type SlackIntent } from './shared/slack-intent';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { Attachment } from './shared/types';
 import { makeDocClient } from './shared/ua';
@@ -130,6 +131,10 @@ export async function handler(raw: RawEvent): Promise<void> {
           + '*Submit a task:* Mention `@Shoof` in any channel:\n'
           + '> `@Shoof fix the login bug in org/repo#42`\n'
           + '> `@Shoof update the README in org/repo`\n\n'
+          + '*Research a topic* (write-up to the repo\'s Confluence space):\n'
+          + '> `@Shoof research <topic> in org/repo`\n\n'
+          + '*Plan a feature* (draft planning doc in Confluence, no code changes):\n'
+          + '> `@Shoof I want to build <feature> in org/repo` or `@Shoof plan <feature> in org/repo`\n\n'
           + '*Private submissions:* DM Shoof directly.\n\n'
           + '*Cancel a task:* Use the Cancel button in the thread.\n\n'
           + '*Link your account:* `/bgagent link` — one-time setup.\n\n'
@@ -217,7 +222,7 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
     }
   }
   if (!repo) {
-    await reply('Please include a repo — e.g. `@Shoof fix the bug in org/repo#42`. Or ask an admin to set a default with `bgagent slack onboard-channel`.');
+    await reply(missingRepoMessage(classifySlackIntent(args.join(' '))));
     if (event.mention_thread_ts) {
       await swapReaction(event.team_id, event.channel_id, event.mention_thread_ts, 'eyes', 'x');
     }
@@ -257,15 +262,18 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
   // must not fall through the resolution ladder to the repo-less
   // default/agent-v1 (which never commits or opens a PR). Mirrors the Jira
   // processor. Task 13 (fork): the repo's own default_workflow wins when set.
+  // Task 15 (fork), #82: a message starting with `research` or `i want to
+  // build` / `plan` names its own workflow; anything else keeps the default.
   const { config: slackTaskRepoConfig } = await lookupRepo(repo);
+  const intent = classifySlackIntent(description ?? '');
 
   // Create the task through the shared core.
   const result = await createTaskCore(
     {
       repo,
       issue_number: issueNumber,
-      task_description: description,
-      workflow_ref: resolveChannelDefaultWorkflow(slackTaskRepoConfig),
+      task_description: intent.description || undefined,
+      workflow_ref: intent.workflowId ?? resolveChannelDefaultWorkflow(slackTaskRepoConfig),
       ...(attachments.length > 0 && { attachments }),
     },
     {
@@ -289,6 +297,23 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
   // Swap reaction to :x: on the mention message.
   if (event.mention_thread_ts) {
     await swapReaction(event.team_id, event.channel_id, event.mention_thread_ts, 'eyes', 'x');
+  }
+}
+
+/**
+ * The reply when a mention resolves to no repo. Research and planning say why
+ * they need one (Task 15 (fork), #82): the repo selects the Confluence space,
+ * and planning reads its code.
+ */
+function missingRepoMessage(intent: SlackIntent): string {
+  const defaultHint = 'Or ask an admin to set a channel default with `bgagent slack onboard-channel`.';
+  switch (intent.kind) {
+    case 'research':
+      return `Research needs a repo, which selects the Confluence space the write-up goes to — e.g. \`@Shoof research <topic> in org/repo\`. ${defaultHint}`;
+    case 'plan':
+      return `Planning needs a repo to read — e.g. \`@Shoof I want to build <feature> in org/repo\`. ${defaultHint}`;
+    default:
+      return 'Please include a repo — e.g. `@Shoof fix the bug in org/repo#42`. Or ask an admin to set a default with `bgagent slack onboard-channel`.';
   }
 }
 

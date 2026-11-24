@@ -42,6 +42,7 @@ import { logger } from './logger';
 import type { ChannelSource } from './types';
 import { makeDocClient } from './ua';
 import { computeTtlEpoch } from './validation';
+import { workflowExemptFromJiraAutoTrack } from './workflows';
 
 const ddb = makeDocClient();
 const REQUEST_TIMEOUT_MS = 5000;
@@ -362,6 +363,10 @@ const JIRA_AUTO_TRACK_CHANNELS: ReadonlySet<ChannelSource> = new Set(['slack', '
 export interface ResolveJiraAutoTrackParams {
   readonly repo?: string;
   readonly channelSource: ChannelSource;
+  /** The task's resolved workflow id. A workflow whose descriptor is
+   *  `exemptFromJiraAutoTrack` (Task 15 (fork), #82: planning) is never
+   *  auto-tracked, even on an opted-in mapping. */
+  readonly workflowId?: string;
   /** The channel's own metadata, merged with any auto-tracked Jira fields
    *  into the returned {@link JiraAutoTrackResult.channelMetadata}. */
   readonly channelMetadata: Record<string, string>;
@@ -401,6 +406,16 @@ export async function resolveJiraAutoTrack(
   }
   const mapping = await findAutoTrackedJiraMapping(params.repo);
   if (!mapping) return { channelMetadata: params.channelMetadata };
+  if (params.workflowId && workflowExemptFromJiraAutoTrack(params.workflowId)) {
+    // Task 15 (fork), #82: a planning task files its Jira structure only on
+    // Approve. Recorded like every other skip on a qualifying task (#71), so
+    // a missing card is explained rather than silent.
+    await writeJiraAutoTrackSkippedEvent(params, mapping.projectKey, {
+      reason: 'workflow_exempt',
+      workflow_id: params.workflowId,
+    });
+    return { channelMetadata: params.channelMetadata };
+  }
 
   const summary = (params.taskDescription ?? `Task for ${params.repo}`).slice(0, JIRA_SUMMARY_MAX_LENGTH);
   const description = [

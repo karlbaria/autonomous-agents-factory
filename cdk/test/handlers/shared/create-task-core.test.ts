@@ -1269,6 +1269,22 @@ describe('createTaskCore', () => {
       });
     });
 
+    // Task 15 (fork), #82: the exemption is decided inside resolveJiraAutoTrack
+    // from the workflow id createTaskCore passes in.
+    test('passes the resolved workflow id to resolveJiraAutoTrack', async () => {
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'a tagging feature', workflow_ref: 'knowledge/feature-planning-v1' },
+        makeContext({ channelSource: 'slack', channelMetadata: { slack_team_id: 'T1' } }),
+        'req-jira-82',
+      );
+
+      expect(result.statusCode).toBe(201);
+      expect(mockResolveJiraAutoTrack).toHaveBeenCalledWith(expect.objectContaining({
+        repo: 'org/repo',
+        workflowId: 'knowledge/feature-planning-v1',
+      }));
+    });
+
     test('a repo-less task still calls resolveJiraAutoTrack (repo: undefined) and succeeds — gating is its job, not create-task-core\'s', async () => {
       const result = await createTaskCore(
         { task_description: 'Research something', workflow_ref: 'knowledge/web-research-v1' },

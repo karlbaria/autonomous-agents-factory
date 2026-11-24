@@ -782,6 +782,7 @@ export async function createTaskCore(
   const jiraAutoTrack = await resolveJiraAutoTrack({
     repo: body.repo,
     channelSource: context.channelSource,
+    workflowId: resolvedWorkflow.id,
     channelMetadata: context.channelMetadata,
     taskId,
     taskDescription: body.task_description,

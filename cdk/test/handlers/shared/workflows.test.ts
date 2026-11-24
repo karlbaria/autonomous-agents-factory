@@ -31,6 +31,7 @@ import {
   resolveChannelDefaultWorkflow,
   resolveWorkflowRef,
   resolveWorkflowRefError,
+  workflowExemptFromJiraAutoTrack,
   workflowIsReadOnly,
   workflowPublishesConfluence,
   workflowRequiresRepo,
@@ -196,7 +197,11 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
       // Task 14 (fork): publishesConfluence mirrors whether any deliver_artifact
       // step targets a Confluence-publishing deliverer (agent DELIVERERS with
       // publishes_confluence=True).
-      const confluenceTargets = new Set(['confluence', 's3_and_confluence', 's3_comment_and_confluence']);
+      const confluenceTargets = new Set([
+        'confluence', 's3_and_confluence', 's3_comment_and_confluence',
+        // Task 15 (fork), #82: the planning-doc variant.
+        's3_comment_and_confluence_plan',
+      ]);
       const steps = (doc.steps ?? []) as Array<Record<string, unknown>>;
       const yamlPublishesConfluence = steps.some(
         (step) => step.kind === 'deliver_artifact' && confluenceTargets.has(step.target as string),
@@ -379,6 +384,25 @@ describe('resolveChannelDefaultWorkflow', () => {
 
   test('falls back to CODING_WORKFLOW_ID when the repo config is null (not onboarded)', () => {
     expect(resolveChannelDefaultWorkflow(null)).toBe(CODING_WORKFLOW_ID);
+  });
+});
+
+describe('knowledge/feature-planning-v1 (Task 15 (fork), #82)', () => {
+  test('is a read-only, repo-optional, non-PR workflow that publishes to Confluence', () => {
+    expect(workflowRequiresRepo('knowledge/feature-planning-v1')).toBe(false);
+    expect(workflowIsReadOnly('knowledge/feature-planning-v1')).toBe(true);
+    expect(workflowUsesPr('knowledge/feature-planning-v1')).toBe(false);
+    expect(workflowPublishesConfluence('knowledge/feature-planning-v1')).toBe(true);
+    expect(resolveWorkflowRef('knowledge/feature-planning-v1')).toEqual({
+      id: 'knowledge/feature-planning-v1', version: '1.0.0',
+    });
+  });
+
+  test('is the only workflow exempt from Jira auto-track', () => {
+    expect(workflowExemptFromJiraAutoTrack('knowledge/feature-planning-v1')).toBe(true);
+    for (const id of ['knowledge/web-research-v1', 'coding/new-task-v1', 'coding/new-task-adversarial-v1', 'default/agent-v1', 'not/a-real-v1']) {
+      expect(workflowExemptFromJiraAutoTrack(id)).toBe(false);
+    }
   });
 });
 

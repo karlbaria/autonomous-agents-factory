@@ -1,0 +1,55 @@
+# Feature planning (Task 15 (fork), issue #82, PR 1): turn a feature request
+# into a draft planning doc in the repo's mapped Confluence space. Repo-aware
+# and strictly read-only: the agent reads the codebase (a read-only context
+# clone) and writes nothing — no Bash, Write, Edit or WebFetch, no branch, no
+# PR. The platform publishes the agent's final message as the page.
+#
+# Jira is never auto-tracked for this workflow (the CDK descriptor's
+# exemptFromJiraAutoTrack); the Jira structure is filed only when the PM
+# approves the plan (#82 PR 3).
+id: knowledge/feature-planning-v1
+version: 1.0.0
+domain: knowledge
+description: >-
+  Plan a feature against a repo: read the code, judge one story vs. an epic
+  with dependent subtasks, and deliver a draft planning doc to S3 and to the
+  repo's mapped Confluence space.
+guidance: >-
+  Select for "I want to build X" / "plan X" requests against a repo: the output
+  is a planning doc for review, never code.
+# Repo-OPTIONAL here even though planning always has a repo (the Slack path
+# requires one): only a `requires_repo: false` knowledge workflow takes the
+# read-only context-clone path (#61). Deferred: "flip feature-planning-v1 to
+# requires_repo: true" (docs/lab/FACTORY_PLAN.md, Backlog).
+requires_repo: false
+read_only: true
+prompt:
+  template: registry://prompt/feature-planning-workflow
+  placeholders: [task_description, memory_context, max_turns]
+hydration:
+  sources: [task_description, attachments, memory]
+agent_config:
+  tier: read-only
+  # Repo context only. No WebFetch: planning needs the code, not the web, and
+  # without it neither the request nor the repo content can send data out.
+  allowed_tools: [Read, Glob, Grep]
+  cedar_policy_modules: [builtin/hard_deny]
+repo_config:
+  discover: false
+required_inputs:
+  all_of: [task_description]
+# deliver: S3 always; Confluence when the task's repo is mapped, as a plan page
+# (title `Plan: <feature> · <6-char task id>`, labels factory-generated,
+# factory-draft, factory-plan); the comment milestone leads with the page link
+# or the skip reason.
+steps:
+  - { kind: hydrate_context,  name: context }
+  - { kind: run_agent,        name: plan }
+  - { kind: deliver_artifact, name: deliver, target: s3_comment_and_confluence_plan }
+terminal_outcomes:
+  primary: artifact
+limits:
+  max_turns: 40
+promotion_gate:
+  requires: [tests:agent/feature_planning]
+status: production

@@ -26,6 +26,7 @@ def test_first_party_deliverers_present():
         "confluence",
         "s3_and_confluence",
         "s3_comment_and_confluence",
+        "s3_comment_and_confluence_plan",
     }
 
 
@@ -46,7 +47,16 @@ def test_only_confluence_targets_publish_to_confluence():
         "confluence",
         "s3_and_confluence",
         "s3_comment_and_confluence",
+        "s3_comment_and_confluence_plan",
     }
+
+
+def test_only_the_plan_target_publishes_plan_pages():
+    """Task 15 (fork), #82: every existing target still publishes research pages."""
+    assert {n for n, d in DELIVERERS.items() if d.confluence_kind == "plan"} == {
+        "s3_comment_and_confluence_plan"
+    }
+    assert produced_outcomes("s3_comment_and_confluence_plan") == frozenset({"artifact", "comment"})
 
 
 def test_unset_target_models_the_runtime_default():
@@ -530,3 +540,110 @@ class TestFallbackPageTitle:
                 ),
             )
         assert seen["fallback_title"] == "Research: Research caching options"
+
+
+class TestPlanDelivery:
+    """Task 15 (fork), #82: planning docs are titled and labelled by the deliverer."""
+
+    PLAN_DOC = "# Plan: Product tagging\n\n## Summary\nAdd tags.\n"
+
+    def test_plan_title_uses_the_h1_feature_and_the_task_id_suffix(self):
+        from workflow.deliverers import _plan_page_title
+
+        assert (
+            _plan_page_title(self.PLAN_DOC, "01M85AKACXSZ2TKGTWPR30G1SX", "ignored")
+            == "Plan: Product tagging · 30G1SX"
+        )
+
+    def test_plan_title_accepts_an_h1_without_the_plan_prefix(self):
+        from workflow.deliverers import _plan_page_title
+
+        assert _plan_page_title("# Tagging\n\nbody", "task-abcdef", "") == "Plan: Tagging · abcdef"
+
+    def test_plan_title_falls_back_to_the_task_description(self):
+        from workflow.deliverers import _plan_page_title
+
+        assert (
+            _plan_page_title("no heading", "task-abcdef", "a tagging feature")
+            == "Plan: a tagging feature · abcdef"
+        )
+
+    def test_plan_title_is_empty_without_a_feature_name(self):
+        from workflow.deliverers import _plan_page_title
+
+        assert _plan_page_title("no heading", "task-abcdef", "") == ""
+        assert _plan_page_title("# Plan:\n\nbody", "task-abcdef", "  ") == ""
+
+    def test_plan_target_publishes_a_plan_page_with_the_deliverer_title(self, monkeypatch):
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        seen = {}
+
+        def fake_publish(text, meta, *, resolve_token, kind, title):
+            seen.update(text=text, meta=meta, kind=kind, title=title)
+            from confluence.publish import ConfluenceOutcome
+
+            return ConfluenceOutcome(status="skipped", skip_reason="no_mapping", detail="x")
+
+        progress = MagicMock()
+        with (
+            patch("aws_session.tenant_client", return_value=MagicMock()),
+            patch("confluence.publish.publish_markdown", side_effect=fake_publish),
+        ):
+            result = deliver(
+                "s3_comment_and_confluence_plan",
+                _ctx(
+                    self.PLAN_DOC,
+                    task_id="01M85AKACXSZ2TKGTWPR30G1SX",
+                    progress=progress,
+                    channel_metadata=CONFLUENCE_META,
+                    task_description="a tagging feature",
+                ),
+            )
+        assert seen["kind"] == "plan"
+        assert seen["title"] == "Plan: Product tagging · 30G1SX"
+        assert seen["meta"] == CONFLUENCE_META
+        assert (
+            result.artifact_uri
+            == "s3://artifacts-bkt/artifacts/01M85AKACXSZ2TKGTWPR30G1SX/result.md"
+        )
+        assert result.comment_posted is True
+
+    def test_research_targets_call_publish_exactly_as_before(self, monkeypatch):
+        """Research delivery, incl. #81's title fallback, is unchanged by the plan kind."""
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        for target in ("confluence", "s3_and_confluence", "s3_comment_and_confluence"):
+            with (
+                patch("aws_session.tenant_client", return_value=MagicMock()),
+                patch("confluence.publish.publish_markdown") as publish,
+            ):
+                from confluence.publish import ConfluenceOutcome
+
+                publish.return_value = ConfluenceOutcome(
+                    status="skipped", skip_reason="no_mapping", detail="x"
+                )
+                deliver(
+                    target,
+                    _ctx(
+                        "no heading here",
+                        progress=MagicMock(),
+                        channel_metadata=CONFLUENCE_META,
+                        task_description="Research caching options",
+                    ),
+                )
+            args, kwargs = publish.call_args
+            assert args[0] == "no heading here"
+            assert args[1] == CONFLUENCE_META
+            assert set(kwargs) == {"resolve_token", "fallback_title"}, target
+            assert kwargs["fallback_title"] == "Research: Research caching options"
+
+
+def test_feature_planning_uses_the_plan_target():
+    from pathlib import Path
+
+    import yaml
+
+    doc = yaml.safe_load(
+        (Path(__file__).parent.parent / "workflows/knowledge/feature-planning-v1.yaml").read_text()
+    )
+    targets = [s.get("target") for s in doc["steps"] if s["kind"] == "deliver_artifact"]
+    assert targets == ["s3_comment_and_confluence_plan"]

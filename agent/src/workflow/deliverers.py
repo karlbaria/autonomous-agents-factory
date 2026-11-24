@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from shell import log
 
@@ -133,6 +133,10 @@ class Deliverer:
     # token, ownership or edit clash) without failing the task, so it never
     # satisfies ``terminal_outcomes.primary`` on its own (Task 14, issue #57).
     publishes_confluence: bool = False
+    # What kind of Confluence page it publishes: a research write-up (titled by
+    # its H1) or a planning doc (Task 15 (fork), #82: titled by the deliverer,
+    # labelled ``factory-plan``). Only read when ``publishes_confluence``.
+    confluence_kind: Literal["research", "plan"] = "research"
 
 
 # First-party deliverers. These three names and their produced-outcome sets match
@@ -157,6 +161,15 @@ DELIVERERS: dict[str, Deliverer] = {
         "s3_comment_and_confluence",
         frozenset({"artifact", "comment"}),
         publishes_confluence=True,
+    ),
+    # Same as s3_comment_and_confluence, but the page is a planning doc (Task
+    # 15 (fork), #82): ``Plan: <feature> · <6-char task id>``, with the
+    # factory-plan label. knowledge/feature-planning-v1 uses it.
+    "s3_comment_and_confluence_plan": Deliverer(
+        "s3_comment_and_confluence_plan",
+        frozenset({"artifact", "comment"}),
+        publishes_confluence=True,
+        confluence_kind="plan",
     ),
 }
 
@@ -279,7 +292,36 @@ def _fallback_page_title(task_description: str) -> str:
     return f"{_FALLBACK_TITLE_PREFIX}{text}"
 
 
-def _publish_confluence(ctx: StepContext) -> ConfluenceOutcome:
+_PLAN_TITLE_PREFIX = "Plan: "
+_PLAN_TITLE_ID_CHARS = 6
+_PLAN_FEATURE_MAX_CHARS = 200
+
+
+def _plan_page_title(markdown: str, task_id: str, task_description: str) -> str:
+    """``Plan: <feature> · <6-char task id>`` for a planning doc (#82).
+
+    The feature name is the doc's H1 without its own ``Plan:`` prefix, else the
+    start of the task description. The task-id suffix (the id's last six
+    characters, its random part) keeps two plans for the same feature from
+    sharing a title, so a new plan never lands on an earlier plan's page.
+    Empty when there is no feature name, so ``publish_markdown`` reports
+    ``no_title``.
+    """
+    from confluence.storage import split_title
+
+    h1, _ = split_title(markdown)
+    feature = re.sub(r"^plan\s*:\s*", "", h1, flags=re.IGNORECASE).strip()
+    if not feature:
+        feature = _fallback_page_title(task_description).removeprefix(_FALLBACK_TITLE_PREFIX)
+    if not feature:
+        return ""
+    # Room for the prefix and suffix inside Confluence's 255-character title.
+    feature = feature[:_PLAN_FEATURE_MAX_CHARS].rstrip()
+    suffix = f" · {task_id[-_PLAN_TITLE_ID_CHARS:]}" if task_id else ""
+    return f"{_PLAN_TITLE_PREFIX}{feature}{suffix}"
+
+
+def _publish_confluence(ctx: StepContext, kind: Literal["research", "plan"]) -> ConfluenceOutcome:
     """Publish the deliverable to Confluence; a skip is reported, never raised.
 
     Records the outcome as a ``confluence_published`` / ``confluence_skipped``
@@ -291,12 +333,21 @@ def _publish_confluence(ctx: StepContext) -> ConfluenceOutcome:
     from confluence.publish import publish_markdown
 
     text = _artifact_body(ctx).decode("utf-8")
-    outcome = publish_markdown(
-        text,
-        ctx.config.channel_metadata,
-        resolve_token=resolve_confluence_oauth_token,
-        fallback_title=_fallback_page_title(ctx.config.task_description),
-    )
+    if kind == "plan":
+        outcome = publish_markdown(
+            text,
+            ctx.config.channel_metadata,
+            resolve_token=resolve_confluence_oauth_token,
+            kind="plan",
+            title=_plan_page_title(text, ctx.config.task_id, ctx.config.task_description),
+        )
+    else:
+        outcome = publish_markdown(
+            text,
+            ctx.config.channel_metadata,
+            resolve_token=resolve_confluence_oauth_token,
+            fallback_title=_fallback_page_title(ctx.config.task_description),
+        )
     if ctx.progress is not None:
         ctx.progress.write_agent_milestone(*outcome.milestone())
     return outcome
@@ -320,7 +371,12 @@ def deliver(target: str, ctx: StepContext) -> DeliveryResult:
     # S3 first: it is the load-bearing deliverable and has already succeeded
     # (or raised) before Confluence is attempted. Confluence before the comment,
     # so the comment can report the page link or the skip reason.
-    confluence = _publish_confluence(ctx) if DELIVERERS[target].publishes_confluence else None
+    deliverer = DELIVERERS[target]
+    confluence = (
+        _publish_confluence(ctx, deliverer.confluence_kind)
+        if deliverer.publishes_confluence
+        else None
+    )
     if "comment" in DELIVERERS[target].produces:
         comment_posted = _post_comment(ctx, confluence)
     return DeliveryResult(

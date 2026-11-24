@@ -1,0 +1,83 @@
+{
+  "name": "rule6-planning-read-only-tier-with-write-tools",
+  "description": "The read-only planning workflow may not be granted Write or Edit (read-only tier ceiling).",
+  "workflow": {
+    "id": "knowledge/feature-planning-v1",
+    "version": "1.0.0",
+    "domain": "knowledge",
+    "description": "Plan a feature against a repo: read the code, judge one story vs. an epic with dependent subtasks, and deliver a draft planning doc to S3 and to the repo's mapped Confluence space.",
+    "guidance": "Select for \"I want to build X\" / \"plan X\" requests against a repo: the output is a planning doc for review, never code.",
+    "requires_repo": false,
+    "read_only": true,
+    "prompt": {
+      "template": "registry://prompt/feature-planning-workflow",
+      "placeholders": [
+        "task_description",
+        "memory_context",
+        "max_turns"
+      ]
+    },
+    "hydration": {
+      "sources": [
+        "task_description",
+        "attachments",
+        "memory"
+      ]
+    },
+    "agent_config": {
+      "tier": "read-only",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Write",
+        "Edit"
+      ],
+      "cedar_policy_modules": [
+        "builtin/hard_deny"
+      ]
+    },
+    "repo_config": {
+      "discover": false
+    },
+    "required_inputs": {
+      "all_of": [
+        "task_description"
+      ]
+    },
+    "steps": [
+      {
+        "kind": "hydrate_context",
+        "name": "context"
+      },
+      {
+        "kind": "run_agent",
+        "name": "plan"
+      },
+      {
+        "kind": "deliver_artifact",
+        "name": "deliver",
+        "target": "s3_comment_and_confluence_plan"
+      }
+    ],
+    "terminal_outcomes": {
+      "primary": "artifact"
+    },
+    "limits": {
+      "max_turns": 40
+    },
+    "promotion_gate": {
+      "requires": [
+        "tests:agent/feature_planning"
+      ]
+    },
+    "status": "production"
+  },
+  "expected": {
+    "valid": false,
+    "violations": [
+      "rule-6",
+      "schema"
+    ]
+  }
+}

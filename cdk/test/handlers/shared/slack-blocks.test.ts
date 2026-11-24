@@ -139,6 +139,53 @@ describe('renderSlackBlocks', () => {
     expect(sectionText(msg.blocks[0])).not.toContain('Confluence not published');
   });
 
+  // Task 15 (fork), #82: a planning task reports its draft.
+  test('task_completed for a planning task says the planning draft is ready, with the page button', () => {
+    const task = {
+      ...baseTask,
+      status: TaskStatus.COMPLETED as TaskStatusType,
+      resolved_workflow: { id: 'knowledge/feature-planning-v1', version: '1.0.0' },
+      confluence_status: 'published',
+      confluence_page_url: 'https://acme.atlassian.net/wiki/x/9',
+    };
+    const msg = renderSlackBlocks('task_completed', task);
+    expect(msg.text).toBe('Planning draft ready for org/repo');
+    const text = sectionText(msg.blocks[0]);
+    expect(text).toContain(':memo: *Planning draft ready* for `org/repo`');
+    expect(text).not.toContain('Task completed');
+    expect(actionsBlock(msg.blocks[1]).elements[0]).toMatchObject({
+      text: { text: 'View Confluence page' },
+      url: 'https://acme.atlassian.net/wiki/x/9',
+    });
+  });
+
+  test('task_completed for a planning task still reports a Confluence skip', () => {
+    const task = {
+      ...baseTask,
+      status: TaskStatus.COMPLETED as TaskStatusType,
+      resolved_workflow: { id: 'knowledge/feature-planning-v1', version: '1.0.0' },
+      confluence_status: 'skipped',
+      confluence_skip_reason: 'no_mapping',
+    };
+    const text = sectionText(renderSlackBlocks('task_completed', task).blocks[0]);
+    expect(text).toContain('Planning draft ready');
+    expect(text).toContain('Confluence not published');
+  });
+
+  test.each(['knowledge/web-research-v1', 'coding/new-task-v1'])(
+    'task_completed for %s keeps the generic headline',
+    (id) => {
+      const task = {
+        ...baseTask,
+        status: TaskStatus.COMPLETED as TaskStatusType,
+        resolved_workflow: { id, version: '1.0.0' },
+      };
+      const msg = renderSlackBlocks('task_completed', task);
+      expect(msg.text).toBe('Task completed for org/repo');
+      expect(sectionText(msg.blocks[0])).toContain(':white_check_mark: *Task completed*');
+    },
+  );
+
   test('task_completed puts the Confluence button beside the PR button', () => {
     const task = {
       ...baseTask,

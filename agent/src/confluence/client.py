@@ -38,6 +38,8 @@ REQUEST_TIMEOUT_SECONDS = 15
 LABEL_GENERATED = "factory-generated"
 LABEL_DRAFT = "factory-draft"
 LABEL_FINAL = "factory-final"
+# A planning doc (Task 15 (fork), #82), as opposed to a research write-up.
+LABEL_PLAN = "factory-plan"
 LAST_WRITTEN_VERSION_KEY = "factory.lastWrittenVersion"
 
 # Bounds on cursor-paginated reads (labels): far beyond what a factory page

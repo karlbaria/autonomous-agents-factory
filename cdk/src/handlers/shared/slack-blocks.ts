@@ -24,6 +24,7 @@ const TASK_FAILED_REASON_MAX_LEN = 300;
 /** Cap on the Confluence skip detail shown in the completion message (Task 14). */
 const CONFLUENCE_SKIP_DETAIL_MAX_LEN = 300;
 import type { TaskRecord } from './types';
+import { FEATURE_PLANNING_WORKFLOW_ID } from './workflows';
 
 /** A Slack Block Kit mrkdwn text object. */
 interface MrkdwnText {
@@ -100,7 +101,7 @@ export interface SlackMessage {
 export function renderSlackBlocks(
   eventType: string,
   task: Pick<TaskRecord, 'task_id' | 'repo' | 'task_description' | 'pr_url' | 'error_message' | 'cost_usd' | 'duration_s' | 'status'>
-    & Partial<Pick<TaskRecord, ConfluenceOutcomeField>>,
+    & Partial<Pick<TaskRecord, ConfluenceOutcomeField | 'resolved_workflow'>>,
   eventMetadata?: Record<string, unknown>,
 ): SlackMessage {
   switch (eventType) {
@@ -157,11 +158,25 @@ function confluenceSkipLine(task: Partial<Pick<TaskRecord, ConfluenceOutcomeFiel
   return `:warning: _Confluence not published_ (\`${reason}\`)${detail}`;
 }
 
+/**
+ * Completion headline. A planning task (Task 15 (fork), #82) reports its
+ * draft rather than a generic completion; the page button below links it.
+ */
+function isPlanningTask(task: Partial<Pick<TaskRecord, 'resolved_workflow'>>): boolean {
+  return task.resolved_workflow?.id === FEATURE_PLANNING_WORKFLOW_ID;
+}
+
+function completedHeadline(task: Pick<TaskRecord, 'repo'> & Partial<Pick<TaskRecord, 'resolved_workflow'>>): string {
+  return isPlanningTask(task)
+    ? `:memo: *Planning draft ready* for \`${task.repo}\``
+    : `:white_check_mark: *Task completed* for \`${task.repo}\``;
+}
+
 function taskCompletedMessage(
   task: Pick<TaskRecord, 'task_id' | 'repo' | 'pr_url' | 'cost_usd' | 'duration_s'>
-    & Partial<Pick<TaskRecord, ConfluenceOutcomeField>>,
+    & Partial<Pick<TaskRecord, ConfluenceOutcomeField | 'resolved_workflow'>>,
 ): SlackMessage {
-  const parts = [`:white_check_mark: *Task completed* for \`${task.repo}\``];
+  const parts = [completedHeadline(task)];
   const stats: string[] = [];
   if (task.duration_s != null) stats.push(formatDuration(task.duration_s));
   if (task.cost_usd != null) stats.push(`$${Number(task.cost_usd).toFixed(2)}`);
@@ -181,7 +196,7 @@ function taskCompletedMessage(
   if (buttons.length > 0) blocks.push(actions(task.task_id, buttons));
 
   return {
-    text: `Task completed for ${task.repo}`,
+    text: isPlanningTask(task) ? `Planning draft ready for ${task.repo}` : `Task completed for ${task.repo}`,
     blocks,
   };
 }

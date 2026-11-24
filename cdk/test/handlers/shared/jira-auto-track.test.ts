@@ -483,6 +483,63 @@ describe('resolveJiraAutoTrack', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1); // a field-error rejection is never retried
   });
 
+  // Task 15 (fork), #82: planning files Jira only on Approve.
+  test('never creates an issue for an exempt planning workflow on an opted-in mapping, and records why', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }] });
+    ddbSend.mockResolvedValueOnce({});
+    global.fetch = jest.fn() as unknown as typeof fetch;
+
+    const result = await resolveJiraAutoTrack({
+      ...BASE_PARAMS,
+      repo: 'karlbaria/factory-shop',
+      channelSource: 'slack',
+      workflowId: 'knowledge/feature-planning-v1',
+    });
+
+    expect(result).toEqual({ channelMetadata: BASE_PARAMS.channelMetadata });
+    expect(resolveJiraOutboundAuthMock).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(ddbSend).toHaveBeenCalledTimes(2);
+    expect(ddbSend.mock.calls[1][0].input.Item).toMatchObject({
+      task_id: 'task-1',
+      event_type: 'jira_auto_track_skipped',
+      metadata: {
+        jira_project_key: 'SHOP',
+        reason: 'workflow_exempt',
+        workflow_id: 'knowledge/feature-planning-v1',
+      },
+    });
+  });
+
+  test('writes no skip event for an exempt workflow when the repo has no opted-in mapping', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [] });
+    const result = await resolveJiraAutoTrack({
+      ...BASE_PARAMS,
+      repo: 'karlbaria/factory-sandbox-py',
+      channelSource: 'slack',
+      workflowId: 'knowledge/feature-planning-v1',
+    });
+    expect(result).toEqual({ channelMetadata: BASE_PARAMS.channelMetadata });
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['knowledge/web-research-v1', 'coding/new-task-adversarial-v1'])(
+    'still auto-tracks the non-exempt workflow %s',
+    async (workflowId) => {
+      ddbSend.mockResolvedValueOnce({ Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }] });
+      resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
+      global.fetch = jest.fn().mockResolvedValue(mockResponse(201, '{"key":"SHOP-8"}')) as unknown as typeof fetch;
+
+      const result = await resolveJiraAutoTrack({
+        ...BASE_PARAMS,
+        repo: 'karlbaria/factory-shop',
+        channelSource: 'slack',
+        workflowId,
+      });
+      expect(result.channelMetadata.jira_issue_key).toBe('SHOP-8');
+    },
+  );
+
   test('a 502 then a success stamps the Jira link (issue #71 regression)', async () => {
     ddbSend.mockResolvedValueOnce({ Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }] });
     resolveJiraOutboundAuthMock.mockResolvedValueOnce(APP_AUTH);
