@@ -67,7 +67,13 @@ def test_unknown_target_produces_nothing():
     assert produced_outcomes("nope") == frozenset()
 
 
-def _ctx(result_text="some output", task_id="task-1", progress=None, channel_metadata=None):
+def _ctx(
+    result_text="some output",
+    task_id="task-1",
+    progress=None,
+    channel_metadata=None,
+    task_description="",
+):
     """A minimal StepContext stand-in for the deliver() dispatcher."""
     return SimpleNamespace(
         agent_result=AgentResult(status="success", result_text=result_text),
@@ -76,6 +82,7 @@ def _ctx(result_text="some output", task_id="task-1", progress=None, channel_met
             requires_repo=False,
             task_id=task_id,
             channel_metadata=channel_metadata or {},
+            task_description=task_description,
         ),
         progress=progress,
     )
@@ -239,7 +246,7 @@ class TestConfluenceDeliverers:
         s3 = MagicMock()
         s3.put_object.side_effect = lambda **_k: order.append("s3")
 
-        def fake_publish(text, meta, *, resolve_token):
+        def fake_publish(text, meta, *, resolve_token, fallback_title):
             order.append("confluence")
             assert text == "# T\n\nbody"
             assert meta == CONFLUENCE_META
@@ -473,3 +480,53 @@ def test_web_research_uses_s3_comment_and_confluence():
     )
     targets = [s.get("target") for s in doc["steps"] if s["kind"] == "deliver_artifact"]
     assert targets == ["s3_comment_and_confluence"]
+
+
+class TestFallbackPageTitle:
+    """#80: a research report with no H1 gets a title from the task description."""
+
+    def test_short_description_is_used_whole(self):
+        from workflow.deliverers import _fallback_page_title
+
+        assert _fallback_page_title("  Product   search UX ") == "Research: Product search UX"
+
+    def test_long_description_is_cut_at_a_word_boundary(self):
+        from workflow.deliverers import _fallback_page_title
+
+        desc = "Compare caching options for the shop backend, " * 5
+        title = _fallback_page_title(desc)
+        assert title.startswith("Research: Compare caching options")
+        body = title.removeprefix("Research: ")
+        assert len(body) <= 80
+        assert desc.startswith(body)
+        assert desc[len(body)] in " ,"  # ends on a word boundary
+
+    def test_no_description_gives_no_title(self):
+        from workflow.deliverers import _fallback_page_title
+
+        assert _fallback_page_title("") == ""
+        assert _fallback_page_title("   ") == ""
+
+    def test_deliverer_passes_the_fallback_to_publish(self, monkeypatch):
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        seen = {}
+
+        def fake_publish(text, meta, *, resolve_token, fallback_title):
+            seen["fallback_title"] = fallback_title
+            from confluence.publish import ConfluenceOutcome
+
+            return ConfluenceOutcome(status="skipped", skip_reason="no_mapping", detail="x")
+
+        with (
+            patch("aws_session.tenant_client", return_value=MagicMock()),
+            patch("confluence.publish.publish_markdown", side_effect=fake_publish),
+        ):
+            deliver(
+                "s3_and_confluence",
+                _ctx(
+                    "no heading here",
+                    channel_metadata=CONFLUENCE_META,
+                    task_description="Research caching options",
+                ),
+            )
+        assert seen["fallback_title"] == "Research: Research caching options"

@@ -37,11 +37,23 @@ and ends the task. After calling it, STOP: do not commit, do not run the build, 
 do not open a PR. (If the `request_clarification` tool is not available, instead \
 make your FINAL message the question, prefixed on its own first line with the \
 exact marker `{needs_input_marker}`.)
-   - This is ONLY for goal-without-substance requests. A request that names \
-what to change (even loosely) is actionable — make the reasonable call on \
-low-stakes details and note it in the PR (step 5). When you can name a specific, \
-concrete, low-risk deliverable that unambiguously satisfies the request, do it; \
-when you'd be picking among materially different interpretations, ask.
+   - **The request contradicts the code.** If the request states something \
+about the app as fact — a feature, label, text or behaviour — and the code \
+contradicts it, do NOT write the claim, and do NOT change the code to make the \
+claim true. Call `request_clarification` (or use the marker fallback above) \
+with ONE question that quotes what the request says and what the code shows, \
+with the file and line, and offers the options (e.g. "The request says the \
+badge reads 'Free shipping and tracking', but frontend/src/App.jsx line 96 \
+shows 'Free shipping'. Should I (a) describe the badge as it is, (b) change the \
+badge text to match, or (c) something else?"). Then STOP, as above.
+   - This is ONLY for goal-without-substance requests and requests that \
+contradict the code. A request that names what to change (even loosely) is \
+actionable — make the reasonable call on low-stakes details and note it in the \
+PR (step 5). The contradiction rule above is the one exception: a request that \
+names a change but asserts something the code contradicts is NOT actionable \
+as written — ask. When you can name a specific, concrete, low-risk deliverable \
+that unambiguously satisfies the request, do it; when you'd be picking among \
+materially different interpretations, ask.
 
 3. **Work on the task**
    Make the necessary code changes. Be thorough but focused — implement exactly \

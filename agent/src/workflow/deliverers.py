@@ -258,6 +258,27 @@ def _post_comment(ctx: StepContext, confluence: ConfluenceOutcome | None = None)
     return True
 
 
+_FALLBACK_TITLE_PREFIX = "Research: "
+_FALLBACK_TITLE_CHARS = 80
+
+
+def _fallback_page_title(task_description: str) -> str:
+    """A page title from the task description, for a deliverable with no H1 (#80).
+
+    ``Research: <first ~80 chars>``, cut at a word boundary. Empty when the task
+    has no description, so ``publish_markdown`` still reports ``no_title``.
+    """
+    text = " ".join((task_description or "").split())
+    if not text:
+        return ""
+    if len(text) > _FALLBACK_TITLE_CHARS:
+        cut = text[:_FALLBACK_TITLE_CHARS]
+        if text[_FALLBACK_TITLE_CHARS] != " " and " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        text = cut.rstrip(" ,;:-")
+    return f"{_FALLBACK_TITLE_PREFIX}{text}"
+
+
 def _publish_confluence(ctx: StepContext) -> ConfluenceOutcome:
     """Publish the deliverable to Confluence; a skip is reported, never raised.
 
@@ -274,6 +295,7 @@ def _publish_confluence(ctx: StepContext) -> ConfluenceOutcome:
         text,
         ctx.config.channel_metadata,
         resolve_token=resolve_confluence_oauth_token,
+        fallback_title=_fallback_page_title(ctx.config.task_description),
     )
     if ctx.progress is not None:
         ctx.progress.write_agent_milestone(*outcome.milestone())
