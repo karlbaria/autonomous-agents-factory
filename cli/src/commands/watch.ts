@@ -119,6 +119,30 @@ const PROGRESS_EVENT_TYPES = new Set([
   'jira_auto_track_skipped',
 ]);
 
+/**
+ * `<project>[ — <detail>]` for a `jira_auto_track_skipped` event. Task 13
+ * (fork) PR 2: the issue was never created — the task itself still ran
+ * normally. Either the mapped project needed a field this task couldn't
+ * supply (jira_errors); or, since #71, Jira was unavailable even after one
+ * retry (reason/status/proxy_error_code); or, since #82 (Task 15), the
+ * workflow is exempt (planning files Jira when the PM approves the plan).
+ */
+function jiraAutoTrackSkipDetail(meta: Record<string, unknown>): string {
+  const projectKey = String(meta.jira_project_key ?? '?');
+  const errors = (meta.jira_errors && typeof meta.jira_errors === 'object')
+    ? Object.entries(meta.jira_errors as Record<string, string>).map(([field, msg]) => `${field}: ${msg}`).join('; ')
+    : '';
+  const unavailable = meta.reason === 'unavailable'
+    ? ['Jira unavailable', meta.status !== undefined ? `HTTP ${String(meta.status)}` : '', meta.proxy_error_code ? String(meta.proxy_error_code) : '']
+      .filter(Boolean).join(', ')
+    : '';
+  const exempt = meta.reason === 'workflow_exempt'
+    ? `workflow ${String(meta.workflow_id ?? '?')} is exempt (Jira is filed on approval)`
+    : '';
+  const detail = errors || unavailable || exempt;
+  return `${projectKey}${detail ? ` — ${detail}` : ''}`;
+}
+
 /** Format an event timestamp to a short local time string. */
 function formatTime(isoTimestamp: string): string {
   try {
@@ -238,22 +262,8 @@ export function renderEvent(event: TaskEvent): string {
       }
       return line;
     }
-    case 'jira_auto_track_skipped': {
-      // Task 13 (fork) PR 2: the issue was never created — the task itself
-      // still ran normally. Either the mapped project needed a field this
-      // task couldn't supply (jira_errors), or, since #71, Jira was
-      // unavailable even after one retry (reason/status/proxy_error_code).
-      const projectKey = String(meta.jira_project_key ?? '?');
-      const errors = (meta.jira_errors && typeof meta.jira_errors === 'object')
-        ? Object.entries(meta.jira_errors as Record<string, string>).map(([field, msg]) => `${field}: ${msg}`).join('; ')
-        : '';
-      const unavailable = meta.reason === 'unavailable'
-        ? ['Jira unavailable', meta.status !== undefined ? `HTTP ${String(meta.status)}` : '', meta.proxy_error_code ? String(meta.proxy_error_code) : '']
-          .filter(Boolean).join(', ')
-        : '';
-      const detail = errors || unavailable;
-      return `[${time}] ⚠ Jira auto-track skipped for project ${projectKey}${detail ? ` — ${detail}` : ''}`;
-    }
+    case 'jira_auto_track_skipped':
+      return `[${time}] ⚠ Jira auto-track skipped for project ${jiraAutoTrackSkipDetail(meta)}`;
     default:
       return `[${time}] ${event.event_type}: ${JSON.stringify(meta)}`;
   }

@@ -68,6 +68,12 @@ export interface WorkflowDescriptor {
    */
   readonly publishesConfluence?: boolean;
   /**
+   * Never auto-track this workflow's tasks in Jira (Task 13's `--auto-track`),
+   * even on an opted-in mapping. Task 15 (fork), #82: a planning task files
+   * its Jira structure only when the PM approves the plan. Absent ⇒ false.
+   */
+  readonly exemptFromJiraAutoTrack?: boolean;
+  /**
    * The workflow's declared preferred Bedrock model (`agent_config.model.id` in
    * the YAML), if any. Validated against {@link WORKFLOW_MODEL_ALLOWLIST} at the
    * create-task boundary (WORKFLOWS.md rule 13). `undefined` ⇒ the workflow
@@ -186,7 +192,28 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     // deliver target s3_comment_and_confluence (Task 14 (fork), #57).
     publishesConfluence: true,
   },
+  // Task 15 (fork), #82 PR 1: repo-aware, read-only planning (Read, Glob,
+  // Grep). Writes a draft plan page to Confluence; Jira is filed only on
+  // Approve (PR 3), so it is exempt from Jira auto-track. Repo-optional in
+  // the descriptor, like web-research-v1, so the agent takes the knowledge
+  // path's read-only context clone (#61); the Slack path requires a repo.
+  'knowledge/feature-planning-v1': {
+    id: 'knowledge/feature-planning-v1',
+    version: '1.0.0',
+    requiresRepo: false,
+    readOnly: true,
+    requiredInputs: { allOf: ['task_description'] },
+    // deliver target s3_comment_and_confluence_plan.
+    publishesConfluence: true,
+    exemptFromJiraAutoTrack: true,
+  },
 };
+
+/** The research workflow Slack's `research …` intent routes to (Task 15 (fork), #82). */
+export const RESEARCH_WORKFLOW_ID = 'knowledge/web-research-v1';
+
+/** The planning workflow Slack's `i want to build …` / `plan …` intent routes to (#82). */
+export const FEATURE_PLANNING_WORKFLOW_ID = 'knowledge/feature-planning-v1';
 
 /** The platform default workflow — the last rung of the resolution ladder. */
 export const DEFAULT_WORKFLOW_ID = 'default/agent-v1';
@@ -225,7 +252,7 @@ export function resolveChannelDefaultWorkflow(repoConfig: { default_workflow?: s
 // ``TypeError: Cannot read properties of undefined (reading 'id')`` inside the
 // Lambda on the first affected task; TypeScript's ``Record<string, …>`` index
 // type will not catch it (N2).
-for (const requiredId of [DEFAULT_WORKFLOW_ID, CODING_WORKFLOW_ID]) {
+for (const requiredId of [DEFAULT_WORKFLOW_ID, CODING_WORKFLOW_ID, RESEARCH_WORKFLOW_ID, FEATURE_PLANNING_WORKFLOW_ID]) {
   if (!DESCRIPTORS[requiredId]) {
     throw new Error(`Workflow descriptor "${requiredId}" is missing from DESCRIPTORS`);
   }
@@ -348,6 +375,14 @@ export function workflowIsReadOnly(id: string): boolean {
  */
 export function workflowPublishesConfluence(id: string): boolean {
   return DESCRIPTORS[id]?.publishesConfluence ?? false;
+}
+
+/**
+ * Whether the resolved workflow is exempt from Jira auto-track (Task 15
+ * (fork), #82). Unknown ids are `false`: they follow the mapping's setting.
+ */
+export function workflowExemptFromJiraAutoTrack(id: string): boolean {
+  return DESCRIPTORS[id]?.exemptFromJiraAutoTrack ?? false;
 }
 
 /**

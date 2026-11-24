@@ -9,6 +9,7 @@ import pytest
 from confluence.client import (
     LABEL_DRAFT,
     LABEL_GENERATED,
+    LABEL_PLAN,
     ConfluenceError,
     Page,
 )
@@ -383,3 +384,69 @@ class TestFallbackTitle:
         assert out.status == "published"
         assert out.action == "updated"
         assert fake.updated[0][0] == page.id
+
+
+class TestPlanPages:
+    """Task 15 (fork), #82: ``kind="plan"`` pages."""
+
+    PLAN = "# Plan: Product tagging\n\n## Summary\n\nAdd tags."
+    TITLE = "Plan: Product tagging · 30G1SX"
+
+    def _publish_plan(self, fake, markdown=PLAN, title=TITLE, meta=MAPPED):
+        return publish_markdown(
+            markdown,
+            meta,
+            resolve_token=lambda _m: "tok",
+            client_factory=fake.factory,
+            kind="plan",
+            title=title,
+        )
+
+    def test_plan_page_has_the_given_title_plan_labels_and_mapped_parent(self, fake):
+        out = self._publish_plan(fake)
+        assert out.status == "published"
+        assert out.action == "created"
+        space_id, title, body, parent = fake.created[0]
+        assert (space_id, title, parent) == ("77", self.TITLE, "500")
+        assert fake.labels[out.page_id] == {LABEL_GENERATED, LABEL_DRAFT, LABEL_PLAN}
+        assert fake.markers[out.page_id] == 1
+        # The doc's own H1 is neither the title nor repeated in the body.
+        assert "Plan: Product tagging" not in body
+        assert "Add tags." in body
+
+    def test_plan_without_h1_keeps_the_whole_doc_as_body(self, fake):
+        self._publish_plan(fake, markdown="## Summary\n\nAdd tags.")
+        (_space, title, body, _parent) = fake.created[0]
+        assert title == self.TITLE
+        assert "Summary" in body
+
+    def test_plan_without_a_title_is_a_no_title_skip(self, fake):
+        out = self._publish_plan(fake, title="  ")
+        assert out.status == "skipped"
+        assert out.skip_reason == "no_title"
+        assert not fake.created
+
+    def test_plan_title_ignores_the_research_fallback(self, fake):
+        out = publish_markdown(
+            "no heading",
+            MAPPED,
+            resolve_token=lambda _m: "tok",
+            client_factory=fake.factory,
+            fallback_title="Research: should not be used",
+            kind="plan",
+            title=self.TITLE,
+        )
+        assert out.status == "published"
+        assert fake.created[0][1] == self.TITLE
+
+    def test_plan_labelling_failure_rolls_back_like_research(self, fake):
+        fake.fail["add_labels"] = ConfluenceError("HTTP 403", status=403)
+        out = self._publish_plan(fake)
+        assert out.status == "skipped"
+        assert out.skip_reason == "api_error"
+        assert fake.deleted
+
+    def test_research_page_labels_are_unchanged(self, fake):
+        out = _publish(fake)
+        assert fake.labels[out.page_id] == {LABEL_GENERATED, LABEL_DRAFT}
+        assert LABEL_PLAN not in fake.labels[out.page_id]

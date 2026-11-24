@@ -19,7 +19,7 @@ This single command handles everything: deploying the stack (if needed), generat
 
 ## How it works
 
-- **@Shoof mentions**: `@Shoof fix the bug in org/repo#42` submits a task. Reactions on your message show progress: :eyes: (received) → :hourglass_flowing_sand: (working) → :white_check_mark: (done)
+- **@Shoof mentions**: `@Shoof fix the bug in org/repo#42` submits a task. `@Shoof research <topic> in org/repo` and `@Shoof I want to build <feature> in org/repo` run research and planning instead (see [Research a topic or plan a feature](#research-a-topic-or-plan-a-feature)). Reactions on your message show progress: :eyes: (received) → :hourglass_flowing_sand: (working) → :white_check_mark: (done)
 - **DMs**: Message Shoof directly for private task submissions
 - **Notifications**: Threaded messages show task_created → completed (with PR link, duration, cost). The Cancel button lets you stop a running task.
 - **Multi-workspace**: Each workspace installs via OAuth and gets its own bot token
@@ -117,6 +117,21 @@ For private submissions, DM Shoof directly:
 ```
 fix the login bug in org/repo#42
 ```
+
+### Research a topic or plan a feature
+
+Two more forms choose their own workflow instead of the repo's default. Shoof reads only the start of the message (after the mention), in any letter case:
+
+```
+@Shoof research <topic> in org/repo
+@Shoof I want to build <feature> in org/repo
+@Shoof plan <feature> in org/repo
+```
+
+- **`research …`** runs `knowledge/web-research-v1`. The write-up goes to the repo's mapped Confluence space (`bgagent confluence map`), and the completion message links the page.
+- **`I want to build …`** or **`plan …`** runs `knowledge/feature-planning-v1`. It reads the repo without changing it (no shell, no edits, no web access, no pull request) and writes a draft planning doc to the repo's Confluence space: a summary, the brief, what it found in the code, and the work as one story or an epic of dependent stories with acceptance criteria. The completion message says **Planning draft ready** and links the page. A planning task never creates a Jira card, even on a project mapped with `--auto-track`; `bgagent watch` shows the skip.
+
+Both forms need a repo: name it as `org/repo`, or mention Shoof in a channel with a default repo (`bgagent slack onboard-channel`). Without one, Shoof replies with what's missing. A message that only mentions these words later on (for example `@Shoof planning is broken in checkout in org/repo`) is an ordinary coding task.
 
 ### Cancel a task
 

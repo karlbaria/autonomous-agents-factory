@@ -15,6 +15,12 @@ The create-vs-update decision of issue #57 §4, with its two guards:
 
 Not found → create under the mapped parent page (space root when unset), with
 the ``factory-generated`` and ``factory-draft`` labels and the version marker.
+
+``kind="plan"`` (Task 15 (fork), #82) publishes a planning doc: the caller
+supplies the title (the deliverable's H1, if any, is dropped from the body
+rather than used), and the page also gets the ``factory-plan`` label. The
+parent page, the ownership guard and edit detection are the same as for a
+research page (``kind="research"``, the default), which is unchanged.
 If that labelling fails twice, the just-created page is deleted again, so an
 unlabelled factory page never blocks later runs as an ownership clash.
 
@@ -40,6 +46,7 @@ from shell import log
 from .client import (
     LABEL_DRAFT,
     LABEL_GENERATED,
+    LABEL_PLAN,
     ConfluenceClient,
     ConfluenceError,
     Page,
@@ -60,6 +67,15 @@ SkipReason = Literal[
 ]
 
 UPDATE_MESSAGE = "Updated by the software factory"
+
+PageKind = Literal["research", "plan"]
+
+# Labels a just-created page gets, by kind. ``factory-generated`` marks it as
+# ours (the ownership guard); ``factory-draft`` is its draft state.
+_CREATE_LABELS: dict[PageKind, tuple[str, ...]] = {
+    "research": (LABEL_GENERATED, LABEL_DRAFT),
+    "plan": (LABEL_GENERATED, LABEL_DRAFT, LABEL_PLAN),
+}
 
 
 @dataclass(frozen=True)
@@ -144,14 +160,14 @@ def _update_owned_page(
     return _published("updated", updated)
 
 
-def _claim_created_page(client: ConfluenceClient, page: Page) -> None:
+def _claim_created_page(client: ConfluenceClient, page: Page, kind: PageKind) -> None:
     """Label a just-created page as ours and store its version marker."""
-    client.add_labels(page.id, [LABEL_GENERATED, LABEL_DRAFT])
+    client.add_labels(page.id, list(_CREATE_LABELS[kind]))
     client.set_last_written_version(page.id, page.version)
 
 
 def _mark_created_page_or_roll_back(
-    client: ConfluenceClient, page: Page
+    client: ConfluenceClient, page: Page, kind: PageKind = "research"
 ) -> ConfluenceOutcome | None:
     """Claim a just-created page (one retry); delete it if that keeps failing.
 
@@ -162,12 +178,12 @@ def _mark_created_page_or_roll_back(
     ``api_error`` and the next run starts clean. Returns ``None`` on success.
     """
     try:
-        _claim_created_page(client, page)
+        _claim_created_page(client, page, kind)
         return None
     except ConfluenceError as first:
         log("WARN", f"confluence: labelling new page {page.id} failed ({first}); retrying once")
     try:
-        _claim_created_page(client, page)
+        _claim_created_page(client, page, kind)
         return None
     except ConfluenceError as second:
         failure = second
@@ -187,6 +203,26 @@ def _mark_created_page_or_roll_back(
     )
 
 
+_MAX_TITLE_CHARS = 255
+
+
+def _title_and_body(
+    markdown: str, kind: PageKind, title: str, fallback_title: str
+) -> tuple[str, str]:
+    """The page title and body for a deliverable of the given kind.
+
+    Research: the first H1 (removed from the body), else ``fallback_title`` with
+    the whole deliverable as the body (#80). Plan: the caller's ``title``; an H1
+    is still removed from the body so the page doesn't repeat its title.
+    """
+    h1, body = split_title(markdown)
+    if kind == "plan":
+        return title.strip()[:_MAX_TITLE_CHARS], body
+    if h1:
+        return h1, body
+    return fallback_title.strip()[:_MAX_TITLE_CHARS], markdown
+
+
 def publish_markdown(
     markdown: str,
     channel_metadata: dict[str, str] | None,
@@ -194,6 +230,8 @@ def publish_markdown(
     resolve_token: Callable[[dict[str, str] | None], str],
     client_factory: Callable[..., ConfluenceClient] = ConfluenceClient,
     fallback_title: str = "",
+    kind: PageKind = "research",
+    title: str = "",
 ) -> ConfluenceOutcome:
     """Create or update the deliverable's page; never raises.
 
@@ -203,6 +241,9 @@ def publish_markdown(
     never guesses a title from the body. A fallback title goes through the same
     lookup-by-title and ``factory-generated`` ownership check as an H1 title, so
     it can never update a page the factory doesn't own.
+
+    ``kind="plan"`` takes the page title from ``title`` instead (see the module
+    docstring); ``fallback_title`` is not used for a plan.
     """
     meta = channel_metadata or {}
     cloud_id = meta.get("confluence_cloud_id", "")
@@ -218,9 +259,7 @@ def publish_markdown(
             "the agent does not refresh Atlassian tokens",
         )
 
-    title, body = split_title(markdown)
-    if not title:
-        title, body = fallback_title.strip()[:255], markdown
+    title, body = _title_and_body(markdown, kind, title, fallback_title)
     if not title:
         return _skip(
             "no_title",
@@ -239,7 +278,7 @@ def publish_markdown(
             return _update_owned_page(client, existing, title, storage)
         parent_id = meta.get("confluence_parent_page_id") or None
         created = client.create_page(space_id, title, storage, parent_id)
-        rollback = _mark_created_page_or_roll_back(client, created)
+        rollback = _mark_created_page_or_roll_back(client, created, kind)
         if rollback is not None:
             return rollback
         return _published("created", created)

@@ -265,6 +265,20 @@ describe('renderEvent', () => {
     expect(output).toContain('⚠ Jira auto-track skipped for project SHOP — Jira unavailable, HTTP 502, jira_request_failed');
   });
 
+  // Task 15 (fork), #82: a planning workflow is exempt from auto-track.
+  test('renders a workflow_exempt jira_auto_track_skipped with the workflow id', () => {
+    const event = makeEvent({
+      event_type: 'jira_auto_track_skipped',
+      metadata: {
+        jira_project_key: 'SHOP',
+        reason: 'workflow_exempt',
+        workflow_id: 'knowledge/feature-planning-v1',
+      },
+    });
+    const output = renderEvent(event);
+    expect(output).toContain('⚠ Jira auto-track skipped for project SHOP — workflow knowledge/feature-planning-v1 is exempt (Jira is filed on approval)');
+  });
+
   test('renders unknown event type with JSON metadata', () => {
     const event = makeEvent({
       event_type: 'custom_event',

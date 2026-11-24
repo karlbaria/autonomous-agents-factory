@@ -254,6 +254,83 @@ describe('slack-command-processor handler', () => {
     expect(reqBody.workflow_ref).toBe('coding/new-task-adversarial-v1');
   });
 
+  // ─── Task 15 (fork), #82: research and planning intents ───────────────────
+
+  function mockLinkedPublicChannel(): void {
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active' } });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ ok: true, channel: { is_private: false, is_member: true } }),
+    });
+    createTaskCoreMock.mockResolvedValueOnce({
+      statusCode: 201,
+      body: JSON.stringify({ data: { task_id: 'TASK82', repo: 'org/repo', status: 'SUBMITTED' } }),
+    });
+  }
+
+  test.each([
+    ['submit org/repo research product search UX in', 'knowledge/web-research-v1', 'product search UX'],
+    ['submit org/repo Research: caching options', 'knowledge/web-research-v1', 'caching options'],
+    ['submit org/repo I want to build a tagging feature in', 'knowledge/feature-planning-v1', 'a tagging feature'],
+    ['submit org/repo plan product tags for', 'knowledge/feature-planning-v1', 'product tags'],
+  ])('"%s" runs %s with the keyword and trailing preposition stripped', async (text, workflowRef, description) => {
+    mockLinkedPublicChannel();
+    // The intent's workflow wins even over a repo default_workflow.
+    lookupRepoMock.mockResolvedValueOnce({
+      onboarded: true,
+      config: { repo: 'org/repo', status: 'active', default_workflow: 'coding/new-task-adversarial-v1' },
+    });
+    await handler(mention({ text }));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const [reqBody] = createTaskCoreMock.mock.calls[0];
+    expect(reqBody.repo).toBe('org/repo');
+    expect(reqBody.workflow_ref).toBe(workflowRef);
+    expect(reqBody.task_description).toBe(description);
+  });
+
+  test('a near-miss ("planning is broken in checkout") stays on the repo default', async () => {
+    mockLinkedPublicChannel();
+    await handler(mention({ text: 'submit org/repo planning is broken in checkout' }));
+    const [reqBody] = createTaskCoreMock.mock.calls[0];
+    expect(reqBody.workflow_ref).toBe('coding/new-task-v1');
+    expect(reqBody.task_description).toBe('planning is broken in checkout');
+  });
+
+  test('planning with no repo uses the channel default', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active', repo: 'org/defaultrepo' } });
+    ddbSend.mockResolvedValue({ Item: { status: 'active' } });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ ok: true, channel: { is_private: false, is_member: true } }),
+    });
+    createTaskCoreMock.mockResolvedValueOnce({
+      statusCode: 201,
+      body: JSON.stringify({ data: { task_id: 'T1', repo: 'org/defaultrepo', status: 'SUBMITTED' } }),
+    });
+    await handler(mention({ text: 'submit I want to build a tagging feature' }));
+    const [reqBody] = createTaskCoreMock.mock.calls[0];
+    expect(reqBody.repo).toBe('org/defaultrepo');
+    expect(reqBody.workflow_ref).toBe('knowledge/feature-planning-v1');
+    expect(reqBody.task_description).toBe('a tagging feature');
+  });
+
+  test.each([
+    ['submit research caching options', 'Research needs a repo'],
+    ['submit I want to build a tagging feature', 'Planning needs a repo'],
+    ['submit plan product tags', 'Planning needs a repo'],
+  ])('"%s" with no repo and no channel default explains why a repo is needed', async (text, expected) => {
+    ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
+    ddbSend.mockResolvedValue({ Item: { status: 'active' } });
+    await handler(mention({ text }));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    const reply = fetchMock.mock.calls.find(
+      ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes(expected),
+    );
+    expect(reply).toBeTruthy();
+  });
+
   test('mention submit in private channel bot is not in — replies with invite hint', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
     ddbSend.mockResolvedValue({ Item: { status: 'active' } });
@@ -304,6 +381,10 @@ describe('slack-command-processor handler', () => {
       ([_url, opts]) => String((opts as { body: string }).body).includes('Using Shoof'),
     );
     expect(posted).toBeTruthy();
+    // Task 15 (fork), #82: both new forms are documented.
+    const body = String((posted![1] as { body: string }).body);
+    expect(body).toContain('research <topic> in org/repo');
+    expect(body).toContain('I want to build <feature> in org/repo');
   });
 
   // ─── Slack file attachment extraction ────────────────────────────────────────

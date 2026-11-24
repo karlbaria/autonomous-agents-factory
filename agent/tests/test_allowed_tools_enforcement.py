@@ -322,3 +322,54 @@ def test_missing_tool_name_fails_closed() -> None:
                 "allowed_tools": sorted(WEB_RESEARCH),
             },
         )
+
+
+def _feature_planning_config() -> TaskConfig:
+    return build_config(
+        repo_url="owner/repo",
+        task_description="a tagging feature",
+        github_token="ghp_test",
+        aws_region="us-east-1",
+        task_id="t-82",
+        resolved_workflow={"id": "knowledge/feature-planning-v1", "version": "1.0.0"},
+    )
+
+
+class TestFeaturePlanningIsReadOnly:
+    """Task 15 (fork), #82: planning reads the repo and nothing else."""
+
+    def _pre_tool_use(self, config: TaskConfig):
+        _engine_obj, hooks = _initialize_policy_engine_and_hooks(
+            config=config, trajectory=None, progress=MagicMock()
+        )
+        return hooks["PreToolUse"][0].hooks[0]
+
+    def _decide(self, hook, tool: str) -> str:
+        result = asyncio.run(hook({"tool_name": tool, "tool_input": _input_for(tool)}, "tu-82", {}))
+        return result["hookSpecificOutput"]["permissionDecision"]
+
+    def test_workflow_declares_repo_context_only(self) -> None:
+        wf = load_workflow("knowledge/feature-planning-v1")
+        assert list(wf.agent_config.allowed_tools) == ["Read", "Glob", "Grep"]
+        assert wf.read_only is True
+        assert not [s for s in wf.steps if s.kind in ("ensure_pr", "verify_build", "verify_lint")]
+
+    def test_config_is_read_only_with_the_workflow_list(self) -> None:
+        config = _feature_planning_config()
+        assert config.read_only is True
+        assert config.allowed_tools == ["Read", "Glob", "Grep"]
+
+    @pytest.mark.parametrize("tool", ["Bash", "Write", "Edit", "WebFetch"])
+    def test_planning_cannot_run_shell_write_or_web_tools(self, tool: str) -> None:
+        hook = self._pre_tool_use(_feature_planning_config())
+        assert self._decide(hook, tool) == "deny"
+
+    @pytest.mark.parametrize("tool", ["Read", "Glob", "Grep"])
+    def test_planning_keeps_its_read_tools(self, tool: str) -> None:
+        hook = self._pre_tool_use(_feature_planning_config())
+        assert self._decide(hook, tool) == "allow"
+
+    def test_runner_hides_shell_write_and_web_tools(self) -> None:
+        hidden = _resolve_disallowed_tools(_feature_planning_config())
+        for tool in ("Bash", "Write", "Edit", "WebFetch", "WebSearch", "NotebookEdit"):
+            assert tool in hidden
