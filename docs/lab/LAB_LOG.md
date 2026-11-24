@@ -897,3 +897,26 @@ All three were submitted from Slack against `karlbaria/factory-shop`.
   - Product questions are for the PM, and an unanswered one blocks Approve.
   - Technical decisions are made by Jarvis with a reason. The PM can edit them, and they don't block Approve.
 - **Tag.** `known-good-task15-pr3b1` at the commit of this entry.
+
+### 9. PR 3c: PRD and technical design (#88)
+
+- **What shipped ([#88](https://github.com/karlbaria/autonomous-agents-factory/pull/88)).** Two documents, each with one owner.
+  - **The PRD.** `I want to build …` / `plan …` now drafts a PRD with the new `knowledge/prd-draft-v1`: read-only, `[Read, Glob, Grep]`, product language only, a "Product questions" section, and the `factory-prd` label.
+  - **Approve PRD** (requester only) blocks until every product question is answered. Then it starts the existing plan-from-PRD step, which writes the technical design, and marks the PRD final.
+  - **The technical design** (`Technical design: … · <id>`) has technical decisions with reasons, stories with user-visible acceptance criteria and per-story technical notes, and "Questions for the PM" only for gaps in the PRD.
+  - **`plan from <url>`** skips the PRD and goes straight to the design.
+  - **Start.** The design message reads "Technical design ready: N stories, about $X", with Start. Start re-checks the page, asks again if N or $X changed, and otherwise passes ("filing arrives in the next update"). This replaces decision 11's above-5 rule.
+  - No new resources and no IAM changes. The fan-out reads the design page with its existing grants (GetSecretValue and PutSecretValue on the OAuth secret since #573).
+- **Why.** The PM approves what gets built (the PRD). Engineers own how (the design), and their edits don't block. In 3b-2, each story's technical notes go into its Jira description as coding context.
+- **Demo results.**
+  - **PRD:** task `01M87WQEH3C422HRVVC6ZAW7G4` (`knowledge/prd-draft-v1`, "a separate product reviews page linked to the main page where customers can rate a product 1 to 5 stars and leave a short comment"): COMPLETED in 28 s, $0.12. It published [PRD: Product reviews page](https://karlvb.atlassian.net/wiki/spaces/SD/pages/1540097/PRD+Product+reviews+page+AW7G4+ZAW7G4).
+  - **Technical design:** task `01M87X0ZRA9YY75NGS467FZZXB` (`knowledge/feature-planning-v1`, from that PRD with the PM's answers): COMPLETED in 1 min 41 s, $0.33. It published [Technical design: Product reviews page](https://karlvb.atlassian.net/wiki/spaces/SD/pages/1540118/Technical+design+Product+reviews+page+FZZXB+7FZZXB).
+  - The product questions blocked Approve PRD until they were answered. The PRD then went final, and the design arrived in the same thread.
+  - Start asked again after a story was added, then passed.
+  - Cancel filed nothing.
+  - No Jira cards: both tasks recorded `jira_auto_track_skipped` with `reason: workflow_exempt` (project SHOP).
+  - **`plan from <url>`:** the task list shows no separate `plan from <url>` task since the deploy. The two tasks above are the only planning tasks in it.
+  - **Product question example:** "Should ratings (average stars and review count) also show next to each product on the main page, or should reviews live only on the separate Reviews page?" It is functional and aimed at the PM, with no implementation terms. The PM answered "it should live on its own review page".
+- **Finding.** Both page titles carry the id twice: `· AW7G4 · ZAW7G4` and `· FZZXB · 7FZZXB`. The agent wrote a 5-character id into its heading, and the deliverer only strips a 6-character one before adding the real id. Fix: strip any trailing `· <id>` from the heading, or stop asking the prompt for the id.
+- **Deferred.** A named engineer approver for the design: a per-repo setting, so that Start also needs that person's click.
+- **Tag.** `known-good-task15-pr3c` at the commit of this entry.
