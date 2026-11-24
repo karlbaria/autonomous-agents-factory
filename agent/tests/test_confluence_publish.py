@@ -122,9 +122,13 @@ def fake():
     return FakeConfluence("cloud-1", "tok", site_url=MAPPED["confluence_site_url"])
 
 
-def _publish(fake, markdown=DOC, meta=MAPPED, resolved="tok"):
+def _publish(fake, markdown=DOC, meta=MAPPED, resolved="tok", fallback_title=""):
     return publish_markdown(
-        markdown, meta, resolve_token=lambda _m: resolved, client_factory=fake.factory
+        markdown,
+        meta,
+        resolve_token=lambda _m: resolved,
+        client_factory=fake.factory,
+        fallback_title=fallback_title,
     )
 
 
@@ -215,7 +219,12 @@ class TestSkipReasons:
         assert not fake.created
 
     def test_no_title(self, fake):
+        # No H1 and no fallback (the task has no description): still no_title.
         self._assert_skip(_publish(fake, markdown="## not h1\n\ntext"), "no_title")
+        self._assert_skip(
+            _publish(fake, markdown="## not h1\n\ntext", fallback_title="  "), "no_title"
+        )
+        assert not fake.created
 
     def test_space_not_found(self, fake):
         fake.spaces = {}
@@ -334,3 +343,43 @@ class TestOutcomeShape:
     def test_published_without_url_names_the_page(self):
         out = ConfluenceOutcome(status="published", action="updated", page_id="9", version=2)
         assert out.milestone() == ("confluence_published", "updated page 9 (version 2)")
+
+
+class TestFallbackTitle:
+    """#80: the caller's fallback title is used only when the report has no H1."""
+
+    NO_H1 = "A summary.\n\n## Detail\n\nFindings."
+
+    def test_report_without_h1_publishes_with_the_fallback_title(self, fake):
+        out = _publish(fake, markdown=self.NO_H1, fallback_title="Research: caching options")
+        assert out.status == "published"
+        assert out.action == "created"
+        (_space, title, body, _parent) = fake.created[0]
+        assert title == "Research: caching options"
+        assert "A summary." in body  # the whole report is the body
+        assert "Detail" in body
+
+    def test_report_with_h1_still_uses_it(self, fake):
+        out = _publish(fake, fallback_title="Research: something else")
+        assert out.status == "published"
+        (_space, title, body, _parent) = fake.created[0]
+        assert title == "Research: caching"
+        assert "Research: caching" not in body  # the H1 is removed from the body
+
+    def test_fallback_title_matching_a_human_page_is_an_ownership_clash(self, fake):
+        page = fake.seed("Research: caching options", 3, labels={"team-notes"}, marker=3)
+        out = _publish(fake, markdown=self.NO_H1, fallback_title="Research: caching options")
+        assert out.status == "skipped"
+        assert out.skip_reason == "ownership_clash"
+        assert fake.pages[page.id].version == 3
+        assert not fake.updated
+        assert not fake.created
+
+    def test_fallback_title_matching_a_factory_page_updates_it(self, fake):
+        page = fake.seed(
+            "Research: caching options", 1, labels={LABEL_GENERATED, LABEL_DRAFT}, marker=1
+        )
+        out = _publish(fake, markdown=self.NO_H1, fallback_title="Research: caching options")
+        assert out.status == "published"
+        assert out.action == "updated"
+        assert fake.updated[0][0] == page.id

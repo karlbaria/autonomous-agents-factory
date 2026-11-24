@@ -193,8 +193,17 @@ def publish_markdown(
     *,
     resolve_token: Callable[[dict[str, str] | None], str],
     client_factory: Callable[..., ConfluenceClient] = ConfluenceClient,
+    fallback_title: str = "",
 ) -> ConfluenceOutcome:
-    """Create or update the deliverable's page; never raises."""
+    """Create or update the deliverable's page; never raises.
+
+    The page title is the deliverable's first H1 (removed from the body). When
+    there is none, ``fallback_title`` — supplied by the caller, which knows the
+    task (#80) — is used and the whole deliverable becomes the body. This module
+    never guesses a title from the body. A fallback title goes through the same
+    lookup-by-title and ``factory-generated`` ownership check as an H1 title, so
+    it can never update a page the factory doesn't own.
+    """
     meta = channel_metadata or {}
     cloud_id = meta.get("confluence_cloud_id", "")
     space_key = meta.get("confluence_space_key", "")
@@ -211,7 +220,13 @@ def publish_markdown(
 
     title, body = split_title(markdown)
     if not title:
-        return _skip("no_title", "the deliverable has no H1 line to use as the page title")
+        title, body = fallback_title.strip()[:255], markdown
+    if not title:
+        return _skip(
+            "no_title",
+            "the deliverable has no H1 line to use as the page title, and the task "
+            "has no description to derive one from",
+        )
 
     try:
         client = client_factory(cloud_id, token, site_url=meta.get("confluence_site_url", ""))

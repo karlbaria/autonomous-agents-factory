@@ -118,6 +118,28 @@ class TestGetSystemPrompt:
         # Scope discipline (the typo->button case).
         assert "weren't requested" in prompt or "not requested" in prompt
 
+    @pytest.mark.parametrize(
+        "workflow_id",
+        ["coding/new-task-v1", "coding/new-task-verified-v1", "coding/new-task-adversarial-v1"],
+    )
+    def test_new_task_asks_when_the_request_contradicts_the_code(self, workflow_id):
+        # #80: a request that asserts something the code contradicts (a README line
+        # claiming a "Free shipping and tracking" badge the app doesn't have) must
+        # be asked about, not written up as fact or made true by changing the code.
+        # The adversarial workflow has no registered prompt and falls back to
+        # new-task-v1's, so all three get the same rule.
+        prompt = get_system_prompt(workflow_id)
+        assert "The request contradicts the code." in prompt
+        assert "states something" in prompt
+        assert "about the app as fact" in prompt
+        assert "do NOT write the claim" in prompt
+        assert "do NOT change the code to make the" in prompt
+        assert "quotes what the request says and what the code shows" in prompt
+        assert "with the file and line" in prompt
+        # The actionable-request sentence stays, with this rule as its exception.
+        assert "A request that names what to change (even loosely) is" in prompt
+        assert "The contradiction rule above is the one exception" in prompt
+
     def test_pr_iteration_returns_prompt_with_update_pr(self):
         prompt = get_system_prompt("coding/pr-iteration-v1")
         assert "Post a summary comment on the PR" in prompt
@@ -190,6 +212,13 @@ class TestGetSystemPrompt:
         assert prompt is not get_system_prompt("coding/new-task-v1")
         for placeholder in ("{repo_url}", "{branch_name}", "{default_branch}", "{pr_number}"):
             assert placeholder not in prompt, f"repo-less prompt should not contain {placeholder}"
+
+    def test_web_research_requires_exactly_one_h1_title(self):
+        # #80: the Confluence page title is the report's first H1; without one the
+        # publish used to skip with no_title, depending on model variance.
+        prompt = get_system_prompt("knowledge/web-research-v1", repo_less=True)
+        assert "Start the report with exactly one `# <short descriptive title>` line" in prompt
+        assert "becomes the page title" in prompt
         assert "repo-less" in prompt.lower()
 
     def test_web_research_has_its_own_registered_prompt(self):

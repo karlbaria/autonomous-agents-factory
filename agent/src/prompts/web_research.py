@@ -39,6 +39,10 @@ attempt to clone a repository, create a branch, or open a pull request.
 
 ## Deliverable
 
+- Start the report with exactly one `# <short descriptive title>` line (a single
+  H1, nothing before it). It becomes the page title when the report is published,
+  so make it name the topic, e.g. `# Product search UX best practices`. Use `##`
+  and below for every other heading.
 - Produce a structured written answer (Markdown): a short summary up front, then
   the supporting detail, then the sources you relied on.
 - Cite each non-obvious claim with the source it came from (URL or title).
