@@ -394,6 +394,11 @@ class AgentResult(BaseModel):
     # guess). Empty when the agent proceeded normally. Preferred over the older
     # NEEDS_INPUT_MARKER text sentinel (a tool call can't be mis-reproduced).
     clarification_question: str = ""
+    # Merge gate (#82 PR 3a): the reason(s) captured when the agent called the
+    # ``flag_concern`` tool. Non-empty means "a person must check this before
+    # merge": the pipeline labels the PR ``needs-human`` and adds the reason to
+    # its body. Unlike a clarification it is NOT a hold — the PR still ships.
+    concern_reason: str = ""
 
 
 class AgentInvocationRecord(BaseModel):

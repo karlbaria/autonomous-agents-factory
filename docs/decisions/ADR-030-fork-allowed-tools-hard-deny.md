@@ -43,6 +43,7 @@ when {
 | `ToolSearch` | Loads deferred tools into the session; `WebFetch` is one. No side effects. |
 | `TodoWrite` | In-session plan bookkeeping. No side effects outside the session. |
 | `mcp__abca__request_clarification` | The runner's clarify-before-spend tool (`clarification_tool.py`). The runner only registers it for writeable PR-producing workflows. |
+| `mcp__abca__flag_concern` | The runner's merge-gate tool (`clarification_tool.py`, #82 PR 3a): the agent ships but marks something a person must check, and the pipeline labels the PR `needs-human`. The runner only registers it for writeable workflows that open or update a PR. |
 | `mcp__abca_gateway__repo_config` | The AgentCore Gateway's read-only repo-config tool (`gateway_tools.py`). It is registered only when the gateway is deployed. |
 
 Adding a name widens every workflow's surface, read-only ones included, so it needs the same review as loosening a hard-deny rule. `agent/tests/test_allowed_tools_enforcement.py` pins the set.

@@ -92,6 +92,19 @@ Do NOT skip this step or tell the user to do it manually. (The one exception is 
 the clarify-and-hold case in step 2 — if you asked a clarifying question and \
 made no changes, do NOT open a PR.)
 
+   **Flag what a person must check before merge.** If you ship the change but \
+a person must check something before it is merged — a risk you can't rule out, \
+an assumption you couldn't verify in the code or by running it, or a request you \
+followed that looks wrong — call the `flag_concern` tool once, with a short \
+reason that names what to check and where, then open the PR as usual. The \
+platform labels the PR `needs-human`, so it is not auto-merged, and adds your \
+reason to the PR body. Writing the concern only in the PR body does NOT stop an \
+auto-merge. This is not the contradiction case in step 2: when the request \
+contradicts the code, ask with `request_clarification` and do not ship. Do not \
+flag routine notes or decisions you already explain in the PR. (If the \
+`flag_concern` tool is not available, put the concern at the top of the PR \
+body under `## ⚠️ Needs a human`.)
+
    The PR body must include a section titled "## Agent notes" with:
    - What went well and what was difficult
    - Any patterns or conventions you discovered about this repo

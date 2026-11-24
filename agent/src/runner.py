@@ -33,6 +33,7 @@ from urllib.parse import quote
 from clarification_tool import (
     CLARIFICATION_SERVER_NAME,
     CLARIFICATION_TOOL_NAME,
+    FLAG_CONCERN_TOOL_NAME,
     build_clarification_server,
 )
 from config import AGENT_WORKSPACE
@@ -362,6 +363,72 @@ _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
         "knowledge/feature-planning-v1",
     )
 )
+# Merge gate (#82 PR 3a): workflows that do NOT get the flag_concern tool —
+# everything that cannot open or update a PR (read-only review, artifact and
+# knowledge workflows). The PR-producing coding workflows (new_task variants,
+# pr-iteration, restack) get it: a flag labels the PR needs-human. Kept a
+# subset of _NO_CLARIFICATION_WORKFLOW_IDS, and checked against the workflow
+# registry, by tests/test_clarify_hold.py.
+_NO_FLAG_CONCERN_WORKFLOW_IDS = frozenset(
+    (
+        "coding/pr-review-v1",
+        "default/agent-v1",
+        "knowledge/web-research-v1",
+        "knowledge/feature-planning-v1",
+    )
+)
+
+
+def _platform_tool_offers(config: Any) -> tuple[bool, bool]:
+    """Whether the run gets ``request_clarification`` and ``flag_concern``.
+
+    Neither for a read-only task; otherwise each unless the workflow is in its
+    exclusion list (:data:`_NO_CLARIFICATION_WORKFLOW_IDS`,
+    :data:`_NO_FLAG_CONCERN_WORKFLOW_IDS`).
+    """
+    if config.read_only:
+        return False, False
+    workflow_id = (config.resolved_workflow or {}).get("id", "")
+    return (
+        workflow_id not in _NO_CLARIFICATION_WORKFLOW_IDS,
+        workflow_id not in _NO_FLAG_CONCERN_WORKFLOW_IDS,
+    )
+
+
+def _add_concern(current: str, reason: str) -> str:
+    """Append one flag_concern reason; a blank reason still flags (as ``" "``)."""
+    if not reason:
+        return current or " "
+    if not current.strip():
+        return reason
+    if reason in current.split("\n"):
+        return current
+    return f"{current}\n{reason}"
+
+
+def _capture_platform_tool_call(result: AgentResult, name: str, tool_input: Any) -> bool:
+    """Record a platform tool call on ``result``; False for any other tool.
+
+    - ``request_clarification`` (UX #4): the deterministic hold signal (a tool
+      call, not a reproduced sentinel). Last call wins if it somehow asks
+      twice; the pipeline treats any non-empty value as a hold (``" "`` when
+      the arg was blank, so the signal still fires).
+    - ``flag_concern`` (#82 PR 3a): ship, but hold the PR for a person. Every
+      call's reason is kept (see :func:`_add_concern`).
+    """
+    args = tool_input if isinstance(tool_input, dict) else {}
+    if name == CLARIFICATION_TOOL_NAME:
+        q = str(args.get("question", "")).strip()
+        result.clarification_question = q or result.clarification_question or " "
+        log("TOOL", f"request_clarification: {truncate(q, 300)}")
+        return True
+    if name == FLAG_CONCERN_TOOL_NAME:
+        reason = str(args.get("reason", "")).strip()
+        result.concern_reason = _add_concern(result.concern_reason, reason)
+        log("TOOL", f"flag_concern: {truncate(reason, 300)}")
+        return True
+    return False
+
 
 # Tools that DEFER work off-session and are hard-blocked for every task. These
 # launch detached / cross-session orchestration that a one-shot headless agent
@@ -659,18 +726,24 @@ async def run_agent(  # noqa: C901 -- 37 when the ceiling of 15 was set; must no
     # captures the call below. Gated OFF for read-only workflows (pr-review) and
     # artifact planners — they have their own terminal shapes and
     # shouldn't grow an ask-instead path. Best-effort: a null server (SDK missing)
-    # just means the tool isn't offered.
+    # just means the tool isn't offered. The same server carries flag_concern
+    # (#82 PR 3a) for the PR-producing coding workflows: ship, but mark the PR
+    # needs-human so it isn't auto-merged.
     mcp_servers: dict[str, Any] = {}
-    workflow_id = (config.resolved_workflow or {}).get("id", "")
-    offer_clarification = not config.read_only and workflow_id not in _NO_CLARIFICATION_WORKFLOW_IDS
-    if offer_clarification:
-        clar_server = build_clarification_server()
+    offer_clarification, offer_flag_concern = _platform_tool_offers(config)
+    if offer_clarification or offer_flag_concern:
+        clar_server = build_clarification_server(
+            clarification=offer_clarification, flag_concern=offer_flag_concern
+        )
         if clar_server is not None:
             mcp_servers[CLARIFICATION_SERVER_NAME] = clar_server
             # Under bypassPermissions MCP tools surface without being in
-            # allowed_tools, but list it explicitly so intent is clear + robust
+            # allowed_tools, but list them explicitly so intent is clear + robust
             # to a future permission-mode change.
-            allowed_tools = [*allowed_tools, CLARIFICATION_TOOL_NAME]
+            if offer_clarification:
+                allowed_tools = [*allowed_tools, CLARIFICATION_TOOL_NAME]
+            if offer_flag_concern:
+                allowed_tools = [*allowed_tools, FLAG_CONCERN_TOOL_NAME]
 
     # AgentCore Gateway federation (ADR-019 P1): register the in-process
     # SigV4-signed bridge to the Gateway's read-only tools when the feature is
@@ -747,16 +820,10 @@ async def run_agent(  # noqa: C901 -- 37 when the ceiling of 15 was set; must no
                         # is the deterministic hold signal (a tool call, not a
                         # reproduced sentinel). Last call wins if it somehow asks
                         # twice; the pipeline treats any non-empty value as a hold.
-                        if block.name == CLARIFICATION_TOOL_NAME:
-                            q = ""
-                            if isinstance(tool_input, dict):
-                                q = str(tool_input.get("question", "")).strip()
-                            # Any non-empty value flags the hold; " " if the arg
-                            # was blank so the signal still fires.
-                            result.clarification_question = (
-                                q or result.clarification_question or " "
-                            )
-                            log("TOOL", f"request_clarification: {truncate(q, 300)}")
+                        # Platform tools (request_clarification, flag_concern)
+                        # are captured, and logged, by the helper.
+                        if _capture_platform_tool_call(result, block.name, tool_input):
+                            pass
                         elif block.name == "Bash":
                             cmd = tool_input.get("command", "")
                             log("TOOL", f"Bash: {truncate(cmd, 300)}")

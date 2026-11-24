@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from clarification_tool import CLARIFICATION_TOOL_NAME
+from clarification_tool import CLARIFICATION_TOOL_NAME, FLAG_CONCERN_TOOL_NAME
 from config import build_config
 from gateway_tools import GATEWAY_SERVER_NAME
 from models import TaskConfig
@@ -89,17 +89,20 @@ def _engine(allowed_tools: list[str] | None, *, read_only: bool = False, **kw: A
 
 
 class TestPlatformTools:
-    def test_platform_tools_are_exactly_the_documented_four(self) -> None:
+    def test_platform_tools_are_exactly_the_documented_five(self) -> None:
         # Widening this set widens every workflow, read-only ones included.
+        # mcp__abca__flag_concern: #82 PR 3a (ADR-030 lists the rationale).
         assert {
             "ToolSearch",
             "TodoWrite",
             "mcp__abca__request_clarification",
+            "mcp__abca__flag_concern",
             "mcp__abca_gateway__repo_config",
         } == PLATFORM_TOOLS
 
     def test_platform_names_match_the_runtime_tool_names(self) -> None:
         assert CLARIFICATION_TOOL_NAME in PLATFORM_TOOLS
+        assert FLAG_CONCERN_TOOL_NAME in PLATFORM_TOOLS
         assert f"mcp__{GATEWAY_SERVER_NAME}__repo_config" in PLATFORM_TOOLS
 
     def test_no_patterns(self) -> None:

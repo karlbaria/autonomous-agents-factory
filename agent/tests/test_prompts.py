@@ -140,6 +140,29 @@ class TestGetSystemPrompt:
         assert "A request that names what to change (even loosely) is" in prompt
         assert "The contradiction rule above is the one exception" in prompt
 
+    @pytest.mark.parametrize(
+        "workflow_id",
+        ["coding/new-task-v1", "coding/new-task-verified-v1", "coding/new-task-adversarial-v1"],
+    )
+    def test_new_task_flags_what_a_person_must_check_before_merge(self, workflow_id):
+        # #82 PR 3a: ship, but call flag_concern so the PR is labelled
+        # needs-human and not auto-merged. Kept apart from the #80 rule (a
+        # contradiction means ask, not ship).
+        prompt = get_system_prompt(workflow_id)
+        assert "**Flag what a person must check before merge.**" in prompt
+        assert "call the `flag_concern` tool once" in prompt
+        assert "a risk you can't rule out" in prompt
+        assert "an assumption you couldn't verify" in prompt
+        assert "a request you followed that looks wrong" in prompt
+        assert "labels the PR `needs-human`, so it is not auto-merged" in prompt
+        assert "Writing the concern only in the PR body does NOT stop an" in prompt
+        assert "This is not the contradiction case in step 2" in prompt
+        assert "ask with `request_clarification` and do not ship" in prompt
+        # The flag rule lives in step 6 (PR), after the step-2 contradiction rule.
+        assert prompt.index("The request contradicts the code.") < prompt.index(
+            "**Flag what a person must check before merge.**"
+        )
+
     def test_pr_iteration_returns_prompt_with_update_pr(self):
         prompt = get_system_prompt("coding/pr-iteration-v1")
         assert "Post a summary comment on the PR" in prompt
