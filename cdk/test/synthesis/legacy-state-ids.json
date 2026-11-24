@@ -176,6 +176,11 @@
   },
   {
     "template": "backgroundagent-dev.template.json",
+    "logicalId": "SlackIntegrationPlanningSessionTable15DB207E",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
     "logicalId": "SlackIntegrationSigningSecretFBE3D363",
     "type": "AWS::SecretsManager::Secret"
   },

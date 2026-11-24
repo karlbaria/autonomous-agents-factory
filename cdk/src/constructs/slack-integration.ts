@@ -28,6 +28,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { PlanningSessionTable } from './planning-session-table';
 import { SlackChannelMappingTable } from './slack-channel-mapping-table';
 import { SlackInstallationTable } from './slack-installation-table';
 import { SlackUserMappingTable } from './slack-user-mapping-table';
@@ -111,6 +112,13 @@ export class SlackIntegration extends Construct {
   /** The Slack channel → default-repo mapping table. */
   public readonly channelMappingTable: dynamodb.Table;
 
+  /**
+   * Planning drafts delivered with Approve/Cancel buttons (Task 15 (fork),
+   * #82 PR 3b-1). The fan-out Slack dispatcher writes a row when it posts
+   * "Planning draft ready"; the command processor reads and updates it.
+   */
+  public readonly planningSessionTable: dynamodb.Table;
+
   /** The Slack signing secret (placeholder — user populates after creating the Slack App). */
   public readonly signingSecret: secretsmanager.Secret;
 
@@ -147,6 +155,7 @@ export class SlackIntegration extends Construct {
     this.installationTable = installationTable.table;
     this.userMappingTable = userMappingTable.table;
     this.channelMappingTable = channelMappingTable.table;
+    this.planningSessionTable = new PlanningSessionTable(this, 'PlanningSessionTable', { removalPolicy }).table;
 
     // --- Slack App Secrets (CDK-created placeholders) ---
     // Users populate these after creating the Slack App via the SlackAppCreateUrl output.
@@ -307,6 +316,7 @@ export class SlackIntegration extends Construct {
         SLACK_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         SLACK_INSTALLATION_TABLE_NAME: this.installationTable.tableName,
         SLACK_CHANNEL_MAPPING_TABLE_NAME: this.channelMappingTable.tableName,
+        PLANNING_SESSION_TABLE_NAME: this.planningSessionTable.tableName,
       },
       // Screens inline file attachments via createTaskCore — pdf-parse must stay unbundled.
       bundling: attachmentScreeningBundling,
@@ -315,6 +325,13 @@ export class SlackIntegration extends Construct {
     this.userMappingTable.grantReadWriteData(commandProcessorFn);
     this.installationTable.grantReadData(commandProcessorFn);
     this.channelMappingTable.grantReadData(commandProcessorFn);
+    // Plan Approve/Cancel (#82 PR 3b-1): read the session, then move its state
+    // with conditional updates. No Put, Delete, Scan or Query: the fan-out
+    // dispatcher creates rows and the TTL removes them.
+    commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      resources: [this.planningSessionTable.tableArn],
+    }));
     commandProcessorFn.addToRolePolicy(readSlackSecretsPolicy);
     props.taskTable.grantReadWriteData(commandProcessorFn);
     props.taskEventsTable.grantReadWriteData(commandProcessorFn);
@@ -369,6 +386,11 @@ export class SlackIntegration extends Construct {
     slackInteractionsFn.addToRolePolicy(readSlackSecretsPolicy);
     props.taskTable.grantReadWriteData(slackInteractionsFn);
     this.userMappingTable.grantReadData(slackInteractionsFn);
+    // Plan Approve/Cancel clicks (#82 PR 3b-1) are answered at once and the
+    // work is handed to the command processor asynchronously, inside Slack's
+    // 3-second limit. The interactions Lambda gets no planning-table access.
+    slackInteractionsFn.addEnvironment('SLACK_COMMAND_PROCESSOR_FUNCTION_NAME', commandProcessorFn.functionName);
+    commandProcessorFn.grantInvoke(slackInteractionsFn);
 
     // --- Slash Command Acknowledger ---
     const slackCommandsFn = new lambda.NodejsFunction(this, 'SlackCommandsFn', {

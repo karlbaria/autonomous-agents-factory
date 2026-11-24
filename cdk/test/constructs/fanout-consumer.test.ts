@@ -267,4 +267,29 @@ describe('FanOutConsumer', () => {
       expect(vars.TASK_TABLE_NAME).toBeUndefined();
     }
   });
+
+  // Task 15 (fork), #82 PR 3b-1.
+  test('grants PutItem and UpdateItem on the planning-session table only when it is provided', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const sessions = new dynamodb.Table(stack, 'Sessions', {
+      partitionKey: { name: 'session_id', type: dynamodb.AttributeType.STRING },
+    });
+    new FanOutConsumer(stack, 'FanOut', { taskEventsTable: makeTaskEventsTable(stack), planningSessionTable: sessions });
+    const template = Template.fromStack(stack);
+    const sessionsId = stack.getLogicalId(sessions.node.defaultChild as dynamodb.CfnTable);
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>)
+      .filter((st) => JSON.stringify(st.Resource).includes(`"${sessionsId}"`));
+    expect(statements).toEqual([
+      expect.objectContaining({ Effect: 'Allow', Action: ['dynamodb:PutItem', 'dynamodb:UpdateItem'] }),
+    ]);
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ PLANNING_SESSION_TABLE_NAME: { Ref: sessionsId } }) },
+    });
+
+    const bare = new Stack(new App(), 'Bare');
+    new FanOutConsumer(bare, 'FanOut', { taskEventsTable: makeTaskEventsTable(bare) });
+    expect(JSON.stringify(Template.fromStack(bare).toJSON())).not.toContain('PLANNING_SESSION_TABLE_NAME');
+  });
 });

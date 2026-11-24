@@ -285,10 +285,26 @@ class TestGetSystemPrompt:
             "### S1: <imperative title>",
             "Blocked by: none",
             "**Acceptance criteria**",
+            "## Open questions",
+            "### Q1: <a question the PM must answer before approving>",
             "## Risks",
         ):
             assert heading in prompt, heading
         assert "Blocked by: S1" in prompt
+
+    def test_feature_planning_open_questions_match_the_approve_check(self):
+        # #82 PR 3b-1: Approve (cdk/src/handlers/shared/plan-parse.ts) reads
+        # `### Q<n>:` headings under "## Open questions" and counts a question
+        # as answered only when its `Answer:` line has text; "None." means none.
+        prompt = get_system_prompt("knowledge/feature-planning-v1", repo_less=True)
+        layout = prompt[prompt.index("## Open questions") : prompt.index("## Risks")]
+        assert "\nAnswer:\n" in layout
+        assert "`### Q<n>: <question>`" in prompt
+        assert "exactly `Answer:`" in prompt
+        assert "the single line `None.`" in prompt
+        assert "Never answer your own questions." in prompt
+        # Open questions moved out of Risks.
+        assert "Assumptions, open questions" not in prompt
 
     def test_feature_planning_offers_only_read_tools(self):
         prompt = get_system_prompt("knowledge/feature-planning-v1", repo_less=True)

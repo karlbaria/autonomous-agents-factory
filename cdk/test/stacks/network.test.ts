@@ -123,7 +123,11 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
           'bedrockGeoRegion': 'global',
           'enableToolGateway': true,
           'enableAgentRegistry': true,
-          'enableLinearIdentityVault': true,
+          // With every optional module, lambda-microvm's inline stack is over
+          // the resource budget since the planning-session table (#82 PR 3b-1,
+          // decision 6), so it compares inline and split without the Linear
+          // identity vault, which has no network resources.
+          'enableLinearIdentityVault': compute !== 'lambda-microvm',
           'github:sha': 'fixture-revision',
           ...(zones ? { [AGENTCORE_AZS_CONTEXT_KEY]: zones } : {}),
           ...(compute === 'lambda-microvm' ? {

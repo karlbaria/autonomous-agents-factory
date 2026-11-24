@@ -202,7 +202,47 @@ interface PageApiBody {
   readonly status?: string;
   readonly title?: string;
   readonly spaceId?: string;
+  readonly version?: { readonly number?: number };
   readonly body?: { readonly storage?: { readonly value?: string } };
+}
+
+type MappedPageFetch =
+  | { readonly ok: true; readonly page: PageApiBody; readonly accessToken: string; readonly gateway: string }
+  | { readonly ok: false; readonly reason: 'unreadable' | 'other_space' };
+
+/**
+ * Fetch a current page by id with the tenant token and check, through the
+ * API, that it is in `spaceKey`. Never throws.
+ */
+async function fetchPageInMappedSpace(
+  fetchFn: typeof fetch,
+  cloudId: string,
+  registryTable: string,
+  pageId: string,
+  spaceKey: string,
+): Promise<MappedPageFetch> {
+  try {
+    const token = await resolveJiraOauthToken(cloudId, registryTable);
+    if (!token) return { ok: false, reason: 'unreadable' };
+    const gateway = `${CONFLUENCE_API_BASE}/${encodeURIComponent(cloudId)}/wiki/api/v2`;
+    const pageRes = await getJson(fetchFn, `${gateway}/pages/${encodeURIComponent(pageId)}?body-format=storage`, token.accessToken);
+    const page = (pageRes.body ?? {}) as PageApiBody;
+    if (!pageRes.body || String(page.id) !== pageId || (page.status && page.status !== 'current') || !page.spaceId) {
+      logger.warn('Confluence read: page not readable', { page_id: pageId, status: pageRes.status, page_status: page.status });
+      return { ok: false, reason: 'unreadable' };
+    }
+    const spaceRes = await getJson(fetchFn, `${gateway}/spaces/${encodeURIComponent(page.spaceId)}`, token.accessToken);
+    const realKey = (spaceRes.body as { key?: string } | null)?.key;
+    if (!realKey) return { ok: false, reason: 'unreadable' };
+    if (realKey.toUpperCase() !== spaceKey.toUpperCase()) return { ok: false, reason: 'other_space' };
+    return { ok: true, page, accessToken: token.accessToken, gateway };
+  } catch (err) {
+    logger.warn('Confluence read: request failed', {
+      page_id: pageId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, reason: 'unreadable' };
+  }
 }
 
 /**
@@ -241,29 +281,11 @@ export async function readPrdPage(
 
   const fetchFn = deps.fetchFn ?? fetch;
   const unreadable = 'I couldn\'t read that PRD page. Check that it exists and is published, then try again.';
-  let page: PageApiBody;
-  try {
-    const token = await resolveJiraOauthToken(cloudId, registryTable!);
-    if (!token) return reject('unreadable', unreadable);
-    const gateway = `${CONFLUENCE_API_BASE}/${encodeURIComponent(cloudId)}/wiki/api/v2`;
-    const pageRes = await getJson(fetchFn, `${gateway}/pages/${parsed.pageId}?body-format=storage`, token.accessToken);
-    page = (pageRes.body ?? {}) as PageApiBody;
-    if (!pageRes.body || String(page.id) !== parsed.pageId || (page.status && page.status !== 'current') || !page.spaceId) {
-      logger.warn('PRD read: page not readable', { page_id: parsed.pageId, status: pageRes.status, page_status: page.status });
-      return reject('unreadable', unreadable);
-    }
-    // The URL's space key is only a claim: check the page's real space.
-    const spaceRes = await getJson(fetchFn, `${gateway}/spaces/${encodeURIComponent(page.spaceId)}`, token.accessToken);
-    const realKey = (spaceRes.body as { key?: string } | null)?.key;
-    if (!realKey) return reject('unreadable', unreadable);
-    if (realKey.toUpperCase() !== spaceKey.toUpperCase()) return reject('other_space', wrongSpace);
-  } catch (err) {
-    logger.warn('PRD read: Confluence request failed', {
-      page_id: parsed.pageId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return reject('unreadable', unreadable);
+  const fetched = await fetchPageInMappedSpace(fetchFn, cloudId, registryTable!, parsed.pageId, spaceKey);
+  if (!fetched.ok) {
+    return fetched.reason === 'other_space' ? reject('other_space', wrongSpace) : reject('unreadable', unreadable);
   }
+  const page = fetched.page;
 
   const fullText = confluenceStorageToText(page.body?.storage?.value ?? '');
   if (!fullText) return reject('empty', 'That PRD page has no text to plan from.');
@@ -321,4 +343,81 @@ export function buildPrdTaskDescription(
   }
   lines.push(PRD_BEGIN_MARKER, `Title: ${prd.title}`, '', prd.text, PRD_END_MARKER);
   return lines.join('\n');
+}
+
+/** Labels a page must carry to be read as a factory plan (Task 14's publisher sets them). */
+const PLAN_PAGE_LABELS = ['factory-generated', 'factory-plan'] as const;
+
+export type PlanPageRejectReason = 'no_mapping' | 'tenant_unavailable' | 'unreadable' | 'other_space' | 'not_a_plan';
+
+export type PlanPageReadResult =
+  | {
+    readonly ok: true;
+    readonly title: string;
+    /** The current version's storage-format body, untruncated. */
+    readonly storage: string;
+    readonly version: number | null;
+  }
+  | { readonly ok: false; readonly reason: PlanPageRejectReason; readonly message: string };
+
+/**
+ * Read the current version of a plan page by id, for Approve (#82 PR 3b-1).
+ *
+ * The id comes from the planning session the platform recorded, never from a
+ * user. The same tenant and space checks as {@link readPrdPage} apply, and the
+ * page must still carry the factory's `factory-generated` and `factory-plan`
+ * labels. Unlike a PRD, a plan is never truncated: a dropped story would be a
+ * silent change to what gets filed, so the caller rejects an oversized page
+ * instead. The body is untrusted: the caller only parses it into a fixed
+ * structure. Never throws.
+ */
+export async function readPlanPage(
+  pageId: string,
+  mapping: ConfluenceMapping | null | undefined,
+  deps: Pick<PrdReadDeps, 'fetchFn'> = {},
+): Promise<PlanPageReadResult> {
+  const fail = (reason: PlanPageRejectReason, message: string): PlanPageReadResult => ({ ok: false, reason, message });
+  const cloudId = mapping?.confluence_cloud_id;
+  const spaceKey = mapping?.confluence_space_key;
+  if (!cloudId || !spaceKey) {
+    return fail('no_mapping', 'This repo no longer has a Confluence space mapped, so I can\'t read the plan.');
+  }
+  const registryTable = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+  const row = registryTable ? await getRegistryRow(makeDocClient(), registryTable, cloudId) : null;
+  if (!row || row.status !== 'active') {
+    logger.warn('Plan read: Confluence tenant not resolvable', { confluence_cloud_id: cloudId, status: row?.status });
+    return fail('tenant_unavailable', 'The Confluence connection for this repo isn\'t available right now, so I can\'t read the plan.');
+  }
+
+  const fetchFn = deps.fetchFn ?? fetch;
+  const unreadable = 'I couldn\'t read the plan page. Check that it still exists and is published, then try again.';
+  const fetched = await fetchPageInMappedSpace(fetchFn, cloudId, registryTable!, pageId, spaceKey);
+  if (!fetched.ok) {
+    return fetched.reason === 'other_space'
+      ? fail('other_space', `The plan page is no longer in this repo's Confluence space (${spaceKey}).`)
+      : fail('unreadable', unreadable);
+  }
+
+  let labels: string[];
+  try {
+    const res = await getJson(fetchFn, `${fetched.gateway}/pages/${encodeURIComponent(pageId)}/labels?limit=200`, fetched.accessToken);
+    const results = (res.body as { results?: Array<{ name?: unknown }> } | null)?.results;
+    if (!Array.isArray(results)) return fail('unreadable', unreadable);
+    labels = results.map((l) => (typeof l.name === 'string' ? l.name.toLowerCase() : ''));
+  } catch (err) {
+    logger.warn('Plan read: label request failed', { page_id: pageId, error: err instanceof Error ? err.message : String(err) });
+    return fail('unreadable', unreadable);
+  }
+  if (!PLAN_PAGE_LABELS.every((l) => labels.includes(l))) {
+    logger.warn('Plan read: page is missing the factory plan labels', { page_id: pageId });
+    return fail('not_a_plan', 'That page no longer has the factory\'s plan labels (`factory-generated`, `factory-plan`), so I won\'t file from it.');
+  }
+
+  const version = fetched.page.version?.number;
+  return {
+    ok: true,
+    title: String(fetched.page.title ?? '').trim(),
+    storage: fetched.page.body?.storage?.value ?? '',
+    version: typeof version === 'number' ? version : null,
+  };
 }

@@ -160,7 +160,10 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
         ...base,
         name: `${base.name}-expanded-models${networkTopology === 'split' ? '-split' : ''}`,
         context: { ...base.context, networkTopology, bedrockModels: expandedModels },
-        ...(networkTopology === 'inline' && base.context.compute_types === 'lambda-microvm' ? {
+        // Inline, lambda-microvm and (since the planning-session table, #82
+        // PR 3b-1, decision 6) agentcore exceed the resource budget; their
+        // `-split` counterparts fit.
+        ...(networkTopology === 'inline' && base.context.compute_types !== 'ecs' ? {
           expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources },
         } : {}),
       });

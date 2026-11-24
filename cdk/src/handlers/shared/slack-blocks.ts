@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { planActionId } from './planning-session';
 import { formatDuration, truncate } from './slack-format';
 
 /** Max length for task-failure reason text in Slack blocks. */
@@ -90,6 +91,15 @@ export interface SlackMessage {
   readonly thread_ts?: string;
 }
 
+/** Extras for {@link renderSlackBlocks}. */
+export interface RenderOptions {
+  /**
+   * The planning session of a delivered plan (#82 PR 3b-1). When set on a
+   * planning task's completion, Approve and Cancel buttons carry it.
+   */
+  readonly planningSessionId?: string;
+}
+
 /**
  * Render a task event as a Slack Block Kit message.
  *
@@ -103,6 +113,7 @@ export function renderSlackBlocks(
   task: Pick<TaskRecord, 'task_id' | 'repo' | 'task_description' | 'pr_url' | 'error_message' | 'cost_usd' | 'duration_s' | 'status'>
     & Partial<Pick<TaskRecord, ConfluenceOutcomeField | 'resolved_workflow'>>,
   eventMetadata?: Record<string, unknown>,
+  options: RenderOptions = {},
 ): SlackMessage {
   switch (eventType) {
     case 'task_created':
@@ -110,7 +121,7 @@ export function renderSlackBlocks(
     case 'session_started':
       return sessionStartedMessage(task);
     case 'task_completed':
-      return taskCompletedMessage(task);
+      return taskCompletedMessage(task, options.planningSessionId);
     case 'task_failed':
       return taskFailedMessage(task, eventMetadata);
     case 'task_cancelled':
@@ -175,6 +186,7 @@ function completedHeadline(task: Pick<TaskRecord, 'repo'> & Partial<Pick<TaskRec
 function taskCompletedMessage(
   task: Pick<TaskRecord, 'task_id' | 'repo' | 'pr_url' | 'cost_usd' | 'duration_s'>
     & Partial<Pick<TaskRecord, ConfluenceOutcomeField | 'resolved_workflow'>>,
+  planningSessionId?: string,
 ): SlackMessage {
   const parts = [completedHeadline(task)];
   const stats: string[] = [];
@@ -194,6 +206,10 @@ function taskCompletedMessage(
     buttons.push(linkButton('View Confluence page', task.confluence_page_url));
   }
   if (buttons.length > 0) blocks.push(actions(task.task_id, buttons));
+  if (planningSessionId && isPlanningTask(task) && task.confluence_status === 'published') {
+    blocks.push(section('Edit the plan in Confluence if you need to, then approve it here. Only you can approve or cancel it.'));
+    blocks.push(planDecisionActions(planningSessionId, 'approve'));
+  }
 
   return {
     text: isPlanningTask(task) ? `Planning draft ready for ${task.repo}` : `Task completed for ${task.repo}`,
@@ -325,6 +341,48 @@ function dangerButton(label: string, actionId: string): ActionButtonElement {
       confirm: { type: 'plain_text', text: 'Cancel' },
       deny: { type: 'plain_text', text: 'Keep running' },
     },
+  };
+}
+
+/**
+ * Approve (or Confirm) and Cancel for a planning session. The buttons carry
+ * only the opaque session id.
+ */
+function planDecisionActions(sessionId: string, primary: 'approve' | 'confirm'): ActionsBlock {
+  return actions(`plan:${sessionId}`, [
+    {
+      type: 'button',
+      text: { type: 'plain_text', text: primary === 'approve' ? 'Approve' : 'Confirm' },
+      action_id: planActionId(primary, sessionId),
+      style: 'primary',
+    },
+    {
+      type: 'button',
+      text: { type: 'plain_text', text: 'Cancel' },
+      action_id: planActionId('cancel', sessionId),
+      style: 'danger',
+      confirm: {
+        title: { type: 'plain_text', text: 'Cancel this plan?' },
+        text: { type: 'mrkdwn', text: 'Nothing will be filed. The Confluence page stays as it is.' },
+        confirm: { type: 'plain_text', text: 'Cancel plan' },
+        deny: { type: 'plain_text', text: 'Keep it' },
+      },
+    },
+  ]);
+}
+
+/**
+ * The large-plan confirmation (#82 decision 11): the story count and the
+ * estimated coding cost, with Confirm and Cancel.
+ */
+export function renderPlanConfirmation(sessionId: string, storyCount: number, estimatedCostUsd: number): SlackMessage {
+  const cost = `$${estimatedCostUsd.toFixed(2)}`;
+  return {
+    text: `Large plan: ${storyCount} stories, about ${cost}. Confirm?`,
+    blocks: [
+      section(`:warning: *This is a large plan:* ${storyCount} stories, about ${cost} of coding. Confirm to go ahead.`),
+      planDecisionActions(sessionId, 'confirm'),
+    ],
   };
 }
 

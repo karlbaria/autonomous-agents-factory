@@ -27,6 +27,7 @@ const ddbSend = jest.fn();
 const ddbClient = { send: ddbSend };
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  PutCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
@@ -770,5 +771,120 @@ describe('dispatchSlackEvent', () => {
     await dispatchSlackEvent(mkEvent('t1', 'task_stranded'), ddb);
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// Task 15 (fork), #82 PR 3b-1: a delivered plan gets a planning session and
+// Approve/Cancel buttons.
+describe('dispatchSlackEvent — planning sessions', () => {
+  const PAGE_URL = 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015867/Plan+Wishlist';
+
+  function planningTask(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      task_id: 't-plan',
+      user_id: 'user-pm',
+      repo: 'karlbaria/factory-shop',
+      channel_source: 'slack',
+      channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1', slack_user_id: 'UPM', slack_thread_ts: '111.1' },
+      resolved_workflow: { id: 'knowledge/feature-planning-v1' },
+      confluence_status: 'published',
+      confluence_page_url: PAGE_URL,
+      ...overrides,
+    };
+  }
+
+  function callsOfType(type: string): Array<Record<string, any>> {
+    return ddbSend.mock.calls.map((c) => c[0]).filter((c) => c._type === type).map((c) => c.input);
+  }
+
+  function postedBlocks(): Array<Record<string, any>> {
+    const post = fetchMock.mock.calls.find((c) => String(c[0]).endsWith('chat.postMessage'));
+    return JSON.parse(post![1].body).blocks;
+  }
+
+  function planActionIds(): string[] {
+    return postedBlocks()
+      .filter((b) => b.type === 'actions')
+      .flatMap((b) => b.elements.map((e: { action_id?: string }) => e.action_id))
+      .filter((id): id is string => Boolean(id));
+  }
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    smSend.mockReset().mockResolvedValue({ SecretString: 'xoxb-test' });
+    fetchMock.mockReset().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, ts: '222.2' }) });
+    process.env.PLANNING_SESSION_TABLE_NAME = 'Sessions';
+  });
+
+  afterAll(() => {
+    delete process.env.PLANNING_SESSION_TABLE_NAME;
+  });
+
+  test('writes the session before posting, puts only its id on the buttons, then records the message ts', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: planningTask() }).mockResolvedValue({});
+
+    await dispatchSlackEvent(mkEvent('t-plan', 'task_completed'), ddb);
+
+    const [put] = callsOfType('Put');
+    expect(put.TableName).toBe('Sessions');
+    expect(put.Item).toMatchObject({
+      task_id: 't-plan',
+      repo: 'karlbaria/factory-shop',
+      page_id: '1015867',
+      slack_team_id: 'T1',
+      slack_user_id: 'UPM',
+      platform_user_id: 'user-pm',
+      slack_channel_id: 'C1',
+      slack_thread_ts: '111.1',
+      state: 'drafted',
+    });
+    expect(Object.keys(put.Item).sort()).toEqual([
+      'created_at', 'expires_at', 'page_id', 'platform_user_id', 'repo', 'session_id', 'slack_channel_id',
+      'slack_team_id', 'slack_thread_ts', 'slack_user_id', 'state', 'task_id',
+    ]);
+    const sid = put.Item.session_id as string;
+    expect(planActionIds()).toEqual([`plan_approve:${sid}`, `plan_cancel:${sid}`]);
+
+    const putIndex = ddbSend.mock.calls.findIndex((c) => c[0]._type === 'Put');
+    expect(ddbSend.mock.invocationCallOrder[putIndex]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
+    const tsUpdate = callsOfType('Update').find((u) => u.TableName === 'Sessions');
+    expect(tsUpdate).toMatchObject({ Key: { session_id: sid }, ExpressionAttributeValues: { ':ts': '222.2' } });
+  });
+
+  test('a failed session write still announces the plan, without buttons', async () => {
+    ddbSend.mockImplementation((cmd: { _type: string }) => {
+      if (cmd._type === 'Get') return Promise.resolve({ Item: planningTask() });
+      if (cmd._type === 'Put') return Promise.reject(new Error('throttled'));
+      return Promise.resolve({});
+    });
+
+    await dispatchSlackEvent(mkEvent('t-plan', 'task_completed'), ddb);
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(JSON.stringify(postedBlocks())).toContain('Planning draft ready');
+    expect(planActionIds()).toEqual([]);
+  });
+
+  test.each([
+    ['a coding task', { resolved_workflow: { id: 'coding/new-task-v1' } }],
+    ['a plan whose page was skipped', { confluence_status: 'skipped' }],
+    ['a page URL with no page id', { confluence_page_url: 'https://karlvb.atlassian.net/wiki/x' }],
+    ['no requester user id', { channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1' } }],
+  ])('no session or buttons for %s', async (_name, overrides) => {
+    ddbSend.mockResolvedValueOnce({ Item: planningTask(overrides) }).mockResolvedValue({});
+
+    await dispatchSlackEvent(mkEvent('t-plan', 'task_completed'), ddb);
+
+    expect(callsOfType('Put')).toEqual([]);
+    expect(planActionIds()).toEqual([]);
+  });
+
+  test('no session without the table configured', async () => {
+    delete process.env.PLANNING_SESSION_TABLE_NAME;
+    ddbSend.mockResolvedValueOnce({ Item: planningTask() }).mockResolvedValue({});
+
+    await dispatchSlackEvent(mkEvent('t-plan', 'task_completed'), ddb);
+
+    expect(callsOfType('Put')).toEqual([]);
   });
 });
