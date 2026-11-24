@@ -39,15 +39,15 @@ jest.mock('../../../src/handlers/shared/ua', () => ({
 }));
 
 import type { ScreeningConfig } from '../../../src/handlers/shared/attachment-screening';
+import { confluenceStorageToText, markPageFinal, readPlanPage } from '../../../src/handlers/shared/confluence-page';
 import {
   buildPrdTaskDescription,
-  confluenceStorageToText,
   parsePrdPageUrl,
   PRD_BEGIN_MARKER,
   PRD_END_MARKER,
   PRD_MAX_CHARS,
-  readPlanPage,
   readPrdPage,
+  readPrdPageById,
 } from '../../../src/handlers/shared/confluence-prd';
 
 const SITE = 'https://karlvb.atlassian.net';
@@ -411,5 +411,92 @@ describe('readPlanPage', () => {
   test('rejects an inactive tenant', async () => {
     getRegistryRowMock.mockResolvedValueOnce({ jira_cloud_id: 'cloud-1', site_url: SITE, status: 'revoked' });
     expect(await readPlanPage('1015867', MAPPING, { fetchFn: planFetch(PLAN, []) })).toMatchObject({ ok: false, reason: 'tenant_unavailable' });
+  });
+
+  // #82 PR 3c: Approve PRD reads the PRD with the same checks, and its labels.
+  test('a PRD read requires factory-prd, not factory-plan', async () => {
+    const prd = await readPlanPage('1015867', MAPPING, {
+      fetchFn: planFetch(PLAN, ['factory-generated', 'factory-draft', 'factory-prd']),
+      kind: 'prd',
+    });
+    expect(prd).toMatchObject({ ok: true, storage: PLAN.body.storage.value });
+    const plan = await readPlanPage('1015867', MAPPING, { fetchFn: planFetch(PLAN, ['factory-generated', 'factory-plan']), kind: 'prd' });
+    expect(plan).toMatchObject({ ok: false, reason: 'not_a_plan' });
+    expect(plan.ok ? '' : plan.message).toContain('`factory-prd`');
+  });
+
+  test('a design read refuses a PRD page', async () => {
+    const result = await readPlanPage('1015867', MAPPING, { fetchFn: planFetch(PLAN, ['factory-generated', 'factory-prd']) });
+    expect(result).toMatchObject({ ok: false, reason: 'not_a_plan' });
+  });
+
+  test('a PRD moved to another space is rejected', async () => {
+    const result = await readPlanPage('1015867', MAPPING, { fetchFn: planFetch(PLAN, ['factory-generated', 'factory-prd'], 'OTHER'), kind: 'prd' });
+    expect(result).toMatchObject({ ok: false, reason: 'other_space' });
+    expect(result.ok ? '' : result.message).toContain('PRD page');
+  });
+});
+
+describe('readPrdPageById (#82 PR 3c)', () => {
+  test('reads, checks and screens the page at the tenant site\'s URL for the id', async () => {
+    screenTextFileMock.mockResolvedValueOnce({ screening: { status: 'passed' } });
+    const fetchFn = confluenceFetch(PAGE);
+    const result = await readPrdPageById('1015867', MAPPING, { fetchFn, screeningConfig: SCREENING });
+    expect(result).toMatchObject({ ok: true, pageUrl: `${SITE}/wiki/spaces/SD/pages/1015867`, title: 'Wishlist PRD' });
+    expect(screenTextFileMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a guardrail block rejects it, as for plan from <url>', async () => {
+    screenTextFileMock.mockResolvedValueOnce({ screening: { status: 'blocked' } });
+    const result = await readPrdPageById('1015867', MAPPING, { fetchFn: confluenceFetch(PAGE), screeningConfig: SCREENING });
+    expect(result).toMatchObject({ ok: false, reason: 'blocked' });
+  });
+
+  test('a page in another space is rejected', async () => {
+    const result = await readPrdPageById('1015867', MAPPING, { fetchFn: confluenceFetch(PAGE, 'OTHER'), screeningConfig: SCREENING });
+    expect(result).toMatchObject({ ok: false, reason: 'other_space' });
+  });
+
+  test('no mapping is rejected', async () => {
+    expect(await readPrdPageById('1015867', null)).toMatchObject({ ok: false, reason: 'no_mapping' });
+  });
+});
+
+describe('markPageFinal (#82 PR 3c)', () => {
+  function labelFetch(addStatus = 200, removeStatus = 204): jest.Mock {
+    return jest.fn((_url: string, init?: { method?: string }) => Promise.resolve(
+      jsonResponse(null, init?.method === 'POST' ? addStatus : removeStatus),
+    ));
+  }
+
+  test('adds factory-final, then removes factory-draft, with the tenant token', async () => {
+    const fetchFn = labelFetch();
+    expect(await markPageFinal('1015867', MAPPING, { fetchFn })).toBe(true);
+    const [add, remove] = fetchFn.mock.calls;
+    expect(add[0]).toBe('https://api.atlassian.com/ex/confluence/cloud-1/wiki/rest/api/content/1015867/label');
+    expect(add[1]).toMatchObject({ method: 'POST', body: JSON.stringify([{ prefix: 'global', name: 'factory-final' }]) });
+    expect(add[1].headers.Authorization).toBe('Bearer tok');
+    expect(remove[0]).toBe('https://api.atlassian.com/ex/confluence/cloud-1/wiki/rest/api/content/1015867/label?name=factory-draft');
+    expect(remove[1]).toMatchObject({ method: 'DELETE' });
+  });
+
+  test('a draft label already gone is fine', async () => {
+    expect(await markPageFinal('1015867', MAPPING, { fetchFn: labelFetch(200, 404) })).toBe(true);
+  });
+
+  test.each([[403, 204], [200, 500]])('a failed label write (%i, %i) returns false', async (add, remove) => {
+    expect(await markPageFinal('1015867', MAPPING, { fetchFn: labelFetch(add, remove) })).toBe(false);
+  });
+
+  test('no token or no mapping returns false without a request', async () => {
+    resolveTokenMock.mockResolvedValueOnce(null);
+    const fetchFn = labelFetch();
+    expect(await markPageFinal('1015867', MAPPING, { fetchFn })).toBe(false);
+    expect(await markPageFinal('1015867', null, { fetchFn })).toBe(false);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  test('a network error returns false', async () => {
+    expect(await markPageFinal('1015867', MAPPING, { fetchFn: jest.fn(() => Promise.reject(new Error('down'))) })).toBe(false);
   });
 });

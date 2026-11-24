@@ -19,19 +19,20 @@
 
 import * as crypto from 'crypto';
 import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
-import { buildPrdTaskDescription, PRD_MAX_CHARS, readPlanPage, readPrdPage } from './shared/confluence-prd';
+import { markPageFinal, readPlanPage } from './shared/confluence-page';
+import { buildPrdTaskDescription, PRD_MAX_CHARS, readPrdPage, readPrdPageById } from './shared/confluence-prd';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
-import { handlePlanAction, type PlanActionEvent } from './shared/plan-approve';
+import { handlePlanAction, type PlanActionEvent, type StartDesignResult } from './shared/plan-approve';
 import type { PlanningSession } from './shared/planning-session';
-import { lookupRepo } from './shared/repo-config';
+import { lookupRepo, type RepoConfig } from './shared/repo-config';
 import { slackFetch } from './shared/slack-api';
 import type { SlackMessage } from './shared/slack-blocks';
 import { classifySlackIntent, type SlackIntent } from './shared/slack-intent';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { Attachment } from './shared/types';
 import { makeDocClient } from './shared/ua';
-import { resolveChannelDefaultWorkflow } from './shared/workflows';
+import { FEATURE_PLANNING_WORKFLOW_ID, resolveChannelDefaultWorkflow } from './shared/workflows';
 import type { SlackCommandPayload } from './slack-commands';
 
 /**
@@ -578,7 +579,7 @@ function isSlackFileUrl(url: string): boolean {
   }
 }
 
-// ─── Plan Approve / Cancel (#82 PR 3b-1) ────────────────────────────────────
+// ─── Approve PRD, Start and Cancel (#82 PR 3b-1, 3c) ────────────────────────
 
 async function handlePlanButton(event: PlanActionEvent): Promise<void> {
   if (!PLANNING_SESSION_TABLE) {
@@ -592,10 +593,49 @@ async function handlePlanButton(event: PlanActionEvent): Promise<void> {
     now: () => new Date(),
     lookupPlatformUser,
     lookupRepoConfig: async (repo) => (await lookupRepo(repo)).config,
-    readPlanPage: (pageId, mapping) => readPlanPage(pageId, mapping),
+    readPlanPage: (pageId, mapping, kind) => readPlanPage(pageId, mapping, { kind }),
+    startDesignFromPrd,
+    markPageFinal: (pageId, mapping) => markPageFinal(pageId, mapping),
     postInThread: postInPlanThread,
     replyEphemeral: postToSlack,
   });
+}
+
+/**
+ * Start the technical design from an approved PRD (#82 PR 3c): the same page
+ * read, mapped-space checks, guardrail screening and planning task as a
+ * `plan from <url>` request, created for the requester and threaded under
+ * the PRD's message.
+ */
+async function startDesignFromPrd(
+  session: PlanningSession,
+  mapping: Pick<RepoConfig, 'confluence_cloud_id' | 'confluence_space_key'> | null,
+): Promise<StartDesignResult> {
+  const prd = await readPrdPageById(session.page_id, mapping);
+  if (!prd.ok) return { ok: false, message: prd.message };
+  const threadTs = session.slack_thread_ts ?? session.slack_message_ts;
+  const result = await createTaskCore(
+    {
+      repo: session.repo,
+      task_description: buildPrdTaskDescription(prd),
+      workflow_ref: FEATURE_PLANNING_WORKFLOW_ID,
+    },
+    {
+      userId: session.platform_user_id,
+      channelSource: 'slack',
+      channelMetadata: {
+        slack_team_id: session.slack_team_id,
+        slack_channel_id: session.slack_channel_id,
+        slack_user_id: session.slack_user_id,
+        ...(threadTs && { slack_thread_ts: threadTs }),
+      },
+    },
+    crypto.randomUUID(),
+  );
+  const body = JSON.parse(result.body) as { data?: { task_id?: string }; error?: { message?: string } };
+  if (result.statusCode === 201 && body.data?.task_id) return { ok: true, taskId: body.data.task_id };
+  logger.warn('Design task from an approved PRD was not created', { session_id: session.session_id, status: result.statusCode });
+  return { ok: false, message: body.error?.message ?? 'The task could not be created.' };
 }
 
 /** Post in the thread the plan was delivered in (a DM goes to the user id). */

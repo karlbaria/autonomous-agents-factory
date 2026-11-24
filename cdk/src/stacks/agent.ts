@@ -1977,8 +1977,8 @@ export class AgentStack extends Stack {
           arnFormat: ArnFormat.COLON_RESOURCE_NAME,
         }),
       }),
-      // Task 15 (fork), #82 PR 3b-1: the Slack dispatcher records a planning
-      // session when it posts "Planning draft ready" with Approve/Cancel.
+      // Task 15 (fork), #82 PR 3b-1, 3c: the Slack dispatcher records a planning
+      // session when it posts "PRD draft ready" or "Technical design ready".
       ...(slackIntegration && { planningSessionTable: slackIntegration.planningSessionTable }),
       // Linear dispatcher reads workspace registry rows + per-workspace
       // OAuth-secret JSON. Same scope `bgagent-linear-oauth-*` as the

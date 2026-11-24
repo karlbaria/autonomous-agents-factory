@@ -14,6 +14,7 @@ from .feature_planning import FEATURE_PLANNING_PROMPT
 from .new_task import NEW_TASK_WORKFLOW
 from .pr_iteration import PR_ITERATION_WORKFLOW
 from .pr_review import PR_REVIEW_WORKFLOW
+from .prd_draft import PRD_DRAFT_PROMPT
 from .restack import RESTACK_WORKFLOW
 from .web_research import WEB_RESEARCH_PROMPT
 
@@ -41,8 +42,11 @@ _PROMPTS = {
     # no longer silently degrades to the generic default-agent prompt.
     "knowledge/web-research-v1": WEB_RESEARCH_PROMPT,
     # Read-only, repo-aware planning (Task 15 (fork), #82): the agent's final
-    # message is the planning doc, published to Confluence as a draft.
+    # message is the technical design, published to Confluence as a draft.
     "knowledge/feature-planning-v1": FEATURE_PLANNING_PROMPT,
+    # Read-only PRD draft (#82 PR 3c): product language only; the PM approves
+    # it before the technical design is written.
+    "knowledge/prd-draft-v1": PRD_DRAFT_PROMPT,
 }
 
 

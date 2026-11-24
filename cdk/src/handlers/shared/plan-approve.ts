@@ -18,47 +18,55 @@
  */
 
 /**
- * The planning draft's Approve, Confirm and Cancel buttons (Task 15 (fork),
- * #82 PR 3b-1). Runs in the Slack command processor, invoked asynchronously by
- * the interactions handler so Slack gets its answer within 3 seconds.
+ * The planning buttons (Task 15 (fork), #82 PR 3b-1 and 3c). Runs in the
+ * Slack command processor, invoked asynchronously by the interactions handler
+ * so Slack gets its answer within 3 seconds.
  *
  * - Only the requesting PM, still linked to the same platform user, may act;
  *   anyone else gets an ephemeral "only the requester" reply.
- * - Approve re-reads the plan page as it is now (never the agent's original
- *   output), parses it into a fixed structure and checks it. Each problem is
- *   posted in the thread; the PM fixes it in Confluence and clicks again.
- * - A large plan (decision 11) needs a second confirmation, bound to a digest
- *   of the stories, so an edit after the question is asked means asking again.
- * - In this PR a passing check files nothing: it says filing arrives in the
- *   next update. Cancel files nothing and leaves the page alone.
+ * - **Approve PRD** (a `prd` session) re-reads the PRD page as it is now,
+ *   checks it is still a factory PRD in the mapped space and that every
+ *   product question is answered, then starts the technical design through the
+ *   same path as `plan from <url>` (page read, guardrail screening, planning
+ *   task) and marks the PRD final.
+ * - **Start** (a `design` session) re-reads the design page, parses it into a
+ *   fixed structure and checks it. The "Technical design ready: N stories,
+ *   about $X" message is the cost confirmation (decision 20): when the page no
+ *   longer gives the numbers the latest message showed, Start asks again with
+ *   the new ones. In this PR a passing check files nothing.
+ * - Each problem is posted in the thread; the PM fixes it in Confluence and
+ *   clicks again. Cancel changes nothing but the session.
  *
- * Page content is untrusted data: it is parsed, never sent to a model, and
- * escaped before any of it is posted to Slack.
+ * Page content is untrusted data: it is parsed, never sent to a model by this
+ * module (the design task gets the PRD only after guardrail screening, as for
+ * `plan from <url>`), and escaped before any of it is posted to Slack.
  */
 
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import type { PlanPageReadResult } from './confluence-prd';
+import type { PlanningPageKind, PlanPageReadResult } from './confluence-page';
 import { logger } from './logger';
 import {
   checkPlan,
+  checkPrd,
+  designNumbersDigest,
   estimatedPlanCostUsd,
-  isLargePlan,
   parsePlan,
+  parsePrd,
   PLAN_PAGE_MAX_CHARS,
-  planDigest,
   planStorageToText,
   type PlanProblem,
 } from './plan-parse';
 import {
   cancelPlanningSession,
   claimApprovalLease,
+  completePrdApproval,
   getPlanningSession,
   releaseApprovalLease,
   type PlanAction,
   type PlanningSession,
 } from './planning-session';
 import type { RepoConfig } from './repo-config';
-import { renderPlanConfirmation, type SlackMessage } from './slack-blocks';
+import { renderDesignConfirmation, type SlackMessage } from './slack-blocks';
 import { escapeSlackText } from './slack-format';
 
 /** The event the interactions handler sends the command processor. */
@@ -73,18 +81,34 @@ export interface PlanActionEvent {
   readonly response_url: string;
 }
 
+type ConfluenceMapping = Pick<RepoConfig, 'confluence_cloud_id' | 'confluence_space_key'>;
+
+/** What starting the design from an approved PRD did. */
+export type StartDesignResult =
+  | { readonly ok: true; readonly taskId: string }
+  | { readonly ok: false; readonly message: string };
+
 /** The seams {@link handlePlanAction} calls out through; the processor wires the real ones. */
 export interface PlanActionDeps {
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
   readonly now: () => Date;
   readonly lookupPlatformUser: (teamId: string, userId: string) => Promise<string | null>;
-  readonly lookupRepoConfig: (repo: string) => Promise<Pick<RepoConfig, 'confluence_cloud_id' | 'confluence_space_key'> | null>;
+  readonly lookupRepoConfig: (repo: string) => Promise<ConfluenceMapping | null>;
   readonly readPlanPage: (
     pageId: string,
-    mapping: Pick<RepoConfig, 'confluence_cloud_id' | 'confluence_space_key'> | null,
+    mapping: ConfluenceMapping | null,
+    kind: PlanningPageKind,
   ) => Promise<PlanPageReadResult>;
-  /** Post in the plan's Slack thread. */
+  /**
+   * Start the technical design from the approved PRD (#82 PR 3c): the
+   * `plan from <url>` path's page read, screening and planning task, as the
+   * requester, posting in the session's thread.
+   */
+  readonly startDesignFromPrd: (session: PlanningSession, mapping: ConfluenceMapping | null) => Promise<StartDesignResult>;
+  /** Mark a page `factory-final`; false when that failed. */
+  readonly markPageFinal: (pageId: string, mapping: ConfluenceMapping | null) => Promise<boolean>;
+  /** Post in the session's Slack thread. */
   readonly postInThread: (session: PlanningSession, message: SlackMessage) => Promise<void>;
   /** Reply only to the clicker. */
   readonly replyEphemeral: (responseUrl: string, text: string) => Promise<void>;
@@ -93,39 +117,52 @@ export interface PlanActionDeps {
 /** Most problems listed in one thread message. */
 const MAX_LISTED_PROBLEMS = 20;
 
-export const ONLY_REQUESTER_TEXT = ':no_entry: Only the requester can approve this plan.';
+export const ONLY_REQUESTER_TEXT = ':no_entry: Only the requester can use these buttons.';
 export const CHECK_PASSED_TEXT = 'Check passed — filing arrives in the next update';
+export const PRD_APPROVED_TEXT = 'PRD approved — writing the technical design';
 
 function plain(text: string): SlackMessage {
   return { text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] };
 }
 
+function isPrd(session: PlanningSession): boolean {
+  return session.kind === 'prd';
+}
+
+function noun(session: PlanningSession | null): string {
+  return session && isPrd(session) ? 'PRD' : 'design';
+}
+
 function closedText(session: PlanningSession | null): string {
-  if (!session) return ':hourglass: This plan has expired or no longer exists. Ask me to plan it again.';
+  if (!session) return ':hourglass: This has expired or no longer exists. Ask me to plan it again.';
   switch (session.state) {
     case 'cancelled':
-      return ':no_entry_sign: This plan was cancelled.';
+      return `:no_entry_sign: This ${noun(session)} was cancelled.`;
+    case 'approved':
+      return ':white_check_mark: This PRD has already been approved, and its technical design is on the way.';
     case 'filed':
-      return ':white_check_mark: This plan has already been filed.';
+      return ':white_check_mark: This design has already been filed.';
     case 'approving':
-      return ':hourglass_flowing_sand: I\'m already checking this plan. Give it a moment.';
+      return `:hourglass_flowing_sand: I'm already checking this ${noun(session)}. Give it a moment.`;
     default:
-      return ':hourglass_flowing_sand: This plan is busy. Please try again in a moment.';
+      return `:hourglass_flowing_sand: This ${noun(session)} is busy. Please try again in a moment.`;
   }
 }
 
 /** The thread message for a failed check: each problem, escaped. */
-function problemsMessage(problems: readonly PlanProblem[]): SlackMessage {
+function problemsMessage(problems: readonly PlanProblem[], what: 'PRD' | 'design'): SlackMessage {
   const listed = problems.slice(0, MAX_LISTED_PROBLEMS).map((p) => `• ${escapeSlackText(p.message)}`);
   if (problems.length > MAX_LISTED_PROBLEMS) listed.push(`• …and ${problems.length - MAX_LISTED_PROBLEMS} more.`);
-  const text = ':warning: *The plan isn\'t ready to file yet.* Fix these in Confluence, then click Approve again:\n'
-    + listed.join('\n');
-  return { text: 'The plan isn\'t ready to file yet.', blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] };
+  const [headline, button] = what === 'PRD'
+    ? ['The PRD isn\'t ready to approve yet.', 'Approve PRD']
+    : ['The technical design isn\'t ready to start yet.', 'Start'];
+  const text = `:warning: *${headline}* Fix these in Confluence, then click ${button} again:\n${listed.join('\n')}`;
+  return { text: headline, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] };
 }
 
 /**
- * Handle one plan button click. Never throws: every outcome is a Slack reply,
- * so the async invocation is never retried into a second check.
+ * Handle one planning button click. Never throws: every outcome is a Slack
+ * reply, so the async invocation is never retried into a second check.
  */
 export async function handlePlanAction(event: PlanActionEvent, deps: PlanActionDeps): Promise<void> {
   try {
@@ -160,18 +197,27 @@ async function handle(event: PlanActionEvent, deps: PlanActionDeps): Promise<voi
     logger.warn('Plan requester is no longer linked to the same platform user', { session_id: session.session_id });
     await deps.replyEphemeral(
       event.response_url,
-      ':link: Your Slack account is no longer linked to the account that requested this plan, so I can\'t act on it.',
+      ':link: Your Slack account is no longer linked to the account that made this request, so I can\'t act on it.',
     );
     return;
   }
 
   if (event.action === 'cancel') {
     if (await cancelPlanningSession(deps.ddb, deps.tableName, session.session_id, nowSeconds())) {
-      await deps.postInThread(session, plain(':no_entry_sign: Plan cancelled. Nothing was filed, and the Confluence page is unchanged.'));
+      const text = isPrd(session)
+        ? ':no_entry_sign: PRD cancelled. No technical design will be written, and the Confluence page is unchanged.'
+        : ':no_entry_sign: Technical design cancelled. Nothing was filed, and the Confluence page is unchanged.';
+      await deps.postInThread(session, plain(text));
     } else {
       const current = await getPlanningSession(deps.ddb, deps.tableName, session.session_id, nowSeconds());
       await deps.replyEphemeral(event.response_url, closedText(current));
     }
+    return;
+  }
+
+  // A PRD has only Approve PRD; Start and Confirm belong to a design.
+  if (isPrd(session) && event.action !== 'approve') {
+    logger.warn('Ignoring a design action on a PRD session', { session_id: session.session_id, action: event.action });
     return;
   }
 
@@ -182,67 +228,116 @@ async function handle(event: PlanActionEvent, deps: PlanActionDeps): Promise<voi
     return;
   }
 
-  // From here the lease is ours; give it back whatever happens, recording a
-  // pending confirmation's digest when there is one.
-  let confirmDigest: string | null = null;
+  // From here the lease is ours; give it back whatever happens (an approved
+  // PRD has already moved the session on, so the release is then a no-op),
+  // recording the digest of the numbers a new Start message showed.
+  let confirmDigest: string | undefined;
   try {
-    confirmDigest = await checkAndGate(event.action, session, deps);
+    confirmDigest = isPrd(session)
+      ? await approvePrd(session, leaseSince, deps)
+      : await checkAndGateDesign(event.action, session, deps);
   } finally {
     await releaseApprovalLease(deps.ddb, deps.tableName, session.session_id, leaseSince, confirmDigest);
   }
 }
 
-/**
- * Re-read, parse and check the plan, then either post the problems, ask for
- * the large-plan confirmation, or report a passing check. Returns the digest
- * a pending confirmation is bound to, or null.
- */
-async function checkAndGate(action: PlanAction, session: PlanningSession, deps: PlanActionDeps): Promise<string | null> {
-  const mapping = await deps.lookupRepoConfig(session.repo);
-  const page = await deps.readPlanPage(session.page_id, mapping);
+/** The page's plain text, or null (with the problem posted) when it can't be used. */
+async function readPageText(
+  session: PlanningSession,
+  mapping: ConfluenceMapping | null,
+  kind: PlanningPageKind,
+  deps: PlanActionDeps,
+): Promise<string | null> {
+  const page = await deps.readPlanPage(session.page_id, mapping, kind);
   if (!page.ok) {
     await deps.postInThread(session, plain(`:warning: ${escapeSlackText(page.message)}`));
     return null;
   }
-
   const text = planStorageToText(page.storage);
   if (text.length > PLAN_PAGE_MAX_CHARS) {
+    const what = kind === 'prd' ? 'PRD' : 'design';
     await deps.postInThread(session, problemsMessage([{
       kind: 'page_too_large',
-      message: `The plan page is longer than ${PLAN_PAGE_MAX_CHARS.toLocaleString('en-US')} characters, which is more than I can file from. Shorten it or split it into smaller plans.`,
-    }]));
+      message: `The ${what} page is longer than ${PLAN_PAGE_MAX_CHARS.toLocaleString('en-US')} characters, which is more than I can use. Shorten it or split it up.`,
+    }], what));
     return null;
   }
+  logger.info('Planning page read', { session_id: session.session_id, page_id: session.page_id, kind, page_version: page.version });
+  return text;
+}
+
+/**
+ * Approve PRD: re-read and check the PRD, then start the technical design and
+ * mark the PRD final. Returns undefined: a PRD session records no digest.
+ */
+async function approvePrd(session: PlanningSession, leaseSince: number, deps: PlanActionDeps): Promise<undefined> {
+  const mapping = await deps.lookupRepoConfig(session.repo);
+  const text = await readPageText(session, mapping, 'prd', deps);
+  if (text === null) return undefined;
+
+  const prd = parsePrd(text);
+  const problems = checkPrd(prd);
+  logger.info('PRD checked', {
+    session_id: session.session_id,
+    question_count: prd.productQuestions.length,
+    problem_kinds: problems.map((p) => p.kind),
+  });
+  if (problems.length > 0) {
+    await deps.postInThread(session, problemsMessage(problems, 'PRD'));
+    return undefined;
+  }
+
+  const started = await deps.startDesignFromPrd(session, mapping);
+  if (!started.ok) {
+    await deps.postInThread(session, plain(`:x: I couldn't start the technical design. ${escapeSlackText(started.message)}`));
+    return undefined;
+  }
+  if (!await completePrdApproval(deps.ddb, deps.tableName, session.session_id, leaseSince, started.taskId)) {
+    logger.warn('PRD approval lease was taken over after the design task was created', {
+      session_id: session.session_id,
+      design_task_id: started.taskId,
+    });
+  }
+  await deps.postInThread(session, plain(`:white_check_mark: ${PRD_APPROVED_TEXT}.`));
+  if (!await deps.markPageFinal(session.page_id, mapping)) {
+    await deps.postInThread(session, plain(':warning: I couldn\'t mark the PRD page final in Confluence; it still has the `factory-draft` label.'));
+  }
+  return undefined;
+}
+
+/**
+ * Start: re-read, parse and check the design, then either post the problems,
+ * ask again when the numbers changed, or report a passing check. Returns the
+ * digest of the numbers a new message showed, or undefined to keep the one
+ * the session has.
+ */
+async function checkAndGateDesign(action: PlanAction, session: PlanningSession, deps: PlanActionDeps): Promise<string | undefined> {
+  const mapping = await deps.lookupRepoConfig(session.repo);
+  const text = await readPageText(session, mapping, 'design', deps);
+  if (text === null) return undefined;
 
   const plan = parsePlan(text);
   const problems = checkPlan(plan);
-  logger.info('Plan checked', {
+  logger.info('Design checked', {
     session_id: session.session_id,
-    page_id: session.page_id,
-    page_version: page.version,
+    action,
     story_count: plan.stories.length,
     problem_kinds: problems.map((p) => p.kind),
   });
   if (problems.length > 0) {
-    await deps.postInThread(session, problemsMessage(problems));
-    return null;
+    await deps.postInThread(session, problemsMessage(problems, 'design'));
+    return undefined;
   }
 
   const storyCount = plan.stories.length;
-  const digest = planDigest(plan);
-  if (isLargePlan(storyCount)) {
-    const confirmed = action === 'confirm' && session.confirm_digest === digest;
-    if (!confirmed) {
-      const confirmation = renderPlanConfirmation(session.session_id, storyCount, estimatedPlanCostUsd(storyCount));
-      if (action === 'confirm') {
-        await deps.postInThread(session, plain(':pencil2: The stories changed since I asked you to confirm, so here are the new numbers.'));
-      }
-      await deps.postInThread(session, confirmation);
-      return digest;
-    }
+  const digest = designNumbersDigest(storyCount);
+  if (session.confirm_digest !== digest) {
+    await deps.postInThread(session, plain(':pencil2: The number of stories changed since I last asked, so here are the new numbers.'));
+    await deps.postInThread(session, renderDesignConfirmation(session.session_id, storyCount, estimatedPlanCostUsd(storyCount)));
+    return digest;
   }
 
   const stories = storyCount === 1 ? '1 story' : `${storyCount} stories`;
-  await deps.postInThread(session, plain(`:white_check_mark: ${CHECK_PASSED_TEXT}. The plan has ${stories} and nothing has been filed.`));
-  return null;
+  await deps.postInThread(session, plain(`:white_check_mark: ${CHECK_PASSED_TEXT}. The design has ${stories} and nothing has been filed.`));
+  return undefined;
 }

@@ -27,6 +27,7 @@ def test_first_party_deliverers_present():
         "s3_and_confluence",
         "s3_comment_and_confluence",
         "s3_comment_and_confluence_plan",
+        "s3_comment_and_confluence_prd",
     }
 
 
@@ -48,6 +49,7 @@ def test_only_confluence_targets_publish_to_confluence():
         "s3_and_confluence",
         "s3_comment_and_confluence",
         "s3_comment_and_confluence_plan",
+        "s3_comment_and_confluence_prd",
     }
 
 
@@ -57,6 +59,14 @@ def test_only_the_plan_target_publishes_plan_pages():
         "s3_comment_and_confluence_plan"
     }
     assert produced_outcomes("s3_comment_and_confluence_plan") == frozenset({"artifact", "comment"})
+
+
+def test_only_the_prd_target_publishes_prd_pages():
+    """#82 PR 3c: the PRD draft has its own target and label profile."""
+    assert {n for n, d in DELIVERERS.items() if d.confluence_kind == "prd"} == {
+        "s3_comment_and_confluence_prd"
+    }
+    assert produced_outcomes("s3_comment_and_confluence_prd") == frozenset({"artifact", "comment"})
 
 
 def test_unset_target_models_the_runtime_default():
@@ -552,20 +562,23 @@ class TestPlanDelivery:
 
         assert (
             _plan_page_title(self.PLAN_DOC, "01M85AKACXSZ2TKGTWPR30G1SX", "ignored")
-            == "Plan: Product tagging · 30G1SX"
+            == "Technical design: Product tagging · 30G1SX"
         )
 
     def test_plan_title_accepts_an_h1_without_the_plan_prefix(self):
         from workflow.deliverers import _plan_page_title
 
-        assert _plan_page_title("# Tagging\n\nbody", "task-abcdef", "") == "Plan: Tagging · abcdef"
+        assert (
+            _plan_page_title("# Tagging\n\nbody", "task-abcdef", "")
+            == "Technical design: Tagging · abcdef"
+        )
 
     def test_plan_title_falls_back_to_the_task_description(self):
         from workflow.deliverers import _plan_page_title
 
         assert (
             _plan_page_title("no heading", "task-abcdef", "a tagging feature")
-            == "Plan: a tagging feature · abcdef"
+            == "Technical design: a tagging feature · abcdef"
         )
 
     def test_plan_title_is_empty_without_a_feature_name(self):
@@ -573,6 +586,26 @@ class TestPlanDelivery:
 
         assert _plan_page_title("no heading", "task-abcdef", "") == ""
         assert _plan_page_title("# Plan:\n\nbody", "task-abcdef", "  ") == ""
+
+    def test_design_title_replaces_the_agents_own_prefix_and_id(self):
+        # #82 PR 3c: the agent writes "# Technical design: <feature> · <id>";
+        # the deliverer's prefix and the real task id win.
+        from workflow.deliverers import _plan_page_title
+
+        doc = "# Technical design: Product tagging · 30G1SX\n\nbody"
+        assert (
+            _plan_page_title(doc, "01M85AKACXSZ2TKGTWPR99ZZZZ", "")
+            == "Technical design: Product tagging · 99ZZZZ"
+        )
+
+    def test_prd_title_uses_the_prd_prefix(self):
+        from workflow.deliverers import _plan_page_title
+
+        doc = "# PRD: Wishlist · ABC123\n\n## Problem\nx\n"
+        assert _plan_page_title(doc, "task-abcdef", "", "prd") == "PRD: Wishlist · abcdef"
+        assert _plan_page_title("no heading", "task-abcdef", "a wishlist", "prd") == (
+            "PRD: a wishlist · abcdef"
+        )
 
     def test_plan_target_publishes_a_plan_page_with_the_deliverer_title(self, monkeypatch):
         monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
@@ -600,13 +633,39 @@ class TestPlanDelivery:
                 ),
             )
         assert seen["kind"] == "plan"
-        assert seen["title"] == "Plan: Product tagging · 30G1SX"
+        assert seen["title"] == "Technical design: Product tagging · 30G1SX"
         assert seen["meta"] == CONFLUENCE_META
         assert (
             result.artifact_uri
             == "s3://artifacts-bkt/artifacts/01M85AKACXSZ2TKGTWPR30G1SX/result.md"
         )
         assert result.comment_posted is True
+
+    def test_prd_target_publishes_a_prd_page_with_the_deliverer_title(self, monkeypatch):
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        seen = {}
+
+        def fake_publish(text, meta, *, resolve_token, kind, title):
+            seen.update(kind=kind, title=title)
+            from confluence.publish import ConfluenceOutcome
+
+            return ConfluenceOutcome(status="skipped", skip_reason="no_mapping", detail="x")
+
+        with (
+            patch("aws_session.tenant_client", return_value=MagicMock()),
+            patch("confluence.publish.publish_markdown", side_effect=fake_publish),
+        ):
+            deliver(
+                "s3_comment_and_confluence_prd",
+                _ctx(
+                    "# PRD: Wishlist\n\n## Problem\nx\n",
+                    task_id="01M85AKACXSZ2TKGTWPR30G1SX",
+                    progress=MagicMock(),
+                    channel_metadata=CONFLUENCE_META,
+                    task_description="a wishlist",
+                ),
+            )
+        assert seen == {"kind": "prd", "title": "PRD: Wishlist · 30G1SX"}
 
     def test_research_targets_call_publish_exactly_as_before(self, monkeypatch):
         """Research delivery, incl. #81's title fallback, is unchanged by the plan kind."""
@@ -647,3 +706,15 @@ def test_feature_planning_uses_the_plan_target():
     )
     targets = [s.get("target") for s in doc["steps"] if s["kind"] == "deliver_artifact"]
     assert targets == ["s3_comment_and_confluence_plan"]
+
+
+def test_prd_draft_uses_the_prd_target():
+    from pathlib import Path
+
+    import yaml
+
+    doc = yaml.safe_load(
+        (Path(__file__).parent.parent / "workflows/knowledge/prd-draft-v1.yaml").read_text()
+    )
+    targets = [s.get("target") for s in doc["steps"] if s["kind"] == "deliver_artifact"]
+    assert targets == ["s3_comment_and_confluence_prd"]

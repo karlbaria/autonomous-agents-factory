@@ -40,6 +40,9 @@ LABEL_DRAFT = "factory-draft"
 LABEL_FINAL = "factory-final"
 # A planning doc (Task 15 (fork), #82), as opposed to a research write-up.
 LABEL_PLAN = "factory-plan"
+# A PRD draft (#82 PR 3c): the PM-owned product document that comes before the
+# technical design.
+LABEL_PRD = "factory-prd"
 LAST_WRITTEN_VERSION_KEY = "factory.lastWrittenVersion"
 
 # Bounds on cursor-paginated reads (labels): far beyond what a factory page

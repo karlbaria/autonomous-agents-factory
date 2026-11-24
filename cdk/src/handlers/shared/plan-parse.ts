@@ -18,13 +18,20 @@
  */
 
 /**
- * Parse and check an edited plan page (Task 15 (fork), #82 PR 3b-1).
+ * Parse and check the planning pages (Task 15 (fork), #82 PR 3b-1 and 3c).
  *
- * Approve re-reads the plan page as the PM left it and reduces it to a fixed
- * structure: stories (`### S<n>: <title>`, a `Blocked by:` line, an
- * `Acceptance criteria` list) and open questions (`### Q<n>: <question>` with
- * an `Answer:` line). The layout is the one `agent/src/prompts/feature_planning.py`
- * asks for; the parser tolerates what the Confluence editor does to it (bold
+ * Two documents, both re-read as the PM or engineers left them:
+ *
+ * - **The PRD** (`agent/src/prompts/prd_draft.py`): Approve PRD reads only its
+ *   `## Product questions` (`### Q<n>: <question>` with an `Answer:` line).
+ * - **The technical design** (`agent/src/prompts/feature_planning.py`): Start
+ *   reads the stories (`### S<n>: <title>`, a `Blocked by:` line, an
+ *   `Acceptance criteria` list and a `Technical notes` list), the
+ *   `## Technical decisions` (`### D<n>: <decision>` with a `Reason:` line) and
+ *   `## Questions for the PM` (`### Q<n>:` with `Answer:`). "Open questions",
+ *   the section's name before PR 3c, is accepted as an alias.
+ *
+ * The parser tolerates what the Confluence editor does to the layout (bold
  * wrappers, non-breaking spaces, `S1.` or `S1 -` instead of `S1:`, task-list
  * items, any letter case).
  *
@@ -33,34 +40,41 @@
  */
 
 import * as crypto from 'crypto';
-import { confluenceStorageToText } from './confluence-prd';
+import { confluenceStorageToText } from './confluence-page';
 import { validateDag } from './orchestration-dag';
 
 /** Most stories a plan may have (#82 decision 16). */
 export const PLAN_MAX_STORIES = 15;
 
-/** Above this many stories, Approve asks for a second confirmation (decision 11). */
-export const LARGE_PLAN_MAX_STORIES = 5;
-
-/** Estimated coding cost per story, in USD (decision 11). Easy to change. */
+/** Estimated coding cost per story, in USD (#82 decisions 11 and 20). Easy to change. */
 export const PER_STORY_COST_USD = 0.5;
 
-/** Above this estimated cost, Approve asks for a second confirmation (decision 11). */
-export const LARGE_PLAN_MAX_COST_USD = LARGE_PLAN_MAX_STORIES * PER_STORY_COST_USD;
-
-/** A story as the PM left it. */
+/** A story as the PM or engineers left it. */
 export interface PlanStory {
   /** `S<n>`. */
   readonly id: string;
   readonly title: string;
-  /** The story's text other than its `Blocked by:` line and criteria. */
+  /** The story's text other than its `Blocked by:` line, criteria and notes. */
   readonly body: string;
   /** Story ids (`S<n>`) or, for anything unrecognisable, the raw text. */
   readonly blockedBy: readonly string[];
   readonly acceptanceCriteria: readonly string[];
+  /** The story's `Technical notes` items (#82 PR 3c), for PR 3b-2's filing. */
+  readonly technicalNotes: readonly string[];
 }
 
-/** An open question under "Open questions". */
+/** A technical decision under "Technical decisions" (#82 PR 3c). Never blocks Start. */
+export interface PlanDecision {
+  /** `D<n>`. */
+  readonly id: string;
+  readonly decision: string;
+  /** The text after `Reason:`, empty when there is none. */
+  readonly reason: string;
+  /** Any other text under the heading. */
+  readonly body: string;
+}
+
+/** A question for the PM: under "Questions for the PM" or "Open questions" in a design, "Product questions" in a PRD. */
 export interface PlanOpenQuestion {
   /** `Q<n>`. */
   readonly id: string;
@@ -68,15 +82,24 @@ export interface PlanOpenQuestion {
   readonly answered: boolean;
 }
 
-/** Longest plan page text Approve reads; a longer page is rejected, never truncated. */
+/** Longest page text Start or Approve PRD reads; a longer page is rejected, never truncated. */
 export const PLAN_PAGE_MAX_CHARS = 60_000;
 
-/** The structure Approve works from. */
+/** The structure Start works from. */
 export interface ParsedPlan {
   readonly stories: readonly PlanStory[];
+  readonly decisions: readonly PlanDecision[];
+  /** "Questions for the PM" (or "Open questions"). */
   readonly openQuestions: readonly PlanOpenQuestion[];
-  /** "Open questions" has text that isn't `Q<n>` headings or "None". */
+  /** The questions section has text that isn't `Q<n>` headings or "None". */
   readonly openQuestionsMalformed: boolean;
+}
+
+/** The structure Approve PRD works from. */
+export interface ParsedPrd {
+  readonly productQuestions: readonly PlanOpenQuestion[];
+  /** "Product questions" has text that isn't `Q<n>` headings or "None". */
+  readonly productQuestionsMalformed: boolean;
 }
 
 export type PlanProblemKind =
@@ -90,7 +113,7 @@ export type PlanProblemKind =
   | 'malformed_open_questions'
   | 'page_too_large';
 
-/** One thing the PM must fix in Confluence before approving. */
+/** One thing to fix in Confluence before continuing. */
 export interface PlanProblem {
   readonly kind: PlanProblemKind;
   /** Plain text naming the story or question; the caller escapes it for Slack. */
@@ -99,18 +122,26 @@ export interface PlanProblem {
 
 const STORY_HEADING = /^S\s*(\d+)\s*(?:[:.)\]–—-]\s*)?(.*)$/i;
 const QUESTION_HEADING = /^Q\s*(\d+)\s*(?:[:.)\]–—-]\s*)?(.*)$/i;
+const DECISION_HEADING = /^D\s*(\d+)\s*(?:[:.)\]–—-]\s*)?(.*)$/i;
 const BLOCKED_BY_LINE = /^(?:[-*•]\s*)?blocked\s*by\s*(?:[:–—-]\s*)?(.*)$/i;
 const ANSWER_LINE = /^(?:[-*•]\s*)?answer\s*(?:[:–—-]\s*)?(.*)$/i;
+const REASON_LINE = /^(?:[-*•]\s*)?reason\s*(?:[:–—-]\s*)?(.*)$/i;
 const ACCEPTANCE_HEADER = /^acceptance\s+criteria\s*:?$/i;
+const TECHNICAL_NOTES_HEADER = /^technical\s+notes\s*(?::\s*(.*))?$/i;
 const LIST_ITEM = /^(?:[-*•]|\d+[.)])\s+(.*)$/;
 const STORY_REF = /^S\s*(\d+)$/i;
 const BLOCKER_SEPARATOR = /\s*(?:[,;&]|\band\b)\s*/i;
 const PLACEHOLDER_ANSWER = /^(?:tbd|todo|to do|\?+|[-–—]+|_+|n\/a\?|pending)\.?$/i;
-const NONE_TEXT = /^(?:none|no open questions|n\/a)\.?$/i;
+const NONE_TEXT = /^(?:none|no open questions|no questions|n\/a)\.?$/i;
 const HEADING = /^(#{1,6})\s+(.*)$/;
-/** `###`: a story or question heading. `#` and `##` open a section. */
+/** `###`: a story, decision or question heading. `#` and `##` open a section. */
 const ITEM_HEADING_LEVEL = 3;
 const SECTION_HEADING_MAX_LEVEL = 2;
+
+/** The design's questions section, and its name before #82 PR 3c. */
+const DESIGN_QUESTION_SECTIONS: ReadonlySet<string> = new Set(['questions for the pm', 'open questions']);
+const PRD_QUESTION_SECTIONS: ReadonlySet<string> = new Set(['product questions']);
+const DECISIONS_SECTION = 'technical decisions';
 
 /** Drop Markdown emphasis wrappers and surrounding whitespace. */
 function clean(text: string): string {
@@ -118,9 +149,9 @@ function clean(text: string): string {
 }
 
 /**
- * Plain text of a plan page's storage body. Task-list items become list items
- * and their checkbox status words are dropped, so a PM who turns the criteria
- * into a checklist still has criteria.
+ * Plain text of a planning page's storage body. Task-list items become list
+ * items and their checkbox status words are dropped, so a PM who turns the
+ * criteria into a checklist still has criteria.
  */
 export function planStorageToText(storage: string): string {
   return confluenceStorageToText(
@@ -166,13 +197,16 @@ function parseBlockers(raw: string): { readonly refs: string[]; readonly rest: s
   return { refs: [text.replace(/\.$/, '')], rest: '' };
 }
 
+type StoryList = 'body' | 'criteria' | 'notes';
+
 interface StoryDraft {
   id: string;
   title: string;
   body: string[];
   blockedBy: string[];
   criteria: string[];
-  inCriteria: boolean;
+  notes: string[];
+  list: StoryList;
 }
 
 interface QuestionDraft {
@@ -181,20 +215,98 @@ interface QuestionDraft {
   answer: string[] | null;
 }
 
+interface DecisionDraft {
+  id: string;
+  decision: string;
+  reason: string[] | null;
+  body: string[];
+}
+
 function isAnswered(answer: string[] | null): boolean {
   if (answer === null) return false;
   const text = clean(answer.join(' '));
   return text.length > 0 && !PLACEHOLDER_ANSWER.test(text);
 }
 
-/** Parse a plan page's plain text (see {@link planStorageToText}). */
-export function parsePlan(text: string): ParsedPlan {
+/** A line inside a story: its blockers, criteria, notes or body. */
+function addStoryLine(story: StoryDraft, line: string, h: Heading | null): void {
+  const plain = h ? h.text : clean(line);
+  if (ACCEPTANCE_HEADER.test(plain)) {
+    story.list = 'criteria';
+    return;
+  }
+  const notesHeader = TECHNICAL_NOTES_HEADER.exec(plain);
+  if (notesHeader) {
+    story.list = 'notes';
+    const inline = clean(notesHeader[1] ?? '');
+    if (inline) story.notes.push(inline);
+    return;
+  }
+  const blocked = h ? null : BLOCKED_BY_LINE.exec(line);
+  if (blocked && story.list === 'body') {
+    const { refs, rest } = parseBlockers(blocked[1]);
+    story.blockedBy.push(...refs);
+    if (rest) story.body.push(rest);
+    return;
+  }
+  const item = h ? null : LIST_ITEM.exec(line);
+  if (story.list === 'criteria' && item) {
+    const criterion = clean(item[1]);
+    if (criterion) story.criteria.push(criterion);
+    return;
+  }
+  if (story.list === 'notes') {
+    // Notes written as a paragraph rather than a list still count as notes.
+    const note = clean(item ? item[1] : plain);
+    if (note) story.notes.push(note);
+    return;
+  }
+  story.body.push(h ? h.text : line);
+}
+
+/** A line under a `### Q<n>` heading. */
+function addQuestionLine(question: QuestionDraft, line: string, h: Heading | null): void {
+  const answer = ANSWER_LINE.exec(line);
+  if (answer && question.answer === null) {
+    question.answer = [answer[1]];
+  } else if (question.answer !== null) {
+    question.answer.push(h ? h.text : line);
+  }
+}
+
+/** A line under a `### D<n>` heading. */
+function addDecisionLine(decision: DecisionDraft, line: string, h: Heading | null): void {
+  const reason = h ? null : REASON_LINE.exec(line);
+  if (reason && decision.reason === null) {
+    decision.reason = [reason[1]];
+  } else if (decision.reason !== null) {
+    decision.reason.push(h ? h.text : line);
+  } else {
+    decision.body.push(h ? h.text : line);
+  }
+}
+
+interface ParsedPage {
+  readonly stories: StoryDraft[];
+  readonly decisions: DecisionDraft[];
+  readonly questions: QuestionDraft[];
+  readonly questionsStray: boolean;
+}
+
+/**
+ * One pass over a page's plain text. Questions are read only in
+ * `questionSections`; stories anywhere else except under Technical
+ * decisions, where `### D<n>` headings are read instead.
+ */
+function parsePage(text: string, questionSections: ReadonlySet<string>): ParsedPage {
   const stories: StoryDraft[] = [];
+  const decisions: DecisionDraft[] = [];
   const questions: QuestionDraft[] = [];
   let section = '';
   let story: StoryDraft | null = null;
   let question: QuestionDraft | null = null;
-  let openQuestionsStray = false;
+  let decision: DecisionDraft | null = null;
+  let questionsStray = false;
 
   for (const rawLine of text.split('\n')) {
     const line = rawLine.replace(/\u00a0/g, ' ').trim();
@@ -205,78 +317,90 @@ export function parsePlan(text: string): ParsedPlan {
       section = h.text.toLowerCase().replace(/:$/, '');
       story = null;
       question = null;
+      decision = null;
       continue;
     }
-    const inOpenQuestions = section === 'open questions';
+    const inQuestions = questionSections.has(section);
+    const inDecisions = section === DECISIONS_SECTION;
 
     if (h && h.level === ITEM_HEADING_LEVEL) {
       story = null;
       question = null;
-      const q = inOpenQuestions ? QUESTION_HEADING.exec(h.text) : null;
-      if (q) {
-        question = { id: `Q${Number(q[1])}`, question: clean(q[2]), answer: null };
-        questions.push(question);
+      decision = null;
+      if (inQuestions) {
+        const q = QUESTION_HEADING.exec(h.text);
+        if (q) {
+          question = { id: `Q${Number(q[1])}`, question: clean(q[2]), answer: null };
+          questions.push(question);
+        } else {
+          questionsStray = true;
+        }
         continue;
       }
-      const s = inOpenQuestions ? null : STORY_HEADING.exec(h.text);
+      if (inDecisions) {
+        const d = DECISION_HEADING.exec(h.text);
+        if (d) {
+          decision = { id: `D${Number(d[1])}`, decision: clean(d[2]), reason: null, body: [] };
+          decisions.push(decision);
+        }
+        continue;
+      }
+      const s = STORY_HEADING.exec(h.text);
       if (s) {
-        story = { id: `S${Number(s[1])}`, title: clean(s[2]), body: [], blockedBy: [], criteria: [], inCriteria: false };
+        story = {
+          id: `S${Number(s[1])}`, title: clean(s[2]), body: [], blockedBy: [], criteria: [], notes: [], list: 'body',
+        };
         stories.push(story);
-        continue;
       }
-      if (inOpenQuestions) openQuestionsStray = true;
       continue;
     }
 
     if (question) {
-      const answer = ANSWER_LINE.exec(line);
-      if (answer && question.answer === null) {
-        question.answer = [answer[1]];
-      } else if (question.answer !== null) {
-        question.answer.push(h ? h.text : line);
-      }
-      continue;
+      addQuestionLine(question, line, h);
+    } else if (inQuestions) {
+      if (!NONE_TEXT.test(clean(line))) questionsStray = true;
+    } else if (decision) {
+      addDecisionLine(decision, line, h);
+    } else if (story) {
+      addStoryLine(story, line, h);
     }
-
-    if (inOpenQuestions) {
-      if (!NONE_TEXT.test(clean(line))) openQuestionsStray = true;
-      continue;
-    }
-
-    if (!story) continue;
-    const plain = h ? h.text : clean(line);
-    if (ACCEPTANCE_HEADER.test(plain)) {
-      story.inCriteria = true;
-      continue;
-    }
-    const blocked = h ? null : BLOCKED_BY_LINE.exec(line);
-    if (blocked && !story.inCriteria) {
-      const { refs, rest } = parseBlockers(blocked[1]);
-      story.blockedBy.push(...refs);
-      if (rest) story.body.push(rest);
-      continue;
-    }
-    if (story.inCriteria) {
-      const item = LIST_ITEM.exec(line);
-      if (item) {
-        const criterion = clean(item[1]);
-        if (criterion) story.criteria.push(criterion);
-        continue;
-      }
-    }
-    story.body.push(h ? h.text : line);
   }
+  return { stories, decisions, questions, questionsStray };
+}
 
+function finishQuestions(questions: readonly QuestionDraft[]): PlanOpenQuestion[] {
+  return questions.map((q) => ({ id: q.id, question: q.question, answered: isAnswered(q.answer) }));
+}
+
+/** Parse a technical design page's plain text (see {@link planStorageToText}). */
+export function parsePlan(text: string): ParsedPlan {
+  const page = parsePage(text, DESIGN_QUESTION_SECTIONS);
   return {
-    stories: stories.map((s) => ({
+    stories: page.stories.map((s) => ({
       id: s.id,
       title: s.title,
       body: s.body.join('\n').trim(),
       blockedBy: [...new Set(s.blockedBy)],
       acceptanceCriteria: s.criteria,
+      technicalNotes: s.notes,
     })),
-    openQuestions: questions.map((q) => ({ id: q.id, question: q.question, answered: isAnswered(q.answer) })),
-    openQuestionsMalformed: openQuestionsStray,
+    decisions: page.decisions.map((d) => ({
+      id: d.id,
+      decision: d.decision,
+      reason: clean((d.reason ?? []).join(' ')),
+      body: d.body.join('\n').trim(),
+    })),
+    openQuestions: finishQuestions(page.questions),
+    openQuestionsMalformed: page.questionsStray,
+  };
+}
+
+/** Parse a PRD page's plain text (see {@link planStorageToText}). */
+export function parsePrd(text: string): ParsedPrd {
+  const page = parsePage(text, PRD_QUESTION_SECTIONS);
+  return {
+    productQuestions: finishQuestions(page.questions),
+    productQuestionsMalformed: page.questionsStray,
   };
 }
 
@@ -284,18 +408,43 @@ function label(story: PlanStory): string {
   return story.title ? `${story.id} (${story.title})` : story.id;
 }
 
-/** Everything the PM must fix before the plan can be filed. Empty when it is ready. */
+/** The problems with a questions section: stray text, and each unanswered question. */
+function questionProblems(sectionName: string, questions: readonly PlanOpenQuestion[], malformed: boolean): PlanProblem[] {
+  const problems: PlanProblem[] = [];
+  if (malformed) {
+    problems.push({
+      kind: 'malformed_open_questions',
+      message: `${sectionName} has text that isn't a \`### Q<n>: <question>\` heading. Put each question under its own heading with an "Answer:" line, or write "None."`,
+    });
+  }
+  for (const q of questions) {
+    if (!q.answered) {
+      problems.push({
+        kind: 'unanswered_question',
+        message: `${q.id}${q.question ? ` (${q.question})` : ''} has no answer. Write it after "Answer:" under the question.`,
+      });
+    }
+  }
+  return problems;
+}
+
+/** Everything the PM must fix before Approve PRD starts the design. Empty when it is ready. */
+export function checkPrd(prd: ParsedPrd): PlanProblem[] {
+  return questionProblems('Product questions', prd.productQuestions, prd.productQuestionsMalformed);
+}
+
+/** Everything to fix before the design can be built. Empty when it is ready. */
 export function checkPlan(plan: ParsedPlan): PlanProblem[] {
   const problems: PlanProblem[] = [];
   const { stories } = plan;
 
   if (stories.length === 0) {
-    problems.push({ kind: 'no_stories', message: 'The plan has no stories. Add at least one `### S1: <title>` heading under Stories.' });
+    problems.push({ kind: 'no_stories', message: 'The design has no stories. Add at least one `### S1: <title>` heading under Stories.' });
   }
   if (stories.length > PLAN_MAX_STORIES) {
     problems.push({
       kind: 'too_many_stories',
-      message: `The plan has ${stories.length} stories; the most I can file is ${PLAN_MAX_STORIES}. Split it into smaller plans.`,
+      message: `The design has ${stories.length} stories; the most I can file is ${PLAN_MAX_STORIES}. Split it into smaller designs.`,
     });
   }
 
@@ -334,7 +483,7 @@ export function checkPlan(plan: ParsedPlan): PlanProblem[] {
         edgesKnown = false;
         problems.push({
           kind: 'unknown_blocker',
-          message: `${label(story)} is blocked by "${ref}", which isn't a story in this plan. Use story ids such as S1, or "none".`,
+          message: `${label(story)} is blocked by "${ref}", which isn't a story in this design. Use story ids such as S1, or "none".`,
         });
       }
     }
@@ -349,41 +498,33 @@ export function checkPlan(plan: ParsedPlan): PlanProblem[] {
     }
   }
 
-  if (plan.openQuestionsMalformed) {
-    problems.push({
-      kind: 'malformed_open_questions',
-      message: 'Open questions has text that isn\'t a `### Q<n>: <question>` heading. Put each question under its own heading with an "Answer:" line, or write "None."',
-    });
-  }
-  for (const q of plan.openQuestions) {
-    if (!q.answered) {
-      problems.push({
-        kind: 'unanswered_question',
-        message: `${q.id}${q.question ? ` (${q.question})` : ''} has no answer. Write it after "Answer:" under the question.`,
-      });
-    }
-  }
-
+  problems.push(...questionProblems('Questions for the PM', plan.openQuestions, plan.openQuestionsMalformed));
   return problems;
 }
 
-/** Whether a plan of this size needs the large-plan confirmation (decision 11). */
-export function isLargePlan(storyCount: number): boolean {
-  return storyCount > LARGE_PLAN_MAX_STORIES || storyCount * PER_STORY_COST_USD > LARGE_PLAN_MAX_COST_USD;
-}
-
-/** Estimated coding cost of a plan, in USD. */
+/** Estimated coding cost of a design, in USD. */
 export function estimatedPlanCostUsd(storyCount: number): number {
   return storyCount * PER_STORY_COST_USD;
 }
 
 /**
- * Digest of what would be filed: the stories' ids, titles, bodies, blockers
- * and criteria. A confirmation is bound to it, so an edit to any story after
- * the confirmation was asked for means asking again; an edit elsewhere in the
- * page (Risks, Repo findings) doesn't.
+ * Digest of the numbers a Start confirmation showed: the story count and the
+ * estimated cost (#82 decision 20). The design message and every re-ask
+ * record it; Start goes ahead only while the page still gives the same
+ * numbers, and asks again otherwise.
+ */
+export function designNumbersDigest(storyCount: number): string {
+  const canonical = [storyCount, estimatedPlanCostUsd(storyCount).toFixed(2)];
+  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+/**
+ * Digest of what would be filed: the stories' ids, titles, bodies, blockers,
+ * criteria and technical notes. For PR 3b-2's filing checkpoint: an edit to
+ * any story changes it; an edit elsewhere in the page (Risks, Repo findings)
+ * doesn't.
  */
 export function planDigest(plan: ParsedPlan): string {
-  const canonical = plan.stories.map((s) => [s.id, s.title, s.body, s.blockedBy, s.acceptanceCriteria]);
+  const canonical = plan.stories.map((s) => [s.id, s.title, s.body, s.blockedBy, s.acceptanceCriteria, s.technicalNotes]);
   return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }

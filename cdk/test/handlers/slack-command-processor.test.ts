@@ -280,8 +280,8 @@ describe('slack-command-processor handler', () => {
   test.each([
     ['submit org/repo research product search UX in', 'knowledge/web-research-v1', 'product search UX'],
     ['submit org/repo Research: caching options', 'knowledge/web-research-v1', 'caching options'],
-    ['submit org/repo I want to build a tagging feature in', 'knowledge/feature-planning-v1', 'a tagging feature'],
-    ['submit org/repo plan product tags for', 'knowledge/feature-planning-v1', 'product tags'],
+    ['submit org/repo I want to build a tagging feature in', 'knowledge/prd-draft-v1', 'a tagging feature'],
+    ['submit org/repo plan product tags for', 'knowledge/prd-draft-v1', 'product tags'],
   ])('"%s" runs %s with the keyword and trailing preposition stripped', async (text, workflowRef, description) => {
     mockLinkedPublicChannel();
     // The intent's workflow wins even over a repo default_workflow.
@@ -320,7 +320,7 @@ describe('slack-command-processor handler', () => {
     await handler(mention({ text: 'submit I want to build a tagging feature' }));
     const [reqBody] = createTaskCoreMock.mock.calls[0];
     expect(reqBody.repo).toBe('org/defaultrepo');
-    expect(reqBody.workflow_ref).toBe('knowledge/feature-planning-v1');
+    expect(reqBody.workflow_ref).toBe('knowledge/prd-draft-v1');
     expect(reqBody.task_description).toBe('a tagging feature');
   });
 

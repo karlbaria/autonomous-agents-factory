@@ -21,11 +21,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   checkPlan,
+  checkPrd,
+  designNumbersDigest,
   estimatedPlanCostUsd,
-  isLargePlan,
-  LARGE_PLAN_MAX_COST_USD,
-  LARGE_PLAN_MAX_STORIES,
   parsePlan,
+  parsePrd,
   PER_STORY_COST_USD,
   PLAN_MAX_STORIES,
   planDigest,
@@ -34,17 +34,23 @@ import {
 } from '../../../src/handlers/shared/plan-parse';
 
 /**
- * A plan as the agent's publisher (agent/src/confluence/storage.py) renders
- * the layout of agent/src/prompts/feature_planning.py.
+ * A technical design as the agent's publisher (agent/src/confluence/storage.py)
+ * renders the layout of agent/src/prompts/feature_planning.py.
  */
 const PUBLISHED = [
   '<h2>Summary</h2><p>Add a wishlist.</p>',
+  '<h2>Source</h2><ul><li><strong>Source:</strong> PRD page https://example.atlassian.net/wiki/spaces/SD/pages/1</li></ul>',
+  '<h2>Technical decisions</h2>',
+  '<h3>D1: Store wishlists in the existing database</h3><p>Reason: the app already has one.</p>',
+  '<h3>D2: No new service</h3><p>Reason: small feature.</p>',
   '<h2>Stories</h2>',
-  '<h3>S1: Add the wishlist table</h3><p>Blocked by: none</p><p>Create <code>wishlist</code> in <code>backend/models.py</code>.</p>',
-  '<p><strong>Acceptance criteria</strong></p><ul><li>A row can be saved</li><li>Duplicates are rejected</li></ul>',
-  '<h3>S2: Add the wishlist API</h3><p>Blocked by: S1</p><p>Routes in <code>backend/api.py</code>.</p>',
-  '<p><strong>Acceptance criteria</strong></p><ul><li>GET returns saved items</li></ul>',
-  '<h2>Open questions</h2><h3>Q1: Should guests have a wishlist?</h3><p>Answer:</p>',
+  '<h3>S1: Save an item for later</h3><p>Blocked by: none</p><p>Customers can save items.</p>',
+  '<p><strong>Acceptance criteria</strong></p><ul><li>A saved item appears in the wishlist</li><li>Saving twice keeps one entry</li></ul>',
+  '<p><strong>Technical notes</strong></p><ul><li>Add a <code>wishlist</code> table in <code>backend/models.py</code></li></ul>',
+  '<h3>S2: See the wishlist</h3><p>Blocked by: S1</p><p>A wishlist page.</p>',
+  '<p><strong>Acceptance criteria</strong></p><ul><li>The wishlist page lists saved items</li></ul>',
+  '<p><strong>Technical notes</strong></p><ul><li>Routes in <code>backend/api.py</code></li><li>A page in <code>frontend/src/pages</code></li></ul>',
+  '<h2>Questions for the PM</h2><h3>Q1: Should guests have a wishlist?</h3><p>Answer:</p>',
   '<h2>Risks</h2><p>None known.</p>',
 ].join('');
 
@@ -63,32 +69,43 @@ function storyText(id: number, opts: { blockedBy?: string; criteria?: boolean; t
 }
 
 function plan(...stories: string[]): string {
-  return ['## Stories', ...stories, '## Open questions', 'None.'].join('\n');
+  return ['## Stories', ...stories, '## Questions for the PM', 'None.'].join('\n');
 }
 
 describe('parsePlan on a published plan', () => {
   const parsed = parsePlan(planStorageToText(PUBLISHED));
 
-  test('reads each story, its blockers and criteria', () => {
+  test('reads each story, its blockers, criteria and technical notes', () => {
     expect(parsed.stories).toEqual([
       {
         id: 'S1',
-        title: 'Add the wishlist table',
-        body: 'Create wishlist in backend/models.py.',
+        title: 'Save an item for later',
+        body: 'Customers can save items.',
         blockedBy: [],
-        acceptanceCriteria: ['A row can be saved', 'Duplicates are rejected'],
+        acceptanceCriteria: ['A saved item appears in the wishlist', 'Saving twice keeps one entry'],
+        technicalNotes: ['Add a wishlist table in backend/models.py'],
       },
       {
         id: 'S2',
-        title: 'Add the wishlist API',
-        body: 'Routes in backend/api.py.',
+        title: 'See the wishlist',
+        body: 'A wishlist page.',
         blockedBy: ['S1'],
-        acceptanceCriteria: ['GET returns saved items'],
+        acceptanceCriteria: ['The wishlist page lists saved items'],
+        technicalNotes: ['Routes in backend/api.py', 'A page in frontend/src/pages'],
       },
     ]);
   });
 
-  test('reads the open question, unanswered while "Answer:" is empty', () => {
+  test('reads the technical decisions and their reasons, which never block', () => {
+    expect(parsed.decisions).toEqual([
+      { id: 'D1', decision: 'Store wishlists in the existing database', reason: 'the app already has one.', body: '' },
+      { id: 'D2', decision: 'No new service', reason: 'small feature.', body: '' },
+    ]);
+    // D headings are not stories, and an unanswered decision isn't a thing.
+    expect(parsed.stories.map((s) => s.id)).toEqual(['S1', 'S2']);
+  });
+
+  test('reads the question for the PM, unanswered while "Answer:" is empty', () => {
     expect(parsed.openQuestions).toEqual([{ id: 'Q1', question: 'Should guests have a wishlist?', answered: false }]);
     expect(checkPlan(parsed).map((p) => p.kind)).toEqual(['unanswered_question']);
   });
@@ -131,9 +148,41 @@ describe('parsePlan tolerates Confluence editor markup', () => {
     expect(parsed.stories[1]).toMatchObject({ blockedBy: ['S1'] });
   });
 
-  test('"S2:" text inside Open questions is not a story', () => {
+  test('"S2:" text inside Questions for the PM is not a story', () => {
     const parsed = parsePlan(`${plan(storyText(1))}\n### Q1: About S2: what?\nAnswer: fine`);
     expect(parsed.stories.map((s) => s.id)).toEqual(['S1']);
+  });
+
+  test('technical notes written inline or as a paragraph still count', () => {
+    const parsed = parsePlan(plan(
+      '### S1: A\nBlocked by: none\nAcceptance criteria\n- ok\nTechnical notes: change app.py',
+      '### S2: B\nBlocked by: S1\n**Technical notes**\nTouch the router.\n**Acceptance criteria**\n- fine',
+    ));
+    expect(parsed.stories.map((s) => [s.technicalNotes, s.acceptanceCriteria])).toEqual([
+      [['change app.py'], ['ok']],
+      [['Touch the router.'], ['fine']],
+    ]);
+  });
+
+  test('a story with no technical notes is still ready: notes never block', () => {
+    expect(kinds(plan(storyText(1)))).toEqual([]);
+  });
+});
+
+describe('"Open questions", the section name before #82 PR 3c, is an alias', () => {
+  const legacy = ['## Stories', storyText(1), '## Open questions', '### Q1: Guests?', 'Answer:'].join('\n');
+
+  test('its unanswered question blocks Start', () => {
+    expect(parsePlan(legacy).openQuestions).toEqual([{ id: 'Q1', question: 'Guests?', answered: false }]);
+    expect(kinds(legacy)).toEqual(['unanswered_question']);
+  });
+
+  test('answered, it passes', () => {
+    expect(kinds(legacy.replace('Answer:', 'Answer: no'))).toEqual([]);
+  });
+
+  test('stray text in it is flagged as in Questions for the PM', () => {
+    expect(kinds(['## Stories', storyText(1), '## Open questions', '- guests?'].join('\n'))).toEqual(['malformed_open_questions']);
   });
 });
 
@@ -213,17 +262,56 @@ describe('checkPlan catches each problem', () => {
   });
 });
 
-describe('large plans (decision 11)', () => {
-  test('the thresholds are 5 stories and 5 × $0.50', () => {
-    expect(LARGE_PLAN_MAX_STORIES).toBe(5);
+describe('the cost estimate and the numbers digest (decision 20)', () => {
+  test('$0.50 a story', () => {
     expect(PER_STORY_COST_USD).toBe(0.5);
-    expect(LARGE_PLAN_MAX_COST_USD).toBe(2.5);
+    expect(estimatedPlanCostUsd(6)).toBe(3);
   });
 
-  test('only above the threshold', () => {
-    expect(isLargePlan(5)).toBe(false);
-    expect(isLargePlan(6)).toBe(true);
-    expect(estimatedPlanCostUsd(6)).toBe(3);
+  test('the digest changes with the story count only', () => {
+    expect(designNumbersDigest(3)).toBe(designNumbersDigest(3));
+    expect(designNumbersDigest(3)).not.toBe(designNumbersDigest(4));
+  });
+});
+
+/** A PRD as the publisher renders the layout of agent/src/prompts/prd_draft.py. */
+const PRD_PUBLISHED = [
+  '<h2>Problem</h2><p>Customers lose items they like.</p>',
+  '<h2>Users</h2><p>Signed-in shoppers.</p>',
+  '<h2>Requirements</h2><ul><li>Save an item for later</li></ul>',
+  '<h2>Success criteria</h2><ul><li>Saved items stay saved</li></ul>',
+  '<h2>Out of scope</h2><ul><li>Sharing</li></ul>',
+  '<h2>Product questions</h2>',
+  '<h3>Q1: Can guests save items?</h3><p>Answer:</p>',
+  '<h3>Q2: Is there a limit?</h3><p>Answer: 100 items.</p>',
+].join('');
+
+describe('parsePrd and checkPrd (#82 PR 3c)', () => {
+  test('reads the product questions; an empty answer blocks Approve PRD', () => {
+    const prd = parsePrd(planStorageToText(PRD_PUBLISHED));
+    expect(prd.productQuestions).toEqual([
+      { id: 'Q1', question: 'Can guests save items?', answered: false },
+      { id: 'Q2', question: 'Is there a limit?', answered: true },
+    ]);
+    const problems = checkPrd(prd);
+    expect(problems.map((p) => p.kind)).toEqual(['unanswered_question']);
+    expect(problems[0].message).toContain('Q1 (Can guests save items?)');
+  });
+
+  test('every question answered passes', () => {
+    const answered = PRD_PUBLISHED.replace('<p>Answer:</p>', '<p>Answer: No, sign-in first.</p>');
+    expect(checkPrd(parsePrd(planStorageToText(answered)))).toEqual([]);
+  });
+
+  test('"None." passes, and stray text under Product questions is flagged', () => {
+    expect(checkPrd(parsePrd('## Product questions\nNone.'))).toEqual([]);
+    const stray = checkPrd(parsePrd('## Product questions\n- guests?'));
+    expect(stray.map((p) => p.kind)).toEqual(['malformed_open_questions']);
+    expect(stray[0].message).toContain('Product questions');
+  });
+
+  test('requirement bullets and other sections never count as questions', () => {
+    expect(parsePrd('## Requirements\n### Q1: not a question here\nAnswer:').productQuestions).toEqual([]);
   });
 });
 
@@ -242,19 +330,43 @@ describe('planDigest', () => {
   });
 });
 
-describe('the planning prompt\'s layout', () => {
-  // The layout the agent is told to write (agent/src/prompts/feature_planning.py)
-  // must parse into stories and open questions, so the two can't drift apart.
-  const prompt = fs.readFileSync(path.join(__dirname, '../../../../agent/src/prompts/feature_planning.py'), 'utf-8');
-  const layout = prompt.slice(prompt.indexOf('# Plan: <short feature name>'), prompt.indexOf('## Risks'));
+/** The fenced layout block of a prompt file, starting at its H1 line. */
+function promptLayout(file: string, h1: string): string {
+  const prompt = fs.readFileSync(path.join(__dirname, '../../../../agent/src/prompts', file), 'utf-8');
+  const start = prompt.indexOf(h1);
+  expect(start).toBeGreaterThan(-1);
+  return prompt.slice(start, prompt.indexOf('```', start));
+}
 
-  test('its stories, blockers and empty Answer parse as the check expects', () => {
+describe('the technical design prompt\'s layout', () => {
+  // The layout the agent is told to write (agent/src/prompts/feature_planning.py)
+  // must parse into stories, decisions and questions, so the two can't drift.
+  const layout = promptLayout('feature_planning.py', '# Technical design: <short feature name>');
+
+  test('its stories, blockers, criteria, notes, decisions and empty Answer parse as Start expects', () => {
     const parsed = parsePlan(layout);
     expect(parsed.stories.map((s) => [s.id, s.blockedBy])).toEqual([['S1', []], ['S2', ['S1']]]);
     expect(parsed.stories[0].acceptanceCriteria.length).toBeGreaterThan(0);
+    expect(parsed.stories[0].technicalNotes.length).toBeGreaterThan(0);
+    expect(parsed.decisions.map((d) => [d.id, d.decision])).toEqual([['D1', '<decision>']]);
+    expect(parsed.decisions[0].reason).not.toBe('');
     expect(parsed.openQuestions).toEqual([
-      { id: 'Q1', question: '<a question the PM must answer before approving>', answered: false },
+      { id: 'Q1', question: '<a product question the PRD doesn\'t answer>', answered: false },
     ]);
     expect(parsed.openQuestionsMalformed).toBe(false);
+  });
+});
+
+describe('the PRD prompt\'s layout', () => {
+  // agent/src/prompts/prd_draft.py: Approve PRD reads its Product questions.
+  const layout = promptLayout('prd_draft.py', '# PRD: <short feature name>');
+
+  test('its empty Answer parses as an unanswered product question', () => {
+    const parsed = parsePrd(layout);
+    expect(parsed.productQuestions).toEqual([
+      { id: 'Q1', question: '<a question about something a user would notice>', answered: false },
+    ]);
+    expect(parsed.productQuestionsMalformed).toBe(false);
+    expect(checkPrd(parsed).map((p) => p.kind)).toEqual(['unanswered_question']);
   });
 });

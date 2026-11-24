@@ -53,8 +53,8 @@ interface SlackInteractionPayload {
  * Slack sends interaction payloads as a URL-encoded `payload` field in the body.
  * Currently handles:
  * - `cancel_task:{task_id}` — Cancel a running task via the "Cancel Task" button.
- * - `plan_approve|plan_cancel|plan_confirm:{session_id}` — a planning draft's
- *   buttons (#82 PR 3b-1). Handed to the command processor asynchronously, so
+ * - `plan_approve|plan_start|plan_cancel|plan_confirm:{session_id}` — a PRD's
+ *   or technical design's buttons (#82 PR 3b-1, 3c). Handed to the command processor asynchronously, so
  *   Slack gets its 200 at once; the processor checks the clicker and does the
  *   work.
  */

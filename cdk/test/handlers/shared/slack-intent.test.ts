@@ -40,10 +40,10 @@ describe('classifySlackIntent', () => {
     ['I  WANT TO  BUILD product tags for', 'product tags'],
     ['plan a tagging feature', 'a tagging feature'],
     ['Plan: tags for products', 'tags for products'],
-  ])('routes "%s" to feature planning', (input, description) => {
+  ])('routes "%s" to the PRD draft (#82 PR 3c)', (input, description) => {
     expect(classifySlackIntent(input)).toEqual({
       kind: 'plan',
-      workflowId: 'knowledge/feature-planning-v1',
+      workflowId: 'knowledge/prd-draft-v1',
       description,
     });
   });
@@ -83,7 +83,7 @@ describe('classifySlackIntent', () => {
       [`plan from <${PAGE}>, mobile first please`, PAGE, 'mobile first please'],
       [`plan from ${PAGE}, mobile first please`, PAGE, 'mobile first please'],
       ['plan from <https://karlvb.atlassian.net/wiki/spaces/SD/pages/1?a=1&amp;b=2>', 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1?a=1&b=2', ''],
-    ])('"%s" → planning with the URL apart from the description', (input, prdUrl, description) => {
+    ])('"%s" → the technical design, with the URL apart from the description', (input, prdUrl, description) => {
       expect(classifySlackIntent(input)).toEqual({
         kind: 'plan',
         workflowId: 'knowledge/feature-planning-v1',
@@ -92,20 +92,20 @@ describe('classifySlackIntent', () => {
       });
     });
 
-    test('"plan from" without a link is the generic plan rule', () => {
+    test('"plan from" without a link is the generic plan rule (a PRD draft)', () => {
       expect(classifySlackIntent('plan from scratch a wishlist')).toEqual({
         kind: 'plan',
-        workflowId: 'knowledge/feature-planning-v1',
+        workflowId: 'knowledge/prd-draft-v1',
         description: 'from scratch a wishlist',
       });
     });
 
-    test('ordinary plan and i want to build messages behave as in PR 1 (no prdUrl)', () => {
+    test('ordinary plan and i want to build messages draft a PRD (no prdUrl)', () => {
       expect(classifySlackIntent('plan a tagging feature')).toEqual({
-        kind: 'plan', workflowId: 'knowledge/feature-planning-v1', description: 'a tagging feature',
+        kind: 'plan', workflowId: 'knowledge/prd-draft-v1', description: 'a tagging feature',
       });
       expect(classifySlackIntent('I want to build a tagging feature in')).toEqual({
-        kind: 'plan', workflowId: 'knowledge/feature-planning-v1', description: 'a tagging feature',
+        kind: 'plan', workflowId: 'knowledge/prd-draft-v1', description: 'a tagging feature',
       });
     });
   });

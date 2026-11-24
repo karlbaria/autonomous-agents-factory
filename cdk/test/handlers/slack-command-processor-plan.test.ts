@@ -35,7 +35,24 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
   GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecretValue', input })),
 }));
 
-jest.mock('../../src/handlers/shared/create-task-core', () => ({ createTaskCore: jest.fn() }));
+const createTaskCoreMock = jest.fn();
+jest.mock('../../src/handlers/shared/create-task-core', () => ({
+  createTaskCore: (...args: unknown[]) => createTaskCoreMock(...args),
+}));
+
+// #82 PR 3c: Approve PRD's design start reads the PRD the plan-from-PRD way.
+const readPrdPageByIdMock = jest.fn();
+const readPlanPageMock = jest.fn();
+const markPageFinalMock = jest.fn();
+jest.mock('../../src/handlers/shared/confluence-prd', () => ({
+  ...jest.requireActual('../../src/handlers/shared/confluence-prd'),
+  readPrdPageById: (...args: unknown[]) => readPrdPageByIdMock(...args),
+}));
+jest.mock('../../src/handlers/shared/confluence-page', () => ({
+  ...jest.requireActual('../../src/handlers/shared/confluence-page'),
+  readPlanPage: (...args: unknown[]) => readPlanPageMock(...args),
+  markPageFinal: (...args: unknown[]) => markPageFinalMock(...args),
+}));
 
 const handlePlanActionMock = jest.fn();
 jest.mock('../../src/handlers/shared/plan-approve', () => ({
@@ -83,6 +100,10 @@ function session(overrides: Partial<PlanningSession> = {}): PlanningSession {
 
 beforeEach(() => {
   handlePlanActionMock.mockReset().mockResolvedValue(undefined);
+  createTaskCoreMock.mockReset();
+  readPrdPageByIdMock.mockReset();
+  readPlanPageMock.mockReset();
+  markPageFinalMock.mockReset();
   // The installation row the bot-token lookup reads.
   ddbSend.mockReset().mockResolvedValue({ Item: { status: 'active' } });
   smSend.mockReset().mockResolvedValue({ SecretString: 'xoxb-test' });
@@ -113,4 +134,65 @@ test('falls back to the plan message when the plan had no thread, and a DM goes 
   await handler(EVENT);
   await deps().postInThread(session({ slack_thread_ts: undefined, slack_channel_id: 'D1' }), { text: 'hi', blocks: [] });
   expect(postedBody()).toMatchObject({ channel: 'UPM', thread_ts: '222.2' });
+});
+
+// ─── #82 PR 3c ───────────────────────────────────────────────────────────────
+
+const MAPPING = { confluence_cloud_id: 'cloud-1', confluence_space_key: 'SD' };
+const PRD = {
+  ok: true as const,
+  pageUrl: 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/9',
+  title: 'PRD: Wishlist · ABC123',
+  text: 'Customers lose items.',
+  truncated: false,
+};
+
+test('the page reader gets the document kind', async () => {
+  await handler(EVENT);
+  readPlanPageMock.mockResolvedValueOnce({ ok: false, reason: 'unreadable', message: 'x' });
+  await deps().readPlanPage('9', MAPPING, 'prd');
+  expect(readPlanPageMock).toHaveBeenCalledWith('9', MAPPING, { kind: 'prd' });
+});
+
+test('Approve PRD starts the design through the plan-from-PRD path, as the requester, in the PRD\'s thread', async () => {
+  await handler(EVENT);
+  readPrdPageByIdMock.mockResolvedValueOnce(PRD);
+  createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'task-design' } }) });
+
+  const result = await deps().startDesignFromPrd(session({ kind: 'prd', repo: 'karlbaria/factory-shop' }), MAPPING);
+
+  expect(result).toEqual({ ok: true, taskId: 'task-design' });
+  expect(readPrdPageByIdMock).toHaveBeenCalledWith('9', MAPPING);
+  const [body, context] = createTaskCoreMock.mock.calls[0];
+  expect(body).toMatchObject({ repo: 'karlbaria/factory-shop', workflow_ref: 'knowledge/feature-planning-v1' });
+  expect(body.task_description).toContain(`PRD page ${PRD.pageUrl}`);
+  expect(body.task_description).toMatch(/<<<BEGIN_PRD_PAGE>>>\nTitle: PRD: Wishlist · ABC123\n\nCustomers lose items\.\n<<<END_PRD_PAGE>>>$/);
+  expect(context).toEqual({
+    userId: 'p',
+    channelSource: 'slack',
+    channelMetadata: { slack_team_id: 'T1', slack_channel_id: 'C1', slack_user_id: 'UPM', slack_thread_ts: '111.1' },
+  });
+});
+
+test('a PRD the reader rejects (guardrail, space) creates no task', async () => {
+  await handler(EVENT);
+  readPrdPageByIdMock.mockResolvedValueOnce({ ok: false, reason: 'blocked', message: 'That PRD page was blocked by content policy, so I didn\'t use it.' });
+  const result = await deps().startDesignFromPrd(session({ kind: 'prd' }), MAPPING);
+  expect(result).toEqual({ ok: false, message: 'That PRD page was blocked by content policy, so I didn\'t use it.' });
+  expect(createTaskCoreMock).not.toHaveBeenCalled();
+});
+
+test('a design task the core refuses is reported with its message', async () => {
+  await handler(EVENT);
+  readPrdPageByIdMock.mockResolvedValueOnce(PRD);
+  createTaskCoreMock.mockResolvedValueOnce({ statusCode: 400, body: JSON.stringify({ error: { message: 'Task description was blocked by content policy' } }) });
+  const result = await deps().startDesignFromPrd(session({ kind: 'prd' }), MAPPING);
+  expect(result).toEqual({ ok: false, message: 'Task description was blocked by content policy' });
+});
+
+test('marking the PRD final goes to the Confluence helper', async () => {
+  await handler(EVENT);
+  markPageFinalMock.mockResolvedValueOnce(true);
+  expect(await deps().markPageFinal('9', MAPPING)).toBe(true);
+  expect(markPageFinalMock).toHaveBeenCalledWith('9', MAPPING);
 });

@@ -113,9 +113,10 @@ export class SlackIntegration extends Construct {
   public readonly channelMappingTable: dynamodb.Table;
 
   /**
-   * Planning drafts delivered with Approve/Cancel buttons (Task 15 (fork),
-   * #82 PR 3b-1). The fan-out Slack dispatcher writes a row when it posts
-   * "Planning draft ready"; the command processor reads and updates it.
+   * PRDs and technical designs delivered with buttons (Task 15 (fork), #82
+   * PR 3b-1, 3c). The fan-out Slack dispatcher writes a row when it posts
+   * "PRD draft ready" or "Technical design ready"; the command processor
+   * reads and updates it.
    */
   public readonly planningSessionTable: dynamodb.Table;
 

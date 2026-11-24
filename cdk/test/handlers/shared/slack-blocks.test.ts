@@ -18,7 +18,7 @@
  */
 
 import { TaskStatus, type TaskStatusType } from '../../../src/constructs/task-status';
-import { type ActionsBlock, renderPlanConfirmation, renderSlackBlocks, type SlackBlock } from '../../../src/handlers/shared/slack-blocks';
+import { type ActionsBlock, renderDesignConfirmation, renderSlackBlocks, type SlackBlock } from '../../../src/handlers/shared/slack-blocks';
 
 /** Narrow to a section block and return its text; throws if block isn't a section. */
 function sectionText(block: SlackBlock): string {
@@ -139,8 +139,8 @@ describe('renderSlackBlocks', () => {
     expect(sectionText(msg.blocks[0])).not.toContain('Confluence not published');
   });
 
-  // Task 15 (fork), #82: a planning task reports its draft.
-  test('task_completed for a planning task says the planning draft is ready, with the page button', () => {
+  // Task 15 (fork), #82 PR 3c: a design task reports the technical design.
+  test('task_completed for a design task says the technical design is ready, with the page button', () => {
     const task = {
       ...baseTask,
       status: TaskStatus.COMPLETED as TaskStatusType,
@@ -149,14 +149,42 @@ describe('renderSlackBlocks', () => {
       confluence_page_url: 'https://acme.atlassian.net/wiki/x/9',
     };
     const msg = renderSlackBlocks('task_completed', task);
-    expect(msg.text).toBe('Planning draft ready for org/repo');
+    expect(msg.text).toBe('Technical design ready for org/repo');
     const text = sectionText(msg.blocks[0]);
-    expect(text).toContain(':memo: *Planning draft ready* for `org/repo`');
+    expect(text).toContain(':memo: *Technical design ready* for `org/repo`');
     expect(text).not.toContain('Task completed');
     expect(actionsBlock(msg.blocks[1]).elements[0]).toMatchObject({
       text: { text: 'View Confluence page' },
       url: 'https://acme.atlassian.net/wiki/x/9',
     });
+  });
+
+  test('the design headline shows the story count and cost parsed from the page', () => {
+    const task = {
+      ...baseTask,
+      status: TaskStatus.COMPLETED as TaskStatusType,
+      resolved_workflow: { id: 'knowledge/feature-planning-v1', version: '1.0.0' },
+      confluence_status: 'published',
+      confluence_page_url: 'https://acme.atlassian.net/wiki/x/9',
+    };
+    const msg = renderSlackBlocks('task_completed', task, undefined, { designStoryCount: 4, designCostUsd: 2 });
+    expect(msg.text).toBe('Technical design ready: 4 stories, about $2.00 for org/repo');
+    expect(sectionText(msg.blocks[0])).toContain(':memo: *Technical design ready: 4 stories, about $2.00* for `org/repo`');
+    const one = renderSlackBlocks('task_completed', task, undefined, { designStoryCount: 1, designCostUsd: 0.5 });
+    expect(one.text).toContain('1 story, about $0.50');
+  });
+
+  test('task_completed for a PRD task says the PRD draft is ready', () => {
+    const task = {
+      ...baseTask,
+      status: TaskStatus.COMPLETED as TaskStatusType,
+      resolved_workflow: { id: 'knowledge/prd-draft-v1', version: '1.0.0' },
+      confluence_status: 'published',
+      confluence_page_url: 'https://acme.atlassian.net/wiki/x/9',
+    };
+    const msg = renderSlackBlocks('task_completed', task);
+    expect(msg.text).toBe('PRD draft ready for org/repo');
+    expect(sectionText(msg.blocks[0])).toContain(':memo: *PRD draft ready* for `org/repo`');
   });
 
   test('task_completed for a planning task still reports a Confluence skip', () => {
@@ -168,7 +196,7 @@ describe('renderSlackBlocks', () => {
       confluence_skip_reason: 'no_mapping',
     };
     const text = sectionText(renderSlackBlocks('task_completed', task).blocks[0]);
-    expect(text).toContain('Planning draft ready');
+    expect(text).toContain('Technical design ready');
     expect(text).toContain('Confluence not published');
   });
 
@@ -329,7 +357,7 @@ describe('renderSlackBlocks', () => {
   });
 });
 
-// Task 15 (fork), #82 PR 3b-1.
+// Task 15 (fork), #82 PR 3b-1 and 3c.
 describe('planning buttons', () => {
   const SID = 'abcdefghijklmnopqrstuvwxyz';
   const planTask = {
@@ -353,14 +381,28 @@ describe('planning buttons', () => {
       .filter(Boolean);
   }
 
-  test('a delivered plan with a session gets Approve and Cancel carrying only the session id', () => {
-    const msg = renderSlackBlocks('task_completed', planTask, undefined, { planningSessionId: SID });
-    expect(actionIds(msg.blocks)).toEqual([`plan_approve:${SID}`, `plan_cancel:${SID}`]);
-    const cancel = msg.blocks
+  function buttons(blocks: readonly SlackBlock[]) {
+    return blocks
       .filter((b): b is ActionsBlock => b.type === 'actions')
       .flatMap((b) => b.elements)
-      .find((e) => 'action_id' in e && e.action_id.startsWith('plan_cancel'));
-    expect(cancel).toMatchObject({ style: 'danger', confirm: { title: { text: 'Cancel this plan?' } } });
+      .filter((e) => 'action_id' in e);
+  }
+
+  test('a delivered design with a session gets Start and Cancel carrying only the session id', () => {
+    const msg = renderSlackBlocks('task_completed', planTask, undefined, { planningSessionId: SID, designStoryCount: 3, designCostUsd: 1.5 });
+    expect(actionIds(msg.blocks)).toEqual([`plan_start:${SID}`, `plan_cancel:${SID}`]);
+    expect(buttons(msg.blocks).map((b) => b.text.text)).toEqual(['Start', 'Cancel']);
+    expect(buttons(msg.blocks)[1]).toMatchObject({ style: 'danger', confirm: { title: { text: 'Cancel this design?' } } });
+    expect(msg.text).toContain('Technical design ready: 3 stories, about $1.50');
+  });
+
+  test('a delivered PRD with a session gets Approve PRD and Cancel', () => {
+    const prdTask = { ...planTask, resolved_workflow: { id: 'knowledge/prd-draft-v1', version: '1.0.0' } };
+    const msg = renderSlackBlocks('task_completed', prdTask, undefined, { planningSessionId: SID });
+    expect(actionIds(msg.blocks)).toEqual([`plan_approve:${SID}`, `plan_cancel:${SID}`]);
+    expect(buttons(msg.blocks).map((b) => b.text.text)).toEqual(['Approve PRD', 'Cancel']);
+    expect(buttons(msg.blocks)[1]).toMatchObject({ confirm: { title: { text: 'Cancel this PRD?' } } });
+    expect(msg.text).toBe('PRD draft ready for org/repo');
   });
 
   test.each([
@@ -372,9 +414,10 @@ describe('planning buttons', () => {
     expect(actionIds(msg.blocks)).toEqual([]);
   });
 
-  test('the large-plan confirmation shows the count and cost, with Confirm and Cancel', () => {
-    const msg = renderPlanConfirmation(SID, 6, 3);
-    expect(sectionText(msg.blocks[0])).toContain('6 stories, about $3.00');
+  test('asking again shows the new count and cost, with Start and Cancel', () => {
+    const msg = renderDesignConfirmation(SID, 6, 3);
+    expect(sectionText(msg.blocks[0])).toContain('Technical design ready: 6 stories, about $3.00');
     expect(actionIds(msg.blocks)).toEqual([`plan_confirm:${SID}`, `plan_cancel:${SID}`]);
+    expect(buttons(msg.blocks).map((b) => b.text.text)).toEqual(['Start', 'Cancel']);
   });
 });

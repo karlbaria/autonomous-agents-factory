@@ -22,9 +22,11 @@
  * `@mention` asks for, read from the words it starts with.
  *
  * - `research …` → `knowledge/web-research-v1`
- * - `i want to build …` / `plan …` → `knowledge/feature-planning-v1`
+ * - `i want to build …` / `plan …` → `knowledge/prd-draft-v1` (#82 PR 3c):
+ *   a PRD draft first; Approve PRD then starts the technical design.
  * - `plan from <url> …` (#82 PR 2a) → `knowledge/feature-planning-v1`, with
- *   the link returned as {@link SlackIntent.prdUrl}: the page is the brief.
+ *   the link returned as {@link SlackIntent.prdUrl}: the PM's own page is the
+ *   PRD, so the technical design starts straight away.
  * - anything else → no workflow of its own: the caller uses the repo's
  *   default (`resolveChannelDefaultWorkflow`), exactly as before.
  *
@@ -34,7 +36,7 @@
  * checkout") stays a coding task. Pure — no I/O.
  */
 
-import { FEATURE_PLANNING_WORKFLOW_ID, RESEARCH_WORKFLOW_ID } from './workflows';
+import { FEATURE_PLANNING_WORKFLOW_ID, PRD_DRAFT_WORKFLOW_ID, RESEARCH_WORKFLOW_ID } from './workflows';
 
 export type SlackIntentKind = 'research' | 'plan' | 'default';
 
@@ -72,8 +74,8 @@ function unescapeSlackUrl(url: string): string {
 /** Leading keyword (whole words), then any `:` / `,` / `-` separator. */
 const INTENT_PATTERNS: ReadonlyArray<{ readonly kind: Exclude<SlackIntentKind, 'default'>; readonly pattern: RegExp; readonly workflowId: string }> = [
   { kind: 'research', pattern: /^research\b[\s:,-]*/i, workflowId: RESEARCH_WORKFLOW_ID },
-  { kind: 'plan', pattern: /^i\s+want\s+to\s+build\b[\s:,-]*/i, workflowId: FEATURE_PLANNING_WORKFLOW_ID },
-  { kind: 'plan', pattern: /^plan\b[\s:,-]*/i, workflowId: FEATURE_PLANNING_WORKFLOW_ID },
+  { kind: 'plan', pattern: /^i\s+want\s+to\s+build\b[\s:,-]*/i, workflowId: PRD_DRAFT_WORKFLOW_ID },
+  { kind: 'plan', pattern: /^plan\b[\s:,-]*/i, workflowId: PRD_DRAFT_WORKFLOW_ID },
 ];
 
 /** A dangling preposition the repo token used to follow ("… in owner/repo"). */

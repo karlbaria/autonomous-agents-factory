@@ -25,7 +25,7 @@ const TASK_FAILED_REASON_MAX_LEN = 300;
 /** Cap on the Confluence skip detail shown in the completion message (Task 14). */
 const CONFLUENCE_SKIP_DETAIL_MAX_LEN = 300;
 import type { TaskRecord } from './types';
-import { FEATURE_PLANNING_WORKFLOW_ID } from './workflows';
+import { FEATURE_PLANNING_WORKFLOW_ID, PRD_DRAFT_WORKFLOW_ID } from './workflows';
 
 /** A Slack Block Kit mrkdwn text object. */
 interface MrkdwnText {
@@ -94,10 +94,18 @@ export interface SlackMessage {
 /** Extras for {@link renderSlackBlocks}. */
 export interface RenderOptions {
   /**
-   * The planning session of a delivered plan (#82 PR 3b-1). When set on a
-   * planning task's completion, Approve and Cancel buttons carry it.
+   * The planning session of a delivered PRD or technical design (#82 PR 3b-1,
+   * 3c). When set on a planning task's completion, its buttons carry it:
+   * Approve PRD and Cancel for a PRD, Start and Cancel for a design.
    */
   readonly planningSessionId?: string;
+  /**
+   * The story count parsed from the delivered design page, for the "N
+   * stories, about $X" headline. Absent when the page couldn't be read.
+   */
+  readonly designStoryCount?: number;
+  /** The design's estimated coding cost in USD, with {@link designStoryCount}. */
+  readonly designCostUsd?: number;
 }
 
 /**
@@ -121,7 +129,7 @@ export function renderSlackBlocks(
     case 'session_started':
       return sessionStartedMessage(task);
     case 'task_completed':
-      return taskCompletedMessage(task, options.planningSessionId);
+      return taskCompletedMessage(task, options);
     case 'task_failed':
       return taskFailedMessage(task, eventMetadata);
     case 'task_cancelled':
@@ -169,26 +177,58 @@ function confluenceSkipLine(task: Partial<Pick<TaskRecord, ConfluenceOutcomeFiel
   return `:warning: _Confluence not published_ (\`${reason}\`)${detail}`;
 }
 
-/**
- * Completion headline. A planning task (Task 15 (fork), #82) reports its
- * draft rather than a generic completion; the page button below links it.
- */
-function isPlanningTask(task: Partial<Pick<TaskRecord, 'resolved_workflow'>>): boolean {
-  return task.resolved_workflow?.id === FEATURE_PLANNING_WORKFLOW_ID;
+/** The planning document a task delivers (Task 15 (fork), #82), if any. */
+function planningDocument(task: Partial<Pick<TaskRecord, 'resolved_workflow'>>): 'prd' | 'design' | null {
+  switch (task.resolved_workflow?.id) {
+    case PRD_DRAFT_WORKFLOW_ID:
+      return 'prd';
+    case FEATURE_PLANNING_WORKFLOW_ID:
+      return 'design';
+    default:
+      return null;
+  }
 }
 
-function completedHeadline(task: Pick<TaskRecord, 'repo'> & Partial<Pick<TaskRecord, 'resolved_workflow'>>): string {
-  return isPlanningTask(task)
-    ? `:memo: *Planning draft ready* for \`${task.repo}\``
-    : `:white_check_mark: *Task completed* for \`${task.repo}\``;
+function storiesAndCost(storyCount: number, costUsd: number): string {
+  return `${storyCount === 1 ? '1 story' : `${storyCount} stories`}, about $${costUsd.toFixed(2)}`;
+}
+
+/**
+ * Completion headline. A planning task (Task 15 (fork), #82) reports its
+ * document rather than a generic completion; the page button below links it.
+ * A design shows its story count and cost when they are known: the message
+ * is the build's cost confirmation (decision 20).
+ */
+function completedHeadline(
+  task: Pick<TaskRecord, 'repo'> & Partial<Pick<TaskRecord, 'resolved_workflow'>>,
+  options: RenderOptions,
+): { readonly mrkdwn: string; readonly plain: string } {
+  const repo = task.repo;
+  switch (planningDocument(task)) {
+    case 'prd':
+      return { mrkdwn: `:memo: *PRD draft ready* for \`${repo}\``, plain: `PRD draft ready for ${repo}` };
+    case 'design': {
+      if (options.designStoryCount != null && options.designCostUsd != null) {
+        const numbers = storiesAndCost(options.designStoryCount, options.designCostUsd);
+        return {
+          mrkdwn: `:memo: *Technical design ready: ${numbers}* for \`${repo}\``,
+          plain: `Technical design ready: ${numbers} for ${repo}`,
+        };
+      }
+      return { mrkdwn: `:memo: *Technical design ready* for \`${repo}\``, plain: `Technical design ready for ${repo}` };
+    }
+    default:
+      return { mrkdwn: `:white_check_mark: *Task completed* for \`${repo}\``, plain: `Task completed for ${repo}` };
+  }
 }
 
 function taskCompletedMessage(
   task: Pick<TaskRecord, 'task_id' | 'repo' | 'pr_url' | 'cost_usd' | 'duration_s'>
     & Partial<Pick<TaskRecord, ConfluenceOutcomeField | 'resolved_workflow'>>,
-  planningSessionId?: string,
+  options: RenderOptions = {},
 ): SlackMessage {
-  const parts = [completedHeadline(task)];
+  const headline = completedHeadline(task, options);
+  const parts = [headline.mrkdwn];
   const stats: string[] = [];
   if (task.duration_s != null) stats.push(formatDuration(task.duration_s));
   if (task.cost_usd != null) stats.push(`$${Number(task.cost_usd).toFixed(2)}`);
@@ -206,15 +246,19 @@ function taskCompletedMessage(
     buttons.push(linkButton('View Confluence page', task.confluence_page_url));
   }
   if (buttons.length > 0) blocks.push(actions(task.task_id, buttons));
-  if (planningSessionId && isPlanningTask(task) && task.confluence_status === 'published') {
-    blocks.push(section('Edit the plan in Confluence if you need to, then approve it here. Only you can approve or cancel it.'));
-    blocks.push(planDecisionActions(planningSessionId, 'approve'));
+  const document = planningDocument(task);
+  const sessionId = options.planningSessionId;
+  if (sessionId && document && task.confluence_status === 'published') {
+    if (document === 'prd') {
+      blocks.push(section('Edit the PRD in Confluence and answer its product questions, then approve it here to get the technical design. Only you can approve or cancel it.'));
+      blocks.push(planDecisionActions(sessionId, 'prd'));
+    } else {
+      blocks.push(section('Engineers can edit the design in Confluence. Answer any questions for the PM there, then click Start to begin the build. Only you can start or cancel it.'));
+      blocks.push(planDecisionActions(sessionId, 'start'));
+    }
   }
 
-  return {
-    text: isPlanningTask(task) ? `Planning draft ready for ${task.repo}` : `Task completed for ${task.repo}`,
-    blocks,
-  };
+  return { text: headline.plain, blocks };
 }
 
 function taskFailedMessage(
@@ -345,15 +389,17 @@ function dangerButton(label: string, actionId: string): ActionButtonElement {
 }
 
 /**
- * Approve (or Confirm) and Cancel for a planning session. The buttons carry
- * only the opaque session id.
+ * The primary button and Cancel for a planning session: Approve PRD for a PRD,
+ * Start for a design (`start` on the design message, `confirm` when Start
+ * asks again with new numbers). The buttons carry only the opaque session id.
  */
-function planDecisionActions(sessionId: string, primary: 'approve' | 'confirm'): ActionsBlock {
+function planDecisionActions(sessionId: string, primary: 'prd' | 'start' | 'confirm'): ActionsBlock {
+  const prd = primary === 'prd';
   return actions(`plan:${sessionId}`, [
     {
       type: 'button',
-      text: { type: 'plain_text', text: primary === 'approve' ? 'Approve' : 'Confirm' },
-      action_id: planActionId(primary, sessionId),
+      text: { type: 'plain_text', text: prd ? 'Approve PRD' : 'Start' },
+      action_id: planActionId(prd ? 'approve' : primary, sessionId),
       style: 'primary',
     },
     {
@@ -361,26 +407,34 @@ function planDecisionActions(sessionId: string, primary: 'approve' | 'confirm'):
       text: { type: 'plain_text', text: 'Cancel' },
       action_id: planActionId('cancel', sessionId),
       style: 'danger',
-      confirm: {
-        title: { type: 'plain_text', text: 'Cancel this plan?' },
-        text: { type: 'mrkdwn', text: 'Nothing will be filed. The Confluence page stays as it is.' },
-        confirm: { type: 'plain_text', text: 'Cancel plan' },
-        deny: { type: 'plain_text', text: 'Keep it' },
-      },
+      confirm: prd
+        ? {
+          title: { type: 'plain_text', text: 'Cancel this PRD?' },
+          text: { type: 'mrkdwn', text: 'No technical design will be written. The Confluence page stays as it is.' },
+          confirm: { type: 'plain_text', text: 'Cancel PRD' },
+          deny: { type: 'plain_text', text: 'Keep it' },
+        }
+        : {
+          title: { type: 'plain_text', text: 'Cancel this design?' },
+          text: { type: 'mrkdwn', text: 'Nothing will be filed. The Confluence page stays as it is.' },
+          confirm: { type: 'plain_text', text: 'Cancel design' },
+          deny: { type: 'plain_text', text: 'Keep it' },
+        },
     },
   ]);
 }
 
 /**
- * The large-plan confirmation (#82 decision 11): the story count and the
- * estimated coding cost, with Confirm and Cancel.
+ * Start asking again (#82 decision 20): the design's story count or cost
+ * changed since the last message, so here are the new numbers, with Start and
+ * Cancel.
  */
-export function renderPlanConfirmation(sessionId: string, storyCount: number, estimatedCostUsd: number): SlackMessage {
-  const cost = `$${estimatedCostUsd.toFixed(2)}`;
+export function renderDesignConfirmation(sessionId: string, storyCount: number, estimatedCostUsd: number): SlackMessage {
+  const numbers = storiesAndCost(storyCount, estimatedCostUsd);
   return {
-    text: `Large plan: ${storyCount} stories, about ${cost}. Confirm?`,
+    text: `Technical design ready: ${numbers}. Start?`,
     blocks: [
-      section(`:warning: *This is a large plan:* ${storyCount} stories, about ${cost} of coding. Confirm to go ahead.`),
+      section(`:memo: *Technical design ready: ${numbers}* of coding. Click Start to begin the build.`),
       planDecisionActions(sessionId, 'confirm'),
     ],
   };

@@ -132,23 +132,35 @@ Two more forms choose their own workflow instead of the repo's default. Shoof re
 ```
 
 - **`research …`** runs `knowledge/web-research-v1`. The write-up goes to the repo's mapped Confluence space (`bgagent confluence map`), and the completion message links the page.
-- **`I want to build …`** or **`plan …`** runs `knowledge/feature-planning-v1`. It reads the repo without changing it (no shell, no edits, no web access, no pull request) and writes a draft planning doc to the repo's Confluence space: a summary, the brief, what it found in the code, and the work as one story or an epic of dependent stories with acceptance criteria. The completion message says **Planning draft ready** and links the page. A planning task never creates a Jira card, even on a project mapped with `--auto-track`; `bgagent watch` shows the skip.
-- **`plan from <Confluence page URL> …`** plans from an existing PRD page instead of a one-line request: the page is the brief, and the plan's Brief section names it as the source. Shoof reads the page itself, before the task starts, and only when it is a page link (`https://<site>.atlassian.net/wiki/spaces/<KEY>/pages/<id>/…`) on your Confluence site, in the space the repo is mapped to (for `karlbaria/factory-shop`, `SD`). Any other link, another space, a page it can't read, or a page the content guardrail blocks gets a reply saying why, and no task. A page longer than 8,000 characters is planned from its first 8,000, and Shoof says so in the thread. Text after the link (`@Shoof plan from <URL>, mobile first in org/repo`) goes along as your note. The page's text is passed to planning as data: instructions written in the page are not followed.
+- **`I want to build …`** or **`plan …`** starts with a PRD: it runs `knowledge/prd-draft-v1`, which reads the repo only to learn what the app already does (no shell, no edits, no web access, no pull request) and writes a draft PRD to the repo's Confluence space: Problem, Users, Requirements, Success criteria, Out of scope, and **Product questions** for you. The PRD is in product language: no file names, architecture or implementation. The completion message says **PRD draft ready** and links the page. After you approve the PRD, Shoof writes the technical design from it (see below).
+- **`plan from <Confluence page URL> …`** treats an existing page as your PRD and goes straight to the technical design (`knowledge/feature-planning-v1`), with no PRD step: the design's Source section names the page. Shoof reads the page itself, before the task starts, and only when it is a page link (`https://<site>.atlassian.net/wiki/spaces/<KEY>/pages/<id>/…`) on your Confluence site, in the space the repo is mapped to (for `karlbaria/factory-shop`, `SD`). Any other link, another space, a page it can't read, or a page the content guardrail blocks gets a reply saying why, and no task. A page longer than 8,000 characters is used up to its first 8,000, and Shoof says so in the thread. Text after the link (`@Shoof plan from <URL>, mobile first in org/repo`) goes along as your note. The page's text is passed to the design run as data: instructions written in the page are not followed.
+
+Neither a PRD nor a design task creates a Jira card, even on a project mapped with `--auto-track`; `bgagent watch` shows the skip.
 
 All of these need a repo: name it as `org/repo`, or mention Shoof in a channel with a default repo (`bgagent slack onboard-channel`). Without one, Shoof replies with what's missing. A message that only mentions these words later on (for example `@Shoof planning is broken in checkout in org/repo`) is an ordinary coding task.
 
-### Approve or cancel a plan
+### Approve a PRD
 
-When a plan is delivered in Slack, the **Planning draft ready** message has **Approve** and **Cancel** buttons. Only the person who asked for the plan can use them; anyone else who clicks gets a private reply saying so. The buttons work for 7 days.
+The **PRD draft ready** message has **Approve PRD** and **Cancel** buttons. Only the person who asked can use them; anyone else who clicks gets a private reply saying so. The buttons work for 7 days.
 
-- **Edit the plan in Confluence first** if you need to. Approve reads the page as it is when you click, not the draft as it was written.
-- **Answer the open questions.** A plan can list questions under **Open questions**, each as a `Q<n>` heading followed by an `Answer:` line. Write your answer after `Answer:` (or in the paragraph under it). A question with nothing after `Answer:`, or only `TBD`, counts as unanswered. Delete a question if it doesn't apply, and if none are left, write `None.`
-- **Approve checks the plan** and posts each problem in the thread: no stories, a story with no acceptance criteria, two stories with the same number or title, a `Blocked by:` that names a story that doesn't exist or forms a cycle, more than 15 stories, a page over 60,000 characters, or an unanswered open question. Fix them in Confluence and click **Approve** again.
-- **Large plans ask twice.** Above 5 stories (about $0.50 of coding each), Approve posts the story count and estimated cost with a **Confirm** button. If you edit a story before confirming, Shoof asks again with the new numbers.
-- **For now, Approve only checks the plan.** A passing check says "Check passed — filing arrives in the next update", and nothing is filed in Jira. Filing the stories and starting the build come in the next update.
+- **Edit the PRD in Confluence first** if you need to. Approve PRD reads the page as it is when you click.
+- **Answer the product questions.** Each is a `Q<n>` heading under **Product questions**, followed by an `Answer:` line. Write your answer after `Answer:` (or in the paragraph under it). A question with nothing after `Answer:`, or only `TBD`, counts as unanswered. Delete a question if it doesn't apply, and if none are left, write `None.`
+- **Approve PRD checks the page** and posts each problem in the thread: an unanswered question, text under Product questions that isn't a question, a page that no longer has the `factory-prd` label or has moved out of the repo's space, or a page over 60,000 characters. Fix them in Confluence and click **Approve PRD** again.
+- **A passing check starts the technical design.** Shoof reads the PRD the same way as `plan from <url>` (the same space checks and content screening), starts the design task, posts "PRD approved — writing the technical design" in the thread, and marks the PRD page final (`factory-final` replaces `factory-draft`).
+- **Cancel** writes no design and leaves the Confluence page as it is.
+
+### Start the build from a technical design
+
+The design arrives in the same thread as **Technical design ready: N stories, about $X** (about $0.50 of coding per story), with **Start** and **Cancel**. Only the person who asked can use them, for 7 days. The design has a summary, its source, what Shoof found in the code, the **Technical decisions** it made (each with a reason), the **Stories** (each with `Blocked by:`, acceptance criteria written as what users will see, and technical notes), **Questions for the PM**, and risks.
+
+- **Engineers can edit the design in Confluence.** Technical decisions and technical notes never block Start; Shoof makes those decisions itself and asks engineers nothing.
+- **Answer the questions for the PM.** They are product gaps the PRD doesn't answer, written like the PRD's product questions. An unanswered one blocks Start. (A design made before this update calls the section **Open questions**; Start reads it the same way.)
+- **Start checks the design** and posts each problem in the thread: no stories, a story with no acceptance criteria, two stories with the same number or title, a `Blocked by:` that names a story that doesn't exist or forms a cycle, more than 15 stories, a page over 60,000 characters, or an unanswered question for the PM. Fix them in Confluence and click **Start** again.
+- **The message is the cost confirmation.** If edits changed the number of stories since the message was posted, Start doesn't go ahead: it posts the new count and cost with a new **Start** button.
+- **For now, Start only checks the design.** A passing check says "Check passed — filing arrives in the next update", and nothing is filed in Jira. Filing the stories and starting the build come in the next update.
 - **Cancel** files nothing and leaves the Confluence page as it is.
 
-The page's text is only read into a fixed list of stories and questions. Nothing in it is followed as an instruction, and nothing from it is sent to a model.
+Approve PRD and Start only read a page's text into a fixed list of stories, decisions and questions. Nothing in it is followed as an instruction, and nothing from it is sent to a model by the check; the design run gets an approved PRD only after the content guardrail has screened it.
 
 ### Cancel a task
 
