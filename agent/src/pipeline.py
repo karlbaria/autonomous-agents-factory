@@ -16,6 +16,11 @@ from pydantic import ValidationError
 import memory as agent_memory
 import task_state
 from channel_mcp import configure_channel_mcp, strip_linear_mcp_servers
+from clarify_hold import (
+    agent_requested_input,
+    hold_applies,
+    is_artifact_workflow,
+)
 from config import (
     AGENT_WORKSPACE,
     NEEDS_INPUT_MARKER,
@@ -282,7 +287,17 @@ def _execute_agent_step(
     # one) through the runner; clone, context assembly, and post-hooks stay on
     # the inline path. only_kinds keeps the runner from re-running the
     # deterministic steps the pipeline already owns (double clone / double PR).
-    result = run_workflow(wf, ctx, only_kinds={"run_agent", "review_and_fix"})
+    #
+    # stop_on_hold (#78): if the coder ends in a clarify-and-hold, stop here so
+    # review_and_fix (probes, reviewer, fixer — which would otherwise implement
+    # and commit the very thing the coder asked about) never runs; the inline
+    # needs_input path below takes over. Same scope rule as needs_input.
+    result = run_workflow(
+        wf,
+        ctx,
+        only_kinds={"run_agent", "review_and_fix"},
+        stop_on_hold=hold_applies(wf, is_pr_workflow=config.is_pr_workflow),
+    )
 
     if ctx.agent_result is None:
         # The run_agent step did not produce a result — i.e. its handler raised
@@ -680,25 +695,6 @@ def _apply_post_hook_gates(
         else:
             log("INFO", f"{kind} failed — gate={label} but on_failure={on_failure}, not gating")
     return gates_ok
-
-
-def _starts_with_needs_input_marker(result_text: str | None) -> bool:
-    """True when the agent's final message opens with the clarify-and-hold marker.
-
-    Clarify-before-spend (UX #4): the new_task workflow tells the agent to put
-    :data:`NEEDS_INPUT_MARKER` on the FIRST line of its final message when it
-    needs to ask instead of guess. We match the FIRST non-empty line only (a
-    marker buried mid-answer is not a hold signal — it prevents a stray mention
-    of the token in prose from tripping the hold).
-    """
-    if not result_text:
-        return False
-    for line in result_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        return stripped.startswith(NEEDS_INPUT_MARKER)
-    return False
 
 
 def _strip_needs_input_marker(result_text: str) -> str:
@@ -1555,11 +1551,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # takes THIS path yet still expects a PR (primary: artifact but
             # requires_repo: false). So gate on requires_repo too, or a
             # repo-optional default-agent run would wrongly skip its PR.
-            artifact_workflow = bool(
-                _workflow
-                and getattr(_workflow.terminal_outcomes, "primary", None) == "artifact"
-                and getattr(_workflow, "requires_repo", False)
-            )
+            artifact_workflow = is_artifact_workflow(_workflow)
             artifact_uri: str | None = None  # set by the artifact branch below
 
             # Clarify-before-spend (UX #4): a writeable, PR-producing task
@@ -1577,11 +1569,11 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # the legacy first-line text sentinel (kept so a model that types the
             # marker instead of calling the tool still holds). Either → hold.
             clarification_q = (agent_result.clarification_question or "").strip()
-            needs_input = bool(
-                not artifact_workflow
-                and not config.is_pr_workflow
-                and (clarification_q or _starts_with_needs_input_marker(agent_result.result_text))
-            )
+            # Detection and scope live in clarify_hold (#78), shared with the
+            # runner's stop_on_hold so both agree on what a hold is.
+            needs_input = hold_applies(
+                _workflow, is_pr_workflow=config.is_pr_workflow
+            ) and agent_requested_input(agent_result)
 
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:

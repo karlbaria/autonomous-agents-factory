@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, override
 
+from clarify_hold import agent_requested_input
 from models import AgentInvocationLedger
 from shell import log
 
@@ -278,6 +279,7 @@ def run_workflow(
     handlers: dict[str, StepHandler] | None = None,
     checkpoint: WorkflowCheckpoint | None = None,
     only_kinds: frozenset[str] | set[str] | None = None,
+    stop_on_hold: bool = False,
 ) -> WorkflowResult:
     """Execute ``workflow.steps`` in order and return the terminal verdict.
 
@@ -300,12 +302,21 @@ def run_workflow(
 
     On resume, deterministic side-effect-free steps already recorded in the
     checkpoint are skipped; everything else re-runs (idempotently).
+
+    ``stop_on_hold`` (#78): when set, a ``run_agent`` step whose agent asked for
+    clarification (``clarify_hold.agent_requested_input``) ends the run — the
+    remaining steps are not run, and one ``steps_skipped`` milestone names them
+    with ``reason=needs_input``. Off by default: only the repo-bound coding path
+    turns it on, and only where a hold applies (``clarify_hold.hold_applies``).
+    The repo-less and knowledge paths leave it off, so an artifact workflow
+    still runs ``deliver_artifact`` after an agent message that opens with the
+    marker.
     """
     handlers = handlers if handlers is not None else STEP_HANDLERS
     checkpoint = checkpoint if checkpoint is not None else _NullCheckpoint()
     completed = checkpoint.load()
 
-    for step in workflow.steps:
+    for index, step in enumerate(workflow.steps):
         key = _step_key(step)
 
         if only_kinds is not None and step.kind not in only_kinds:
@@ -349,6 +360,20 @@ def run_workflow(
             # on_failure == "continue": advisory step; record and proceed.
             log("WORKFLOW", f"step {key!r} failed (on_failure=continue) — proceeding")
 
+        if stop_on_hold and step.kind == "run_agent" and agent_requested_input(ctx.agent_result):
+            skipped = [
+                _step_key(s)
+                for s in workflow.steps[index + 1 :]
+                if only_kinds is None or s.kind in only_kinds
+            ]
+            log("WORKFLOW", f"step {key!r} ended in a clarify-and-hold — skipping {skipped}")
+            _milestone(
+                ctx,
+                "steps_skipped",
+                f"reason=needs_input steps={','.join(skipped) or '-'}",
+            )
+            break
+
     return WorkflowResult.from_outcomes(ctx, workflow.terminal_outcomes)
 
 
@@ -368,12 +393,15 @@ def _run_handler(handler: StepHandler, step: Step, ctx: StepContext, key: str) -
         )
 
 
-def _milestone(ctx: StepContext, milestone: str) -> None:
+def _milestone(ctx: StepContext, milestone: str, details: str = "") -> None:
     """Emit a step-boundary milestone, best-effort (never fails the workflow)."""
     if ctx.progress is None:
         return
     try:
-        ctx.progress.write_agent_milestone(milestone)
+        if details:
+            ctx.progress.write_agent_milestone(milestone, details)
+        else:
+            ctx.progress.write_agent_milestone(milestone)
     except Exception as e:
         log("WARN", f"milestone {milestone!r} emit failed (non-fatal): {type(e).__name__}: {e}")
 
