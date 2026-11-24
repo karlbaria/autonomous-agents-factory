@@ -915,7 +915,7 @@ All three were submitted from Slack against `karlbaria/factory-shop`.
   - Start asked again after a story was added, then passed.
   - Cancel filed nothing.
   - No Jira cards: both tasks recorded `jira_auto_track_skipped` with `reason: workflow_exempt` (project SHOP).
-  - **`plan from <url>`:** the task list shows no separate `plan from <url>` task since the deploy. The two tasks above are the only planning tasks in it.
+  - **`plan from <url>`** verified by the owner: no PRD step, the design message showed N and $X, Source linked the Wishlist PRD, and Cancel filed nothing.
   - **Product question example:** "Should ratings (average stars and review count) also show next to each product on the main page, or should reviews live only on the separate Reviews page?" It is functional and aimed at the PM, with no implementation terms. The PM answered "it should live on its own review page".
 - **Finding.** Both page titles carry the id twice: `· AW7G4 · ZAW7G4` and `· FZZXB · 7FZZXB`. The agent wrote a 5-character id into its heading, and the deliverer only strips a 6-character one before adding the real id. Fix: strip any trailing `· <id>` from the heading, or stop asking the prompt for the id.
 - **Deferred.** A named engineer approver for the design: a per-repo setting, so that Start also needs that person's click.
