@@ -797,9 +797,11 @@ The upstream integ, deploy and Documentation workflows are disabled on the fork.
 - **A held task's question isn't visible for CLI/API tasks.** `bgagent status` omits it, and an auto-tracked Jira card gets a generic "task completed" comment and stays In Progress. Fix both together: the comment should carry the question, and the card should read as waiting for input.
 - **`bgagent status` shows the last call's cost and turns,** not the task totals.
 - **The adversarial reviewer returned READY on a diff that invented a feature (§13);** watch for repeats.
-- **Deterministic merge gate for flagged PRs** (`flag_concern` tool → `needs-human` label → watchdog skip): in Task 15 PR 3's scope.
+- ~~**Deterministic merge gate for flagged PRs** (`flag_concern` tool → `needs-human` label → watchdog skip): in Task 15 PR 3's scope.~~ Done in [#86](https://github.com/karlbaria/autonomous-agents-factory/pull/86) and [factory-shop#53](https://github.com/karlbaria/factory-shop/pull/53) (Task 15 §7).
 - **Optional: path-filtered CI for agent-only PRs,** if the ~15-minute build becomes a bottleneck.
 - **Reviewer findings JSON sometimes fails to parse (invalid escape),** which forces a NOT_READY round on a correct diff (~$0.20 extra on the Task 15 PR 1 coding demo). Watch for repeats; fix the parser or the prompt if it happens again.
+- **factory-shop watchdog only sweeps on build/status events,** so removing `needs-human` doesn't trigger a merge. Merge by hand, or add a `pull_request` `labeled`/`unlabeled` trigger later.
+- **factory-shop's `.github/scripts` tests (`node --test`) don't run in its build or CI.**
 
 ## Task 15: Feature-planning workflow — PR 1 (Slack intent routing + read-only planning)
 
@@ -854,3 +856,22 @@ All three were submitted from Slack against `karlbaria/factory-shop`.
   - **Other host:** a PRD link on another host was rejected ("I can only read PRD pages on karlvb.atlassian.net"), and no task was created.
   - **Coding:** task `01M8655KX8NWD49NB7361PT4VV` (`coding/new-task-adversarial-v1`, from "In karlbaria/factory-shop, add a short sentence at the end of the README's 'Lint' section…"): the description starts "add a short sentence…", with no stray "In ,". COMPLETED in 137 s, $0.03. PR [factory-shop#52](https://github.com/karlbaria/factory-shop/pull/52) **merged** (2026-11-24 07:00 UTC).
 - **Tag.** `known-good-task15-pr2a` at the commit of this entry.
+
+### 7. PR 3a: merge gate for flagged PRs (#86, factory-shop#53)
+
+- **What shipped ([#86](https://github.com/karlbaria/autonomous-agents-factory/pull/86), [factory-shop#53](https://github.com/karlbaria/factory-shop/pull/53)).**
+  - A platform tool `flag_concern(reason)`, captured like `request_clarification`. It's offered to the new-task, pr-iteration and restack workflows, and not to review, knowledge, artifact or read-only ones; a registry test keeps the lists in step.
+  - When the tool is called and a PR opens, the pipeline labels the PR `needs-human`, adds a "⚠️ Needs a human" section to its body, and emits `flagged_for_human`. If labelling fails, it creates the label and retries, and if that fails it turns the PR into a draft.
+  - factory-shop's watchdog never merges a `needs-human` PR, sets the status "labelled needs-human: waiting for a person", and re-reads labels just before merging.
+  - No CDK resources and no IAM changes.
+- **Demo results.**
+  - **Flagged:** task `01M879M9M5N191Q4ZMV04ZJ4JB` (`coding/new-task-adversarial-v1`, the port-8000 note in the README's "Run locally"): COMPLETED in 198 s, $0.09. It emitted `flagged_for_human` (the port is inferred from uvicorn's default, not checked against a running server). PR [factory-shop#54](https://github.com/karlbaria/factory-shop/pull/54) got the `needs-human` label, the "⚠️ Needs a human" section and the pending `factory/auto-merge` status "labelled needs-human: waiting for a person", and did not auto-merge. A person then **closed** it unmerged.
+  - **Unflagged:** task `01M87A92TXDM68TNK6J4FPPDFX` (the cdk-nag note in the README's "Build"): COMPLETED in 149 s, $0.04, no `flagged_for_human`. PR [factory-shop#55](https://github.com/karlbaria/factory-shop/pull/55) **auto-merged** as before (merged by the watchdog, 2026-11-24 17:44 UTC).
+- **Roadmap decision (recorded in [#82](https://github.com/karlbaria/autonomous-agents-factory/issues/82) with the 3b prompt).** After 3b, Task 15 follows one pattern: Jarvis is invoked on a page or thread, does a read-only run with the repo as context, and answers where it was asked. The order:
+  1. **3b:** Approve → Jira, with a 7-day TTL, and an "Open questions" section in plans that Approve checks.
+  2. **4:** `ask <question> about <url>` and `review <url>` (comments on the page plus a Slack summary).
+  3. **5:** `plan this` from a Slack thread (`conversations.replies`, read when Jarvis is mentioned, nothing stored).
+  4. **6:** Confluence-native actions from the page's ••• menu, and later `@Jarvis` in page comments.
+
+  Chat shaping and Revise-by-chat are dropped: open questions live in the page, and PMs edit in Confluence. Reasons: Linear agents (@mention in place), Kiro specs (review comments on the document), GitHub Spec Kit (separate entry points, a clarify step), and the Atlassian PRD template (the page is the single source of truth).
+- **Tag.** `known-good-task15-pr3a` at the commit of this entry.
