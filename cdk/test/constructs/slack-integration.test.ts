@@ -52,9 +52,69 @@ describe('SlackIntegration construct', () => {
     template = Template.fromStack(stack);
   });
 
-  test('creates three Slack DynamoDB tables (installation + user mapping + channel mapping)', () => {
-    // TaskTable + TaskEventsTable + SlackInstallation + SlackUserMapping + SlackChannelMapping = 5
-    template.resourceCountIs('AWS::DynamoDB::Table', 5);
+  test('creates four Slack DynamoDB tables (installation + user mapping + channel mapping + planning sessions)', () => {
+    // TaskTable + TaskEventsTable + SlackInstallation + SlackUserMapping + SlackChannelMapping
+    // + PlanningSession (#82 PR 3b-1) = 6
+    template.resourceCountIs('AWS::DynamoDB::Table', 6);
+  });
+
+  // Task 15 (fork), #82 PR 3b-1.
+  describe('planning sessions', () => {
+    function logicalId(type: string, fragment: string): string {
+      const ids = Object.keys(template.findResources(type)).filter((id) => id.includes(fragment));
+      expect(ids).toHaveLength(1);
+      return ids[0];
+    }
+
+    function statementsOf(fnFragment: string): Array<Record<string, any>> {
+      const fnId = logicalId('AWS::Lambda::Function', fnFragment);
+      const fn = template.findResources('AWS::Lambda::Function')[fnId];
+      const roleId = fn.Properties.Role['Fn::GetAtt'][0];
+      return Object.values(template.findResources('AWS::IAM::Policy'))
+        .filter((p) => p.Properties.Roles.some((r: { Ref: string }) => r.Ref === roleId))
+        .flatMap((p) => p.Properties.PolicyDocument.Statement);
+    }
+
+    function refersTo(resource: unknown, id: string): boolean {
+      return JSON.stringify(resource).includes(`"${id}"`);
+    }
+
+    test('the table is keyed by session_id with a 7-day TTL attribute', () => {
+      template.hasResourceProperties('AWS::DynamoDB::Table', {
+        KeySchema: [{ AttributeName: 'session_id', KeyType: 'HASH' }],
+        TimeToLiveSpecification: { AttributeName: 'expires_at', Enabled: true },
+        BillingMode: 'PAY_PER_REQUEST',
+        PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      });
+    });
+
+    test('the command processor can only Get and Update session rows', () => {
+      const tableId = logicalId('AWS::DynamoDB::Table', 'PlanningSession');
+      const onTable = statementsOf('CommandProcessorFn').filter((st) => refersTo(st.Resource, tableId));
+      expect(onTable).toEqual([
+        expect.objectContaining({ Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'] }),
+      ]);
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Environment: { Variables: Match.objectLike({ PLANNING_SESSION_TABLE_NAME: { Ref: tableId } }) },
+      });
+    });
+
+    test('the interactions Lambda may invoke the command processor and has no session-table access', () => {
+      const tableId = logicalId('AWS::DynamoDB::Table', 'PlanningSession');
+      const processorId = logicalId('AWS::Lambda::Function', 'CommandProcessorFn');
+      const statements = statementsOf('SlackInteractionsFn');
+      expect(statements.some((st) => refersTo(st.Resource, tableId))).toBe(false);
+      const invoke = statements.filter((st) => JSON.stringify(st.Action).includes('lambda:InvokeFunction'));
+      expect(invoke).toHaveLength(1);
+      expect(refersTo(invoke[0].Resource, processorId)).toBe(true);
+    });
+
+    test('no other Slack Lambda can touch the session table', () => {
+      const tableId = logicalId('AWS::DynamoDB::Table', 'PlanningSession');
+      for (const fragment of ['SlackEventsFn', 'SlackCommandsFn', 'SlackLinkFn', 'OAuthCallbackFn']) {
+        expect(statementsOf(fragment).some((st) => refersTo(st.Resource, tableId))).toBe(false);
+      }
+    });
   });
 
   test('command processor receives the channel-mapping table env var', () => {

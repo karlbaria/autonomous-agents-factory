@@ -46,6 +46,7 @@ import {
   PRD_BEGIN_MARKER,
   PRD_END_MARKER,
   PRD_MAX_CHARS,
+  readPlanPage,
   readPrdPage,
 } from '../../../src/handlers/shared/confluence-prd';
 
@@ -350,5 +351,65 @@ describe('buildPrdTaskDescription', () => {
     }
     // The PRD itself still sits whole between the markers.
     expect(description.slice(start, end)).toContain(WISHLIST_PRD.text);
+  });
+});
+
+// Task 15 (fork), #82 PR 3b-1.
+describe('readPlanPage', () => {
+  const PLAN = {
+    id: '1015867',
+    status: 'current',
+    title: 'Plan: Wishlist · ABC123',
+    spaceId: '42',
+    version: { number: 4 },
+    body: { storage: { value: `<h2>Stories</h2>${'<p>long text</p>'.repeat(2_000)}` } },
+  };
+
+  function planFetch(page: Record<string, unknown>, labels: string[], spaceKey = 'SD'): jest.Mock {
+    return jest.fn((url: string) => {
+      if (url.includes('/labels')) return Promise.resolve(jsonResponse({ results: labels.map((name) => ({ name })) }));
+      if (url.includes('/pages/')) return Promise.resolve(jsonResponse(page));
+      if (url.includes('/spaces/')) return Promise.resolve(jsonResponse({ id: '42', key: spaceKey }));
+      return Promise.resolve(jsonResponse(null, 404));
+    });
+  }
+
+  test('returns the whole current body and its version, never truncated', async () => {
+    const fetchFn = planFetch(PLAN, ['factory-generated', 'factory-draft', 'factory-plan']);
+    const result = await readPlanPage('1015867', MAPPING, { fetchFn });
+    expect(result).toEqual({ ok: true, title: PLAN.title, storage: PLAN.body.storage.value, version: 4 });
+    expect(PLAN.body.storage.value.length).toBeGreaterThan(PRD_MAX_CHARS);
+    expect(fetchFn.mock.calls[0][0]).toContain('/ex/confluence/cloud-1/wiki/api/v2/pages/1015867?body-format=storage');
+    expect(screenTextFileMock).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [['factory-generated', 'factory-draft']],
+    [['factory-plan']],
+    [[]],
+  ])('rejects a page without both factory plan labels: %j', async (labels) => {
+    const result = await readPlanPage('1015867', MAPPING, { fetchFn: planFetch(PLAN, labels) });
+    expect(result).toMatchObject({ ok: false, reason: 'not_a_plan' });
+  });
+
+  test('rejects a page moved to another space', async () => {
+    const result = await readPlanPage('1015867', MAPPING, { fetchFn: planFetch(PLAN, ['factory-generated', 'factory-plan'], 'OTHER') });
+    expect(result).toMatchObject({ ok: false, reason: 'other_space' });
+  });
+
+  test('rejects a page that is no longer current', async () => {
+    const result = await readPlanPage('1015867', MAPPING, {
+      fetchFn: planFetch({ ...PLAN, status: 'trashed' }, ['factory-generated', 'factory-plan']),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'unreadable' });
+  });
+
+  test('rejects a repo with no Confluence mapping', async () => {
+    expect(await readPlanPage('1015867', null)).toMatchObject({ ok: false, reason: 'no_mapping' });
+  });
+
+  test('rejects an inactive tenant', async () => {
+    getRegistryRowMock.mockResolvedValueOnce({ jira_cloud_id: 'cloud-1', site_url: SITE, status: 'revoked' });
+    expect(await readPlanPage('1015867', MAPPING, { fetchFn: planFetch(PLAN, []) })).toMatchObject({ ok: false, reason: 'tenant_unavailable' });
   });
 });

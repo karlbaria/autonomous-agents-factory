@@ -52,9 +52,16 @@ import { type DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk
 // is erased after compile, so the bundler sees a one-way dep.
 import type { FanOutEvent } from './fanout-task-events';
 import { logger } from './shared/logger';
+import {
+  createPlanningSession,
+  newPlanningSessionId,
+  pageIdFromPageUrl,
+  setPlanningSessionMessageTs,
+} from './shared/planning-session';
 import { renderSlackBlocks } from './shared/slack-blocks';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { TaskRecord } from './shared/types';
+import { FEATURE_PLANNING_WORKFLOW_ID } from './shared/workflows';
 
 /** Terminal event types the Slack dispatcher dedups on. Stored in
  *  ``channel_metadata.slack_notified_terminal`` via a conditional write
@@ -291,7 +298,21 @@ export async function dispatchSlackEvent(
   // ``metadata: { S: ... }`` shape itself from the raw stream record.
   const eventMetadata = event.metadata;
 
-  const message = renderSlackBlocks(eventType, task, eventMetadata);
+  // Task 15 (fork), #82 PR 3b-1: a delivered plan gets Approve/Cancel buttons
+  // backed by a planning-session row. Best-effort: if the row can't be written
+  // the plan is still announced, just without buttons. Throwing here would
+  // lose the message entirely, because the terminal dedup above has already
+  // claimed it.
+  const planningSessionId = eventType === 'task_completed'
+    ? await createPlanningSessionFor(ddb, task)
+    : undefined;
+
+  const message = renderSlackBlocks(
+    eventType,
+    task,
+    eventMetadata,
+    planningSessionId ? { planningSessionId } : {},
+  );
 
   const threadTs = channelMeta.slack_thread_ts;
 
@@ -347,6 +368,18 @@ export async function dispatchSlackEvent(
       throw new Error(failureMessage);
     }
     throw new SlackApiError(failureMessage);
+  }
+
+  if (planningSessionId && result.ts) {
+    try {
+      await setPlanningSessionMessageTs(ddb, process.env.PLANNING_SESSION_TABLE_NAME!, planningSessionId, result.ts);
+    } catch (err) {
+      logger.warn('[fanout/slack] could not record the planning message ts (non-fatal)', {
+        event: 'fanout.slack.planning_session_ts_failed',
+        task_id: taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // Reactions always use the real channel id even for DMs.
@@ -526,6 +559,66 @@ const EVENT_REACTIONS: Record<string, string> = {
 
 /** Reactions to remove when transitioning to a new state. */
 const STALE_REACTIONS = ['eyes', 'hourglass_flowing_sand'];
+
+/**
+ * Create the planning session for a planning task's completion, when the plan
+ * was published and the requester is known. Returns the session id, or
+ * undefined when there is no session (any other task, a skipped page, no
+ * table configured, or a failed write).
+ */
+async function createPlanningSessionFor(
+  ddb: DynamoDBDocumentClient,
+  task: TaskRecord,
+): Promise<string | undefined> {
+  const tableName = process.env.PLANNING_SESSION_TABLE_NAME;
+  const meta = task.channel_metadata;
+  const teamId = meta?.slack_team_id;
+  const channelId = meta?.slack_channel_id;
+  const userId = meta?.slack_user_id;
+  const threadTs = meta?.slack_thread_ts;
+  if (
+    !tableName
+    || task.resolved_workflow?.id !== FEATURE_PLANNING_WORKFLOW_ID
+    || task.confluence_status !== 'published'
+    || !teamId
+    || !channelId
+    || !userId
+    || !task.user_id
+    || !task.repo
+  ) {
+    return undefined;
+  }
+  const pageId = pageIdFromPageUrl(task.confluence_page_url);
+  if (!pageId) {
+    logger.warn('[fanout/slack] planning page URL has no page id; posting without buttons', {
+      event: 'fanout.slack.planning_no_page_id',
+      task_id: task.task_id,
+    });
+    return undefined;
+  }
+  const sessionId = newPlanningSessionId();
+  try {
+    await createPlanningSession(ddb, tableName, {
+      session_id: sessionId,
+      task_id: task.task_id,
+      repo: task.repo,
+      page_id: pageId,
+      slack_team_id: teamId,
+      slack_user_id: userId,
+      platform_user_id: task.user_id,
+      slack_channel_id: channelId,
+      ...(threadTs && { slack_thread_ts: threadTs }),
+    }, new Date());
+    return sessionId;
+  } catch (err) {
+    logger.warn('[fanout/slack] could not create the planning session; posting without buttons', {
+      event: 'fanout.slack.planning_session_failed',
+      task_id: task.task_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return undefined; // nosemgrep: ts-silent-success-masking -- no session means the plan is posted without buttons (logged); throwing would lose the message after the terminal dedup claim
+  }
+}
 
 async function addReaction(botToken: string, channel: string, timestamp: string, emoji: string): Promise<void> {
   try {

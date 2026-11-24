@@ -118,7 +118,8 @@ describe('structural synthesis profiles', () => {
           bedrockModels: expect.arrayContaining([...DEFAULT_BEDROCK_MODEL_IDS]),
         });
         expect(matches[0].context.bedrockModels).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length + 8);
-        expect(!!matches[0].expectedError).toBe(topology === 'inline' && compute === 'lambda-microvm');
+        // agentcore joined lambda-microvm over budget inline with the planning-session table (#82 PR 3b-1, decision 6).
+        expect(!!matches[0].expectedError).toBe(topology === 'inline' && compute !== 'ecs');
       }
     }
   });

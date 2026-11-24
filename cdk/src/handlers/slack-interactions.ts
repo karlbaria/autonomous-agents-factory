@@ -17,17 +17,22 @@
  *  SOFTWARE.
  */
 
+import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
+import type { PlanActionEvent } from './shared/plan-approve';
+import { parsePlanActionId } from './shared/planning-session';
 import { getSlackSecret, SLACK_SECRET_PREFIX, verifySlackRequest } from './shared/slack-verify';
-import { makeDocClient } from './shared/ua';
+import { makeClient, makeDocClient } from './shared/ua';
 
 const ddb = makeDocClient();
+const lambdaClient = makeClient(LambdaClient);
 
 const SIGNING_SECRET_ARN = process.env.SLACK_SIGNING_SECRET_ARN!;
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
+const PROCESSOR_FUNCTION_NAME = process.env.SLACK_COMMAND_PROCESSOR_FUNCTION_NAME;
 
 interface SlackInteractionPayload {
   readonly type: string;
@@ -48,6 +53,10 @@ interface SlackInteractionPayload {
  * Slack sends interaction payloads as a URL-encoded `payload` field in the body.
  * Currently handles:
  * - `cancel_task:{task_id}` — Cancel a running task via the "Cancel Task" button.
+ * - `plan_approve|plan_cancel|plan_confirm:{session_id}` — a planning draft's
+ *   buttons (#82 PR 3b-1). Handed to the command processor asynchronously, so
+ *   Slack gets its 200 at once; the processor checks the clicker and does the
+ *   work.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
@@ -83,6 +92,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       for (const action of payload.actions) {
         if (action.action_id.startsWith('cancel_task:')) {
           await handleCancelAction(payload, action.action_id);
+        } else if (action.action_id.startsWith('plan_')) {
+          await forwardPlanAction(payload, action.action_id);
         }
       }
     }
@@ -94,6 +105,45 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       error: err instanceof Error ? err.message : String(err),
     });
     return jsonResponse(200, {}); // Still return 200 to avoid Slack retries.
+  }
+}
+
+/**
+ * Hand a plan button click to the command processor. Only a well-formed plan
+ * action id is forwarded, with the signed payload's user and team: the
+ * processor never trusts anything else from the click.
+ */
+async function forwardPlanAction(payload: SlackInteractionPayload, actionId: string): Promise<void> {
+  const parsed = parsePlanActionId(actionId);
+  if (!parsed) {
+    logger.warn('Ignoring malformed plan action id');
+    return;
+  }
+  if (!PROCESSOR_FUNCTION_NAME) {
+    logger.error('SLACK_COMMAND_PROCESSOR_FUNCTION_NAME not set; cannot handle plan action');
+    await postToResponseUrl(payload.response_url, ':warning: Plan approval isn\'t available right now. Please try again later.');
+    return;
+  }
+  const event: PlanActionEvent = {
+    source: 'plan_action',
+    action: parsed.action,
+    session_id: parsed.sessionId,
+    team_id: payload.user.team_id,
+    user_id: payload.user.id,
+    response_url: payload.response_url,
+  };
+  try {
+    await lambdaClient.send(new InvokeCommand({
+      FunctionName: PROCESSOR_FUNCTION_NAME,
+      InvocationType: 'Event',
+      Payload: new TextEncoder().encode(JSON.stringify(event)),
+    }));
+  } catch (err) {
+    logger.error('Failed to invoke command processor for plan action', {
+      action: parsed.action,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    await postToResponseUrl(payload.response_url, ':warning: I couldn\'t start that just now. Please click again in a moment.');
   }
 }
 

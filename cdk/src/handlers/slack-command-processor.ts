@@ -19,11 +19,14 @@
 
 import * as crypto from 'crypto';
 import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
-import { buildPrdTaskDescription, PRD_MAX_CHARS, readPrdPage } from './shared/confluence-prd';
+import { buildPrdTaskDescription, PRD_MAX_CHARS, readPlanPage, readPrdPage } from './shared/confluence-prd';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
+import { handlePlanAction, type PlanActionEvent } from './shared/plan-approve';
+import type { PlanningSession } from './shared/planning-session';
 import { lookupRepo } from './shared/repo-config';
 import { slackFetch } from './shared/slack-api';
+import type { SlackMessage } from './shared/slack-blocks';
 import { classifySlackIntent, type SlackIntent } from './shared/slack-intent';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { Attachment } from './shared/types';
@@ -71,9 +74,9 @@ export type CommandProcessorEvent = SlashCommandEvent | MentionEvent;
  * payloads without a `source` field. Normalize those into SlashCommandEvent so
  * the handler body only has to reason about the discriminated union.
  */
-type RawEvent = CommandProcessorEvent | SlackCommandPayload;
+type RawEvent = CommandProcessorEvent | SlackCommandPayload | PlanActionEvent;
 
-function normalizeEvent(event: RawEvent): CommandProcessorEvent {
+function normalizeEvent(event: Exclude<RawEvent, PlanActionEvent>): CommandProcessorEvent {
   if ('source' in event && event.source) {
     return event;
   }
@@ -85,6 +88,7 @@ const ddb = makeDocClient();
 const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
 const INSTALLATION_TABLE = process.env.SLACK_INSTALLATION_TABLE_NAME!;
 const CHANNEL_MAPPING_TABLE = process.env.SLACK_CHANNEL_MAPPING_TABLE_NAME;
+const PLANNING_SESSION_TABLE = process.env.PLANNING_SESSION_TABLE_NAME;
 
 /** Link code TTL. */
 const LINK_CODE_TTL_S = 10 * 60; // 10 minutes
@@ -103,6 +107,10 @@ const RESPONSE_URL_LOG_PREFIX_LEN = 80;
  * `chat.postMessage` (@mentions).
  */
 export async function handler(raw: RawEvent): Promise<void> {
+  if ('source' in raw && raw.source === 'plan_action') {
+    await handlePlanButton(raw);
+    return;
+  }
   const event = normalizeEvent(raw);
   const text = (event.text ?? '').trim();
   const parts = text.split(/\s+/);
@@ -568,6 +576,44 @@ function isSlackFileUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+// ─── Plan Approve / Cancel (#82 PR 3b-1) ────────────────────────────────────
+
+async function handlePlanButton(event: PlanActionEvent): Promise<void> {
+  if (!PLANNING_SESSION_TABLE) {
+    logger.error('PLANNING_SESSION_TABLE_NAME not set; cannot handle plan action');
+    await postToSlack(event.response_url, ':warning: Plan approval isn\'t available right now.');
+    return;
+  }
+  await handlePlanAction(event, {
+    ddb,
+    tableName: PLANNING_SESSION_TABLE,
+    now: () => new Date(),
+    lookupPlatformUser,
+    lookupRepoConfig: async (repo) => (await lookupRepo(repo)).config,
+    readPlanPage: (pageId, mapping) => readPlanPage(pageId, mapping),
+    postInThread: postInPlanThread,
+    replyEphemeral: postToSlack,
+  });
+}
+
+/** Post in the thread the plan was delivered in (a DM goes to the user id). */
+async function postInPlanThread(session: PlanningSession, message: SlackMessage): Promise<void> {
+  const botToken = await getBotToken(session.slack_team_id);
+  if (!botToken) {
+    logger.warn('Cannot post in plan thread: bot token not found', { team_id: session.slack_team_id });
+    return;
+  }
+  const channel = session.slack_channel_id.startsWith('D') ? session.slack_user_id : session.slack_channel_id;
+  const threadTs = session.slack_thread_ts ?? session.slack_message_ts;
+  await slackFetch(botToken, 'chat.postMessage', {
+    channel,
+    text: message.text,
+    blocks: message.blocks,
+    unfurl_links: false,
+    ...(threadTs && { thread_ts: threadTs }),
+  });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

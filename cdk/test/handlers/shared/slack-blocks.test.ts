@@ -18,7 +18,7 @@
  */
 
 import { TaskStatus, type TaskStatusType } from '../../../src/constructs/task-status';
-import { type ActionsBlock, renderSlackBlocks, type SlackBlock } from '../../../src/handlers/shared/slack-blocks';
+import { type ActionsBlock, renderPlanConfirmation, renderSlackBlocks, type SlackBlock } from '../../../src/handlers/shared/slack-blocks';
 
 /** Narrow to a section block and return its text; throws if block isn't a section. */
 function sectionText(block: SlackBlock): string {
@@ -326,5 +326,55 @@ describe('renderSlackBlocks', () => {
     const text = sectionText(msg.blocks[0]);
     expect(text.length).toBeLessThan(400);
     expect(text).toContain('...');
+  });
+});
+
+// Task 15 (fork), #82 PR 3b-1.
+describe('planning buttons', () => {
+  const SID = 'abcdefghijklmnopqrstuvwxyz';
+  const planTask = {
+    task_id: 'task-1',
+    repo: 'org/repo',
+    task_description: 'plan a wishlist',
+    pr_url: undefined as string | undefined,
+    error_message: undefined as string | undefined,
+    cost_usd: 0.2 as number | undefined,
+    duration_s: 47 as number | undefined,
+    status: TaskStatus.COMPLETED as TaskStatusType,
+    resolved_workflow: { id: 'knowledge/feature-planning-v1', version: '1.0.0' },
+    confluence_status: 'published',
+    confluence_page_url: 'https://acme.atlassian.net/wiki/spaces/SD/pages/9/Plan',
+  };
+
+  function actionIds(blocks: readonly SlackBlock[]): string[] {
+    return blocks
+      .filter((b): b is ActionsBlock => b.type === 'actions')
+      .flatMap((b) => b.elements.map((e) => ('action_id' in e ? e.action_id : '')))
+      .filter(Boolean);
+  }
+
+  test('a delivered plan with a session gets Approve and Cancel carrying only the session id', () => {
+    const msg = renderSlackBlocks('task_completed', planTask, undefined, { planningSessionId: SID });
+    expect(actionIds(msg.blocks)).toEqual([`plan_approve:${SID}`, `plan_cancel:${SID}`]);
+    const cancel = msg.blocks
+      .filter((b): b is ActionsBlock => b.type === 'actions')
+      .flatMap((b) => b.elements)
+      .find((e) => 'action_id' in e && e.action_id.startsWith('plan_cancel'));
+    expect(cancel).toMatchObject({ style: 'danger', confirm: { title: { text: 'Cancel this plan?' } } });
+  });
+
+  test.each([
+    ['no session', planTask, undefined],
+    ['a skipped page', { ...planTask, confluence_status: 'skipped' }, SID],
+    ['a coding task', { ...planTask, resolved_workflow: { id: 'coding/new-task-v1', version: '1' } }, SID],
+  ])('no plan buttons for %s', (_name, task, sid) => {
+    const msg = renderSlackBlocks('task_completed', task, undefined, sid ? { planningSessionId: sid } : {});
+    expect(actionIds(msg.blocks)).toEqual([]);
+  });
+
+  test('the large-plan confirmation shows the count and cost, with Confirm and Cancel', () => {
+    const msg = renderPlanConfirmation(SID, 6, 3);
+    expect(sectionText(msg.blocks[0])).toContain('6 stories, about $3.00');
+    expect(actionIds(msg.blocks)).toEqual([`plan_confirm:${SID}`, `plan_cancel:${SID}`]);
   });
 });

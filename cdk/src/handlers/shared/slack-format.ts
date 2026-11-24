@@ -46,3 +46,11 @@ export function formatDuration(seconds: number): string {
   const remainM = minutes % 60;
   return remainM > 0 ? `${h}h ${remainM}m` : `${h}h`;
 }
+
+/**
+ * Escape text for a Slack mrkdwn message: `&`, `<` and `>` become entities, so
+ * text copied from a page can't form a mention, a `<!channel>` or a link.
+ */
+export function escapeSlackText(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}

@@ -34,12 +34,19 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
   GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecretValue', input })),
 }));
 
+const lambdaSend = jest.fn();
+jest.mock('@aws-sdk/client-lambda', () => ({
+  LambdaClient: jest.fn(() => ({ send: lambdaSend })),
+  InvokeCommand: jest.fn((input: unknown) => ({ _type: 'Invoke', input })),
+}));
+
 const fetchMock = jest.fn();
 (global as unknown as { fetch: unknown }).fetch = fetchMock;
 
 process.env.SLACK_SIGNING_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent/slack/signing-I';
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.SLACK_USER_MAPPING_TABLE_NAME = 'SlackMap';
+process.env.SLACK_COMMAND_PROCESSOR_FUNCTION_NAME = 'CommandProcessor';
 
 import { invalidateSlackSecretCache } from '../../src/handlers/shared/slack-verify';
 import { handler } from '../../src/handlers/slack-interactions';
@@ -192,5 +199,60 @@ describe('slack-interactions handler', () => {
         isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('not linked'),
     );
     expect(posted).toBeTruthy();
+  });
+});
+
+// Task 15 (fork), #82 PR 3b-1.
+describe('slack-interactions plan buttons', () => {
+  const SID = 'abcdefghijklmnopqrstuvwxyz';
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    smSend.mockReset().mockResolvedValue({ SecretString: SIGNING_SECRET });
+    lambdaSend.mockReset().mockResolvedValue({});
+    fetchMock.mockReset().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    invalidateSlackSecretCache(process.env.SLACK_SIGNING_SECRET_ARN!);
+  });
+
+  test.each(['approve', 'cancel', 'confirm'])('plan_%s is handed to the processor asynchronously, with the signed identity', async (action) => {
+    const result = await handler(makeInteractionEvent(interactionPayload(`plan_${action}:${SID}`, 'UPM', 'T9')));
+
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).toHaveBeenCalledTimes(1);
+    const input = lambdaSend.mock.calls[0][0].input;
+    expect(input).toMatchObject({ FunctionName: 'CommandProcessor', InvocationType: 'Event' });
+    expect(JSON.parse(new TextDecoder().decode(input.Payload))).toEqual({
+      source: 'plan_action',
+      action,
+      session_id: SID,
+      team_id: 'T9',
+      user_id: 'UPM',
+      response_url: 'https://hooks.slack.com/response/xyz',
+    });
+    // No table access here: the processor checks the requester.
+    expect(ddbSend).not.toHaveBeenCalled();
+  });
+
+  test.each([`plan_approve:${SID}x`, 'plan_approve:SHORT', `plan_file:${SID}`])('a malformed plan action %s is ignored', async (actionId) => {
+    const result = await handler(makeInteractionEvent(interactionPayload(actionId)));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('an invoke failure tells the clicker, and Slack still gets 200', async () => {
+    lambdaSend.mockRejectedValueOnce(new Error('throttled'));
+    const result = await handler(makeInteractionEvent(interactionPayload(`plan_approve:${SID}`)));
+    expect(result.statusCode).toBe(200);
+    const posted = fetchMock.mock.calls.find(([url, opts]) =>
+      isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('click again'));
+    expect(posted).toBeTruthy();
+  });
+
+  test('a plan action with a bad signature is not forwarded', async () => {
+    const event = makeInteractionEvent(interactionPayload(`plan_approve:${SID}`));
+    event.headers['X-Slack-Signature'] = 'v0=000';
+    const result = await handler(event);
+    expect(result.statusCode).toBe(401);
+    expect(lambdaSend).not.toHaveBeenCalled();
   });
 });

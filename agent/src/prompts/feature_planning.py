@@ -71,6 +71,12 @@ it does:
 - Read the request carefully. Restate it in the Brief; where it is vague, make
   the smallest reasonable assumption and list it under Risks instead of
   stopping to ask.
+- A decision only the product manager can make, one that would change what
+  gets built (scope, who it is for, a behaviour the request leaves open), goes
+  under Open questions instead. The PM answers each one in the page before
+  approving, so ask only what matters, at most five, and plan the stories on
+  your best guess meanwhile. Implementation details you can settle from the
+  code are not open questions.
 - Explore the code that the feature touches: entry points, data models, APIs,
   UI components, tests and build setup. Name real files and modules; never
   invent paths you have not seen.
@@ -127,8 +133,13 @@ Blocked by: S1
 
 ...
 
+## Open questions
+
+### Q1: <a question the PM must answer before approving>
+Answer:
+
 ## Risks
-Assumptions, open questions, and anything surprising you found.
+Assumptions, and anything surprising you found.
 ```
 
 Rules for the Stories section:
@@ -142,4 +153,13 @@ Rules for the Stories section:
 - Every story has a `**Acceptance criteria**` line followed by a bulleted list
   of at least one criterion.
 - A `story`-shaped plan has exactly one story, S1, blocked by none.
+
+Rules for the Open questions section:
+
+- Number the questions Q1, Q2, ... with one `###` heading per question in the
+  form `### Q<n>: <question>`, followed by a line that is exactly `Answer:`
+  with nothing after it. Never answer your own questions.
+- With no questions, the whole section is the single line `None.`
+- Approve refuses to file the plan while any question has nothing after its
+  `Answer:`.
 """

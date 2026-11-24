@@ -135,6 +135,19 @@ Two more forms choose their own workflow instead of the repo's default. Shoof re
 
 All of these need a repo: name it as `org/repo`, or mention Shoof in a channel with a default repo (`bgagent slack onboard-channel`). Without one, Shoof replies with what's missing. A message that only mentions these words later on (for example `@Shoof planning is broken in checkout in org/repo`) is an ordinary coding task.
 
+### Approve or cancel a plan
+
+When a plan is delivered in Slack, the **Planning draft ready** message has **Approve** and **Cancel** buttons. Only the person who asked for the plan can use them; anyone else who clicks gets a private reply saying so. The buttons work for 7 days.
+
+- **Edit the plan in Confluence first** if you need to. Approve reads the page as it is when you click, not the draft as it was written.
+- **Answer the open questions.** A plan can list questions under **Open questions**, each as a `Q<n>` heading followed by an `Answer:` line. Write your answer after `Answer:` (or in the paragraph under it). A question with nothing after `Answer:`, or only `TBD`, counts as unanswered. Delete a question if it doesn't apply, and if none are left, write `None.`
+- **Approve checks the plan** and posts each problem in the thread: no stories, a story with no acceptance criteria, two stories with the same number or title, a `Blocked by:` that names a story that doesn't exist or forms a cycle, more than 15 stories, a page over 60,000 characters, or an unanswered open question. Fix them in Confluence and click **Approve** again.
+- **Large plans ask twice.** Above 5 stories (about $0.50 of coding each), Approve posts the story count and estimated cost with a **Confirm** button. If you edit a story before confirming, Shoof asks again with the new numbers.
+- **For now, Approve only checks the plan.** A passing check says "Check passed — filing arrives in the next update", and nothing is filed in Jira. Filing the stories and starting the build come in the next update.
+- **Cancel** files nothing and leaves the Confluence page as it is.
+
+The page's text is only read into a fixed list of stories and questions. Nothing in it is followed as an instruction, and nothing from it is sent to a model.
+
 ### Cancel a task
 
 Click the **Cancel Task** button in the thread while the agent is working.

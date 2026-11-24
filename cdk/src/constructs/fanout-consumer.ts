@@ -90,6 +90,13 @@ export interface FanOutConsumerProps {
   readonly slackSecretArnPattern?: string;
 
   /**
+   * Planning-session table (Task 15 (fork), #82 PR 3b-1). When set, the Slack
+   * dispatcher records a session row as it posts "Planning draft ready" with
+   * Approve/Cancel buttons. PutItem and UpdateItem only.
+   */
+  readonly planningSessionTable?: dynamodb.ITable;
+
+  /**
    * LinearWorkspaceRegistryTable — the Linear dispatcher reads this to
    * resolve per-workspace OAuth tokens at comment-post time. Optional:
    * when omitted, the dispatcher logs and skips so a deployment without
@@ -235,6 +242,17 @@ export class FanOutConsumer extends Construct {
         actions: ['secretsmanager:GetSecretValue'],
         resources: [props.slackSecretArnPattern],
       }));
+    }
+
+    // Planning-session rows (#82 PR 3b-1): created (PutItem) just before the
+    // "Planning draft ready" post, then given the posted message ts
+    // (UpdateItem). The dispatcher never reads or deletes them.
+    if (props.planningSessionTable) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        resources: [props.planningSessionTable.tableArn],
+      }));
+      this.fn.addEnvironment('PLANNING_SESSION_TABLE_NAME', props.planningSessionTable.tableName);
     }
 
     // Linear dispatcher plumbing. Same guarded shape as Slack/GitHub:
