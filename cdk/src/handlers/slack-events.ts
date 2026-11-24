@@ -23,6 +23,7 @@ import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import { slackFetch } from './shared/slack-api';
+import { extractRepoCandidates, removeRepoMention } from './shared/slack-repo-text';
 import { getSlackSecret, SLACK_SECRET_PREFIX, verifySlackRequest } from './shared/slack-verify';
 import { makeClient, makeDocClient } from './shared/ua';
 import type { MentionEvent, SlackFileRef } from './slack-command-processor';
@@ -216,7 +217,9 @@ async function handleAppMention(
   let commandText: string;
   if (repoCandidates.length === 1) {
     const repo = repoCandidates[0];
-    const description = text.replace(repo, '').replace(/\s+/g, ' ').trim();
+    // Drops the words that only pointed at the repo too ("In owner/repo, add
+    // X" → "add X"; "add X in owner/repo" → "add X"), never touching a link.
+    const description = removeRepoMention(text, repo);
     commandText = `submit ${repo} ${description}`.trim();
   } else {
     // No repo token — forward the whole text; the processor treats it as the
@@ -274,31 +277,6 @@ async function handleAppMention(
       });
     }
   }
-}
-
-/** Pattern for an "owner/repo" or "owner/repo#N" candidate inside free text. */
-const REPO_CANDIDATE_PATTERN = /\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:#\d+)?)\b/g;
-
-/**
- * Candidate "owner/repo[#N]" tokens found in free text, in order of first
- * appearance, de-duplicated. Excludes a match that's actually a deeper
- * segment of a longer path rather than a real repo mention — e.g.
- * "api/products" lifted out of the URL path "/api/products/count" — detected
- * by the character immediately before the match being a "/".
- */
-function extractRepoCandidates(text: string): string[] {
-  const pattern = new RegExp(REPO_CANDIDATE_PATTERN);
-  const seen = new Set<string>();
-  const candidates: string[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(text)) !== null) {
-    if (text[match.index - 1] === '/') continue;
-    const token = match[1];
-    if (seen.has(token)) continue;
-    seen.add(token);
-    candidates.push(token);
-  }
-  return candidates;
 }
 
 async function revokeInstallation(teamId: string): Promise<void> {

@@ -70,4 +70,43 @@ describe('classifySlackIntent', () => {
     expect(classifySlackIntent('research').description).toBe('');
     expect(classifySlackIntent('plan for').description).toBe('');
   });
+
+  // #82 PR 2a: `plan from <url>` is matched before the generic `plan` rule.
+  describe('plan from <url>', () => {
+    const PAGE = 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015867/Wishlist+PRD';
+
+    test.each([
+      [`plan from <${PAGE}>`, PAGE, ''],
+      [`Plan from <${PAGE}|Wishlist PRD>`, PAGE, ''],
+      [`plan  from ${PAGE}`, PAGE, ''],
+      [`plan from <${PAGE}> in`, PAGE, ''],
+      [`plan from <${PAGE}>, mobile first please`, PAGE, 'mobile first please'],
+      [`plan from ${PAGE}, mobile first please`, PAGE, 'mobile first please'],
+      ['plan from <https://karlvb.atlassian.net/wiki/spaces/SD/pages/1?a=1&amp;b=2>', 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1?a=1&b=2', ''],
+    ])('"%s" → planning with the URL apart from the description', (input, prdUrl, description) => {
+      expect(classifySlackIntent(input)).toEqual({
+        kind: 'plan',
+        workflowId: 'knowledge/feature-planning-v1',
+        description,
+        prdUrl,
+      });
+    });
+
+    test('"plan from" without a link is the generic plan rule', () => {
+      expect(classifySlackIntent('plan from scratch a wishlist')).toEqual({
+        kind: 'plan',
+        workflowId: 'knowledge/feature-planning-v1',
+        description: 'from scratch a wishlist',
+      });
+    });
+
+    test('ordinary plan and i want to build messages behave as in PR 1 (no prdUrl)', () => {
+      expect(classifySlackIntent('plan a tagging feature')).toEqual({
+        kind: 'plan', workflowId: 'knowledge/feature-planning-v1', description: 'a tagging feature',
+      });
+      expect(classifySlackIntent('I want to build a tagging feature in')).toEqual({
+        kind: 'plan', workflowId: 'knowledge/feature-planning-v1', description: 'a tagging feature',
+      });
+    });
+  });
 });

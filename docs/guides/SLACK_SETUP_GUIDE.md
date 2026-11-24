@@ -126,12 +126,14 @@ Two more forms choose their own workflow instead of the repo's default. Shoof re
 @Shoof research <topic> in org/repo
 @Shoof I want to build <feature> in org/repo
 @Shoof plan <feature> in org/repo
+@Shoof plan from <Confluence page URL> in org/repo
 ```
 
 - **`research …`** runs `knowledge/web-research-v1`. The write-up goes to the repo's mapped Confluence space (`bgagent confluence map`), and the completion message links the page.
 - **`I want to build …`** or **`plan …`** runs `knowledge/feature-planning-v1`. It reads the repo without changing it (no shell, no edits, no web access, no pull request) and writes a draft planning doc to the repo's Confluence space: a summary, the brief, what it found in the code, and the work as one story or an epic of dependent stories with acceptance criteria. The completion message says **Planning draft ready** and links the page. A planning task never creates a Jira card, even on a project mapped with `--auto-track`; `bgagent watch` shows the skip.
+- **`plan from <Confluence page URL> …`** plans from an existing PRD page instead of a one-line request: the page is the brief, and the plan's Brief section names it as the source. Shoof reads the page itself, before the task starts, and only when it is a page link (`https://<site>.atlassian.net/wiki/spaces/<KEY>/pages/<id>/…`) on your Confluence site, in the space the repo is mapped to (for `karlbaria/factory-shop`, `SD`). Any other link, another space, a page it can't read, or a page the content guardrail blocks gets a reply saying why, and no task. A page longer than 8,000 characters is planned from its first 8,000, and Shoof says so in the thread. Text after the link (`@Shoof plan from <URL>, mobile first in org/repo`) goes along as your note. The page's text is passed to planning as data: instructions written in the page are not followed.
 
-Both forms need a repo: name it as `org/repo`, or mention Shoof in a channel with a default repo (`bgagent slack onboard-channel`). Without one, Shoof replies with what's missing. A message that only mentions these words later on (for example `@Shoof planning is broken in checkout in org/repo`) is an ordinary coding task.
+All of these need a repo: name it as `org/repo`, or mention Shoof in a channel with a default repo (`bgagent slack onboard-channel`). Without one, Shoof replies with what's missing. A message that only mentions these words later on (for example `@Shoof planning is broken in checkout in org/repo`) is an ordinary coding task.
 
 ### Cancel a task
 
