@@ -358,7 +358,7 @@ _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
         "coding/pr-review-v1",
         "coding/restack-v1",
         "default/agent-v1",
-        "web/research-v1",
+        "knowledge/web-research-v1",
     )
 )
 
