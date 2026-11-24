@@ -21,6 +21,8 @@ supplies the title (the deliverable's H1, if any, is dropped from the body
 rather than used), and the page also gets the ``factory-plan`` label. The
 parent page, the ownership guard and edit detection are the same as for a
 research page (``kind="research"``, the default), which is unchanged.
+``kind="prd"`` (#82 PR 3c) is the same for a PRD draft, labelled
+``factory-prd`` instead of ``factory-plan``.
 If that labelling fails twice, the just-created page is deleted again, so an
 unlabelled factory page never blocks later runs as an ownership clash.
 
@@ -47,6 +49,7 @@ from .client import (
     LABEL_DRAFT,
     LABEL_GENERATED,
     LABEL_PLAN,
+    LABEL_PRD,
     ConfluenceClient,
     ConfluenceError,
     Page,
@@ -68,13 +71,14 @@ SkipReason = Literal[
 
 UPDATE_MESSAGE = "Updated by the software factory"
 
-PageKind = Literal["research", "plan"]
+PageKind = Literal["research", "plan", "prd"]
 
 # Labels a just-created page gets, by kind. ``factory-generated`` marks it as
 # ours (the ownership guard); ``factory-draft`` is its draft state.
 _CREATE_LABELS: dict[PageKind, tuple[str, ...]] = {
     "research": (LABEL_GENERATED, LABEL_DRAFT),
     "plan": (LABEL_GENERATED, LABEL_DRAFT, LABEL_PLAN),
+    "prd": (LABEL_GENERATED, LABEL_DRAFT, LABEL_PRD),
 }
 
 
@@ -213,10 +217,11 @@ def _title_and_body(
 
     Research: the first H1 (removed from the body), else ``fallback_title`` with
     the whole deliverable as the body (#80). Plan: the caller's ``title``; an H1
-    is still removed from the body so the page doesn't repeat its title.
+    is still removed from the body so the page doesn't repeat its title. A PRD
+    is titled like a plan.
     """
     h1, body = split_title(markdown)
-    if kind == "plan":
+    if kind in ("plan", "prd"):
         return title.strip()[:_MAX_TITLE_CHARS], body
     if h1:
         return h1, body
@@ -242,8 +247,8 @@ def publish_markdown(
     lookup-by-title and ``factory-generated`` ownership check as an H1 title, so
     it can never update a page the factory doesn't own.
 
-    ``kind="plan"`` takes the page title from ``title`` instead (see the module
-    docstring); ``fallback_title`` is not used for a plan.
+    ``kind="plan"`` and ``kind="prd"`` take the page title from ``title``
+    instead (see the module docstring); ``fallback_title`` is not used for them.
     """
     meta = channel_metadata or {}
     cloud_id = meta.get("confluence_cloud_id", "")

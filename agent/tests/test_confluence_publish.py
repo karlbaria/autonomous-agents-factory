@@ -10,6 +10,7 @@ from confluence.client import (
     LABEL_DRAFT,
     LABEL_GENERATED,
     LABEL_PLAN,
+    LABEL_PRD,
     ConfluenceError,
     Page,
 )
@@ -384,6 +385,25 @@ class TestFallbackTitle:
         assert out.status == "published"
         assert out.action == "updated"
         assert fake.updated[0][0] == page.id
+
+
+class TestPrdPages:
+    """#82 PR 3c: ``kind="prd"`` pages get the factory-prd label, not factory-plan."""
+
+    def test_prd_page_has_the_given_title_and_prd_labels(self, fake):
+        out = publish_markdown(
+            "# PRD: Wishlist\n\n## Problem\n\nNo way to save items.",
+            MAPPED,
+            resolve_token=lambda _m: "tok",
+            client_factory=fake.factory,
+            kind="prd",
+            title="PRD: Wishlist · 30G1SX",
+        )
+        assert out.status == "published"
+        _space_id, title, body, _parent = fake.created[0]
+        assert title == "PRD: Wishlist · 30G1SX"
+        assert fake.labels[out.page_id] == {LABEL_GENERATED, LABEL_DRAFT, LABEL_PRD}
+        assert "No way to save items." in body
 
 
 class TestPlanPages:

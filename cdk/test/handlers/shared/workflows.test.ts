@@ -201,6 +201,8 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
         'confluence', 's3_and_confluence', 's3_comment_and_confluence',
         // Task 15 (fork), #82: the planning-doc variant.
         's3_comment_and_confluence_plan',
+        // #82 PR 3c: the PRD draft variant.
+        's3_comment_and_confluence_prd',
       ]);
       const steps = (doc.steps ?? []) as Array<Record<string, unknown>>;
       const yamlPublishesConfluence = steps.some(
@@ -398,11 +400,22 @@ describe('knowledge/feature-planning-v1 (Task 15 (fork), #82)', () => {
     });
   });
 
-  test('is the only workflow exempt from Jira auto-track', () => {
+  test('it and the PRD draft are the only workflows exempt from Jira auto-track', () => {
     expect(workflowExemptFromJiraAutoTrack('knowledge/feature-planning-v1')).toBe(true);
+    expect(workflowExemptFromJiraAutoTrack('knowledge/prd-draft-v1')).toBe(true);
     for (const id of ['knowledge/web-research-v1', 'coding/new-task-v1', 'coding/new-task-adversarial-v1', 'default/agent-v1', 'not/a-real-v1']) {
       expect(workflowExemptFromJiraAutoTrack(id)).toBe(false);
     }
+  });
+});
+
+describe('knowledge/prd-draft-v1 (#82 PR 3c)', () => {
+  test('is a read-only, repo-optional, non-PR workflow that publishes to Confluence', () => {
+    expect(workflowRequiresRepo('knowledge/prd-draft-v1')).toBe(false);
+    expect(workflowIsReadOnly('knowledge/prd-draft-v1')).toBe(true);
+    expect(workflowUsesPr('knowledge/prd-draft-v1')).toBe(false);
+    expect(workflowPublishesConfluence('knowledge/prd-draft-v1')).toBe(true);
+    expect(resolveWorkflowRef('knowledge/prd-draft-v1')).toEqual({ id: 'knowledge/prd-draft-v1', version: '1.0.0' });
   });
 });
 

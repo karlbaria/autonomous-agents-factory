@@ -134,9 +134,11 @@ class Deliverer:
     # satisfies ``terminal_outcomes.primary`` on its own (Task 14, issue #57).
     publishes_confluence: bool = False
     # What kind of Confluence page it publishes: a research write-up (titled by
-    # its H1) or a planning doc (Task 15 (fork), #82: titled by the deliverer,
-    # labelled ``factory-plan``). Only read when ``publishes_confluence``.
-    confluence_kind: Literal["research", "plan"] = "research"
+    # its H1), a technical design (Task 15 (fork), #82: titled by the
+    # deliverer, labelled ``factory-plan``) or a PRD draft (#82 PR 3c: titled
+    # by the deliverer, labelled ``factory-prd``). Only read when
+    # ``publishes_confluence``.
+    confluence_kind: Literal["research", "plan", "prd"] = "research"
 
 
 # First-party deliverers. These three names and their produced-outcome sets match
@@ -162,14 +164,23 @@ DELIVERERS: dict[str, Deliverer] = {
         frozenset({"artifact", "comment"}),
         publishes_confluence=True,
     ),
-    # Same as s3_comment_and_confluence, but the page is a planning doc (Task
-    # 15 (fork), #82): ``Plan: <feature> · <6-char task id>``, with the
-    # factory-plan label. knowledge/feature-planning-v1 uses it.
+    # Same as s3_comment_and_confluence, but the page is a technical design
+    # (Task 15 (fork), #82; renamed from "plan" in PR 3c):
+    # ``Technical design: <feature> · <6-char task id>``, with the factory-plan
+    # label. knowledge/feature-planning-v1 uses it.
     "s3_comment_and_confluence_plan": Deliverer(
         "s3_comment_and_confluence_plan",
         frozenset({"artifact", "comment"}),
         publishes_confluence=True,
         confluence_kind="plan",
+    ),
+    # The same for a PRD draft (#82 PR 3c): ``PRD: <feature> · <6-char task
+    # id>``, with the factory-prd label. knowledge/prd-draft-v1 uses it.
+    "s3_comment_and_confluence_prd": Deliverer(
+        "s3_comment_and_confluence_prd",
+        frozenset({"artifact", "comment"}),
+        publishes_confluence=True,
+        confluence_kind="prd",
     ),
 }
 
@@ -292,25 +303,32 @@ def _fallback_page_title(task_description: str) -> str:
     return f"{_FALLBACK_TITLE_PREFIX}{text}"
 
 
-_PLAN_TITLE_PREFIX = "Plan: "
+_PAGE_TITLE_PREFIXES: dict[str, str] = {"plan": "Technical design: ", "prd": "PRD: "}
 _PLAN_TITLE_ID_CHARS = 6
 _PLAN_FEATURE_MAX_CHARS = 200
+# A prefix the agent may have written itself (``Plan:`` from plans made before
+# #82 PR 3c), and a ``· <6-char id>`` suffix copied into its H1: both are
+# replaced by the deliverer's own.
+_H1_KIND_PREFIX = re.compile(r"^(?:plan|technical\s+design|prd)\s*:\s*", re.IGNORECASE)
+_H1_ID_SUFFIX = re.compile(r"\s*·\s*[A-Za-z0-9]{6}$")
 
 
-def _plan_page_title(markdown: str, task_id: str, task_description: str) -> str:
-    """``Plan: <feature> · <6-char task id>`` for a planning doc (#82).
+def _plan_page_title(
+    markdown: str, task_id: str, task_description: str, kind: Literal["plan", "prd"] = "plan"
+) -> str:
+    """``Technical design: <feature> · <6-char task id>`` (or ``PRD: …``) (#82).
 
-    The feature name is the doc's H1 without its own ``Plan:`` prefix, else the
-    start of the task description. The task-id suffix (the id's last six
-    characters, its random part) keeps two plans for the same feature from
-    sharing a title, so a new plan never lands on an earlier plan's page.
+    The feature name is the doc's H1 without its own kind prefix or id suffix,
+    else the start of the task description. The task-id suffix (the id's last
+    six characters, its random part) keeps two documents for the same feature
+    from sharing a title, so a new one never lands on an earlier one's page.
     Empty when there is no feature name, so ``publish_markdown`` reports
     ``no_title``.
     """
     from confluence.storage import split_title
 
     h1, _ = split_title(markdown)
-    feature = re.sub(r"^plan\s*:\s*", "", h1, flags=re.IGNORECASE).strip()
+    feature = _H1_ID_SUFFIX.sub("", _H1_KIND_PREFIX.sub("", h1)).strip()
     if not feature:
         feature = _fallback_page_title(task_description).removeprefix(_FALLBACK_TITLE_PREFIX)
     if not feature:
@@ -318,10 +336,12 @@ def _plan_page_title(markdown: str, task_id: str, task_description: str) -> str:
     # Room for the prefix and suffix inside Confluence's 255-character title.
     feature = feature[:_PLAN_FEATURE_MAX_CHARS].rstrip()
     suffix = f" · {task_id[-_PLAN_TITLE_ID_CHARS:]}" if task_id else ""
-    return f"{_PLAN_TITLE_PREFIX}{feature}{suffix}"
+    return f"{_PAGE_TITLE_PREFIXES[kind]}{feature}{suffix}"
 
 
-def _publish_confluence(ctx: StepContext, kind: Literal["research", "plan"]) -> ConfluenceOutcome:
+def _publish_confluence(
+    ctx: StepContext, kind: Literal["research", "plan", "prd"]
+) -> ConfluenceOutcome:
     """Publish the deliverable to Confluence; a skip is reported, never raised.
 
     Records the outcome as a ``confluence_published`` / ``confluence_skipped``
@@ -333,13 +353,13 @@ def _publish_confluence(ctx: StepContext, kind: Literal["research", "plan"]) -> 
     from confluence.publish import publish_markdown
 
     text = _artifact_body(ctx).decode("utf-8")
-    if kind == "plan":
+    if kind in ("plan", "prd"):
         outcome = publish_markdown(
             text,
             ctx.config.channel_metadata,
             resolve_token=resolve_confluence_oauth_token,
-            kind="plan",
-            title=_plan_page_title(text, ctx.config.task_id, ctx.config.task_description),
+            kind=kind,
+            title=_plan_page_title(text, ctx.config.task_id, ctx.config.task_description, kind),
         )
     else:
         outcome = publish_markdown(

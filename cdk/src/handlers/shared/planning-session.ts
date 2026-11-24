@@ -18,23 +18,28 @@
  */
 
 /**
- * Planning sessions (Task 15 (fork), #82 PR 3b-1): one row per planning draft
- * delivered to Slack with Approve and Cancel buttons.
+ * Planning sessions (Task 15 (fork), #82 PR 3b-1 and 3c): one row per planning
+ * document delivered to Slack with buttons. Two kinds:
  *
- * The fan-out Slack dispatcher creates the row as it posts "Planning draft
- * ready" and records the posted message ts. The Slack command processor reads
- * it when a button is clicked and moves its state with conditional updates:
+ * - `prd` (PR 3c): "PRD draft ready" with Approve PRD and Cancel.
+ * - `design`: "Technical design ready: N stories, about $X" with Start and
+ *   Cancel (a row without `kind`, from before PR 3c, is a design).
  *
- *   drafted ──Approve/Confirm──▶ approving ──(check done)──▶ drafted
+ * The fan-out Slack dispatcher creates the row as it posts the message and
+ * records the posted message ts. The Slack command processor reads it when a
+ * button is clicked and moves its state with conditional updates:
+ *
+ *   drafted ──Approve PRD/Start/Confirm──▶ approving ──(check done)──▶ drafted
+ *   approving ──(PRD approved, design task created)──▶ approved   (prd only)
  *   drafted ──Cancel──▶ cancelled
  *
  * `approving` is a lease, not a resting state: a click that finds an
- * unexpired lease is told the plan is already being checked, and a lease left
- * behind by a crashed invocation can be taken over once it expires. `filed`
- * is reserved for PR 3b-2.
+ * unexpired lease is told the document is already being checked, and a lease
+ * left behind by a crashed invocation can be taken over once it expires.
+ * `filed` is reserved for PR 3b-2.
  *
- * No message or page text is stored: only references, the state, and a digest
- * of the checked stories while a large-plan confirmation is pending.
+ * No message or page text is stored: only references, the state, and, for a
+ * design, a digest of the story count and cost the latest message showed.
  */
 
 import * as crypto from 'crypto';
@@ -53,8 +58,11 @@ export const PLANNING_SESSION_TTL_SECONDS = SESSION_TTL_DAYS * SECONDS_PER_DAY;
  */
 export const APPROVAL_LEASE_SECONDS = 60;
 
-/** The session states. `filed` is set by PR 3b-2's filing. */
-export type PlanningSessionState = 'drafted' | 'approving' | 'filed' | 'cancelled';
+/** The session states. `approved` ends a PRD session; `filed` is set by PR 3b-2's filing. */
+export type PlanningSessionState = 'drafted' | 'approving' | 'approved' | 'filed' | 'cancelled';
+
+/** Which document a session is for (#82 PR 3c). */
+export type PlanningSessionKind = 'prd' | 'design';
 
 /** A planning-session row. */
 export interface PlanningSession {
@@ -69,10 +77,17 @@ export interface PlanningSession {
   readonly slack_thread_ts?: string;
   readonly slack_message_ts?: string;
   readonly state: PlanningSessionState;
+  /** Absent on rows from before #82 PR 3c, which are designs. */
+  readonly kind?: PlanningSessionKind;
   /** Epoch seconds the current `approving` lease was taken. */
   readonly approving_since?: number;
-  /** Digest of the stories a pending large-plan confirmation covers. */
+  /**
+   * A design's `designNumbersDigest` (plan-parse.ts): the story count and cost the
+   * latest message asked the PM to start with.
+   */
   readonly confirm_digest?: string;
+  /** The design task an approved PRD started. */
+  readonly design_task_id?: string;
   readonly created_at: string;
   /** TTL, epoch seconds. */
   readonly expires_at: number;
@@ -81,11 +96,15 @@ export interface PlanningSession {
 /** What the fan-out dispatcher knows when it creates a session. */
 export type NewPlanningSession = Omit<
   PlanningSession,
-  'state' | 'approving_since' | 'confirm_digest' | 'created_at' | 'expires_at' | 'slack_message_ts'
+  'state' | 'approving_since' | 'created_at' | 'expires_at' | 'slack_message_ts' | 'design_task_id'
 >;
 
-/** The button actions. */
-export type PlanAction = 'approve' | 'cancel' | 'confirm';
+/**
+ * The button actions: `approve` (Approve PRD, or a design's Approve from
+ * before PR 3c), `start` (a design's Start), `confirm` (Start again with new
+ * numbers) and `cancel`.
+ */
+export type PlanAction = 'approve' | 'start' | 'cancel' | 'confirm';
 
 const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
 const SESSION_ID_BYTES = 16;
@@ -94,7 +113,7 @@ const BITS_PER_BASE32_CHAR = 5;
 const BINARY = 2;
 
 /** `plan_<action>:<26-char session id>`, the only action ids the buttons carry. */
-const PLAN_ACTION_ID_PATTERN = /^plan_(approve|cancel|confirm):([a-z2-7]{26})$/;
+const PLAN_ACTION_ID_PATTERN = /^plan_(approve|start|cancel|confirm):([a-z2-7]{26})$/;
 
 /** `/wiki/spaces/<KEY>/pages/<id>` in a published page URL. */
 const PAGE_ID_IN_URL = /\/wiki\/spaces\/[^/]+\/pages\/(\d+)(?:[/?#]|$)/;
@@ -157,7 +176,7 @@ export async function createPlanningSession(
   }));
 }
 
-/** Record the ts of the posted "Planning draft ready" message. */
+/** Record the ts of the posted "PRD draft ready" or "Technical design ready" message. */
 export async function setPlanningSessionMessageTs(
   ddb: DynamoDBDocumentClient,
   tableName: string,
@@ -226,32 +245,67 @@ export async function claimApprovalLease(
 }
 
 /**
- * Give the lease back (state `drafted`), recording or clearing the digest of a
- * pending large-plan confirmation. Only the holder of the lease taken at
- * `leaseSince` can release it.
+ * End an approved PRD's session (state `approved`), recording the design task
+ * it started. Only the holder of the lease taken at `leaseSince` can do it;
+ * returns false when someone took over an expired lease.
+ */
+export async function completePrdApproval(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  sessionId: string,
+  leaseSince: number,
+  designTaskId: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { session_id: sessionId },
+      UpdateExpression: 'SET #state = :approved, design_task_id = :task REMOVE approving_since, confirm_digest',
+      ConditionExpression: '#state = :approving AND approving_since = :since',
+      ExpressionAttributeNames: { '#state': 'state' },
+      ExpressionAttributeValues: {
+        ':approved': 'approved',
+        ':approving': 'approving',
+        ':since': leaseSince,
+        ':task': designTaskId,
+      },
+    }));
+    return true;
+  } catch (err) {
+    if (isConditionalCheckFailed(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Give the lease back (state `drafted`). `confirmDigest` records the digest of
+ * the numbers a design's latest Start message showed; `null` clears it, and
+ * `undefined` leaves it as it was (a failed check doesn't change what the PM
+ * was last asked). Only the holder of the lease taken at `leaseSince` can
+ * release it.
  */
 export async function releaseApprovalLease(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   sessionId: string,
   leaseSince: number,
-  confirmDigest: string | null,
+  confirmDigest?: string | null,
 ): Promise<void> {
-  const setDigest = confirmDigest !== null;
+  let update = 'SET #state = :drafted REMOVE approving_since';
+  if (confirmDigest === null) update = 'SET #state = :drafted REMOVE approving_since, confirm_digest';
+  if (typeof confirmDigest === 'string') update = 'SET #state = :drafted, confirm_digest = :digest REMOVE approving_since';
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
       Key: { session_id: sessionId },
-      UpdateExpression: setDigest
-        ? 'SET #state = :drafted, confirm_digest = :digest REMOVE approving_since'
-        : 'SET #state = :drafted REMOVE approving_since, confirm_digest',
+      UpdateExpression: update,
       ConditionExpression: '#state = :approving AND approving_since = :since',
       ExpressionAttributeNames: { '#state': 'state' },
       ExpressionAttributeValues: {
         ':drafted': 'drafted',
         ':approving': 'approving',
         ':since': leaseSince,
-        ...(setDigest && { ':digest': confirmDigest }),
+        ...(typeof confirmDigest === 'string' && { ':digest': confirmDigest }),
       },
     }));
   } catch (err) {

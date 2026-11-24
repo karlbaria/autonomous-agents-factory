@@ -143,6 +143,7 @@ class TestWhoGetsTheTool:
         [
             "coding/pr-review-v1",
             "knowledge/feature-planning-v1",
+            "knowledge/prd-draft-v1",
             "knowledge/web-research-v1",
             "default/agent-v1",
         ],

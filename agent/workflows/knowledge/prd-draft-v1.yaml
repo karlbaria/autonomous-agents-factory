@@ -1,0 +1,56 @@
+# PRD draft (Task 15 (fork), issue #82, PR 3c): turn a feature idea into a
+# draft PRD in the repo's mapped Confluence space. The PRD is the PM's
+# document: product language only, with product questions the PM answers in
+# the page before clicking Approve PRD, which starts the technical design
+# (knowledge/feature-planning-v1). Strictly read-only, like planning: the agent
+# reads the codebase (a read-only context clone) only to know what the app
+# already does, and writes nothing — no Bash, Write, Edit or WebFetch, no
+# branch, no PR. The platform publishes the agent's final message as the page.
+#
+# Jira is never auto-tracked for this workflow (the CDK descriptor's
+# exemptFromJiraAutoTrack).
+id: knowledge/prd-draft-v1
+version: 1.0.0
+domain: knowledge
+description: >-
+  Draft a product requirements document for a feature idea, informed by what
+  the repo's app already does, and deliver it to S3 and to the repo's mapped
+  Confluence space for the product manager to review.
+guidance: >-
+  Select for "I want to build X" / "plan X" ideas against a repo: the output is
+  a PRD for the product manager, never code or a technical design.
+# Repo-OPTIONAL for the same reason as feature-planning-v1: only a
+# `requires_repo: false` knowledge workflow takes the read-only context-clone
+# path (#61). The Slack path requires a repo.
+requires_repo: false
+read_only: true
+prompt:
+  template: registry://prompt/prd-draft-workflow
+  placeholders: [task_description, memory_context, max_turns]
+hydration:
+  sources: [task_description, attachments, memory]
+agent_config:
+  tier: read-only
+  # Repo context only, as for planning: no WebFetch, so neither the request
+  # nor the repo content can send data out.
+  allowed_tools: [Read, Glob, Grep]
+  cedar_policy_modules: [builtin/hard_deny]
+repo_config:
+  discover: false
+required_inputs:
+  all_of: [task_description]
+# deliver: S3 always; Confluence when the task's repo is mapped, as a PRD page
+# (title `PRD: <feature> · <6-char task id>`, labels factory-generated,
+# factory-draft, factory-prd); the comment milestone leads with the page link
+# or the skip reason.
+steps:
+  - { kind: hydrate_context,  name: context }
+  - { kind: run_agent,        name: draft }
+  - { kind: deliver_artifact, name: deliver, target: s3_comment_and_confluence_prd }
+terminal_outcomes:
+  primary: artifact
+limits:
+  max_turns: 30
+promotion_gate:
+  requires: [tests:agent/prd_draft]
+status: production

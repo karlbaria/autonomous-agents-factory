@@ -90,9 +90,9 @@ export interface FanOutConsumerProps {
   readonly slackSecretArnPattern?: string;
 
   /**
-   * Planning-session table (Task 15 (fork), #82 PR 3b-1). When set, the Slack
-   * dispatcher records a session row as it posts "Planning draft ready" with
-   * Approve/Cancel buttons. PutItem and UpdateItem only.
+   * Planning-session table (Task 15 (fork), #82 PR 3b-1, 3c). When set, the
+   * Slack dispatcher records a session row as it posts "PRD draft ready" or
+   * "Technical design ready" with their buttons. PutItem and UpdateItem only.
    */
   readonly planningSessionTable?: dynamodb.ITable;
 
@@ -244,8 +244,8 @@ export class FanOutConsumer extends Construct {
       }));
     }
 
-    // Planning-session rows (#82 PR 3b-1): created (PutItem) just before the
-    // "Planning draft ready" post, then given the posted message ts
+    // Planning-session rows (#82 PR 3b-1, 3c): created (PutItem) just before
+    // the "PRD draft ready" / "Technical design ready" post, then given the posted message ts
     // (UpdateItem). The dispatcher never reads or deletes them.
     if (props.planningSessionTable) {
       this.fn.addToRolePolicy(new iam.PolicyStatement({

@@ -214,7 +214,7 @@ describe('slack-interactions plan buttons', () => {
     invalidateSlackSecretCache(process.env.SLACK_SIGNING_SECRET_ARN!);
   });
 
-  test.each(['approve', 'cancel', 'confirm'])('plan_%s is handed to the processor asynchronously, with the signed identity', async (action) => {
+  test.each(['approve', 'start', 'cancel', 'confirm'])('plan_%s is handed to the processor asynchronously, with the signed identity', async (action) => {
     const result = await handler(makeInteractionEvent(interactionPayload(`plan_${action}:${SID}`, 'UPM', 'T9')));
 
     expect(result.statusCode).toBe(200);

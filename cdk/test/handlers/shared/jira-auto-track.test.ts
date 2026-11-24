@@ -484,7 +484,7 @@ describe('resolveJiraAutoTrack', () => {
   });
 
   // Task 15 (fork), #82: planning files Jira only on Approve.
-  test('never creates an issue for an exempt planning workflow on an opted-in mapping, and records why', async () => {
+  test.each(['knowledge/feature-planning-v1', 'knowledge/prd-draft-v1'])('never creates an issue for the exempt planning workflow %s on an opted-in mapping, and records why', async (workflowId) => {
     ddbSend.mockResolvedValueOnce({ Items: [{ cloud_id: 'cloud-1', project_key: 'SHOP' }] });
     ddbSend.mockResolvedValueOnce({});
     global.fetch = jest.fn() as unknown as typeof fetch;
@@ -493,7 +493,7 @@ describe('resolveJiraAutoTrack', () => {
       ...BASE_PARAMS,
       repo: 'karlbaria/factory-shop',
       channelSource: 'slack',
-      workflowId: 'knowledge/feature-planning-v1',
+      workflowId,
     });
 
     expect(result).toEqual({ channelMetadata: BASE_PARAMS.channelMetadata });
@@ -506,7 +506,7 @@ describe('resolveJiraAutoTrack', () => {
       metadata: {
         jira_project_key: 'SHOP',
         reason: 'workflow_exempt',
-        workflow_id: 'knowledge/feature-planning-v1',
+        workflow_id: workflowId,
       },
     });
   });

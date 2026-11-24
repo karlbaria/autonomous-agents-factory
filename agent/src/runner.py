@@ -361,6 +361,7 @@ _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
         "default/agent-v1",
         "knowledge/web-research-v1",
         "knowledge/feature-planning-v1",
+        "knowledge/prd-draft-v1",
     )
 )
 # Merge gate (#82 PR 3a): workflows that do NOT get the flag_concern tool —
@@ -375,6 +376,7 @@ _NO_FLAG_CONCERN_WORKFLOW_IDS = frozenset(
         "default/agent-v1",
         "knowledge/web-research-v1",
         "knowledge/feature-planning-v1",
+        "knowledge/prd-draft-v1",
     )
 )
 

@@ -37,12 +37,24 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
   GetSecretValueCommand: jest.fn((input: unknown) => ({ _type: 'GetSecretValue', input })),
 }));
 
+// #82 PR 3c: the dispatcher reads a delivered design page for its story count.
+const readPlanPageMock = jest.fn();
+jest.mock('../../src/handlers/shared/confluence-page', () => ({
+  ...jest.requireActual('../../src/handlers/shared/confluence-page'),
+  readPlanPage: (...args: unknown[]) => readPlanPageMock(...args),
+}));
+const lookupRepoMock = jest.fn();
+jest.mock('../../src/handlers/shared/repo-config', () => ({
+  lookupRepo: (...args: unknown[]) => lookupRepoMock(...args),
+}));
+
 const fetchMock = jest.fn();
 (global as unknown as { fetch: unknown }).fetch = fetchMock;
 
 process.env.TASK_TABLE_NAME = 'Tasks';
 
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { designNumbersDigest } from '../../src/handlers/shared/plan-parse';
 import { dispatchSlackEvent, SlackApiError, type SlackDispatchEvent } from '../../src/handlers/slack-notify';
 
 const ddb = ddbClient as unknown as DynamoDBDocumentClient;
@@ -774,8 +786,9 @@ describe('dispatchSlackEvent', () => {
   });
 });
 
-// Task 15 (fork), #82 PR 3b-1: a delivered plan gets a planning session and
-// Approve/Cancel buttons.
+// Task 15 (fork), #82 PR 3b-1 and 3c: a delivered design gets its numbers, a
+// planning session and Start/Cancel; a delivered PRD a session and Approve
+// PRD/Cancel.
 describe('dispatchSlackEvent — planning sessions', () => {
   const PAGE_URL = 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015867/Plan+Wishlist';
 
@@ -814,11 +827,26 @@ describe('dispatchSlackEvent — planning sessions', () => {
     smSend.mockReset().mockResolvedValue({ SecretString: 'xoxb-test' });
     fetchMock.mockReset().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, ts: '222.2' }) });
     process.env.PLANNING_SESSION_TABLE_NAME = 'Sessions';
+    lookupRepoMock.mockReset().mockResolvedValue({ onboarded: true, config: MAPPING });
+    readPlanPageMock.mockReset().mockResolvedValue(designPage(3));
   });
 
   afterAll(() => {
     delete process.env.PLANNING_SESSION_TABLE_NAME;
   });
+
+  const MAPPING = { repo: 'karlbaria/factory-shop', confluence_cloud_id: 'cloud-1', confluence_space_key: 'SD' };
+
+  function designPage(stories: number): Record<string, unknown> {
+    const body = Array.from({ length: stories }, (_, i) => `<h3>S${i + 1}: Story</h3><p>Blocked by: none</p>`
+      + '<p><strong>Acceptance criteria</strong></p><ul><li>ok</li></ul>').join('');
+    return { ok: true, title: 'Technical design: Wishlist', version: 1, storage: `<h2>Stories</h2>${body}` };
+  }
+
+  function postedText(): string {
+    const post = fetchMock.mock.calls.find((c) => String(c[0]).endsWith('chat.postMessage'));
+    return JSON.parse(post![1].body).text as string;
+  }
 
   test('writes the session before posting, puts only its id on the buttons, then records the message ts', async () => {
     ddbSend.mockResolvedValueOnce({ Item: planningTask() }).mockResolvedValue({});
@@ -837,18 +865,57 @@ describe('dispatchSlackEvent — planning sessions', () => {
       slack_channel_id: 'C1',
       slack_thread_ts: '111.1',
       state: 'drafted',
+      kind: 'design',
+      confirm_digest: designNumbersDigest(3),
     });
     expect(Object.keys(put.Item).sort()).toEqual([
-      'created_at', 'expires_at', 'page_id', 'platform_user_id', 'repo', 'session_id', 'slack_channel_id',
-      'slack_team_id', 'slack_thread_ts', 'slack_user_id', 'state', 'task_id',
+      'confirm_digest', 'created_at', 'expires_at', 'kind', 'page_id', 'platform_user_id', 'repo', 'session_id',
+      'slack_channel_id', 'slack_team_id', 'slack_thread_ts', 'slack_user_id', 'state', 'task_id',
     ]);
     const sid = put.Item.session_id as string;
-    expect(planActionIds()).toEqual([`plan_approve:${sid}`, `plan_cancel:${sid}`]);
+    expect(planActionIds()).toEqual([`plan_start:${sid}`, `plan_cancel:${sid}`]);
 
     const putIndex = ddbSend.mock.calls.findIndex((c) => c[0]._type === 'Put');
     expect(ddbSend.mock.invocationCallOrder[putIndex]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
     const tsUpdate = callsOfType('Update').find((u) => u.TableName === 'Sessions');
     expect(tsUpdate).toMatchObject({ Key: { session_id: sid }, ExpressionAttributeValues: { ':ts': '222.2' } });
+  });
+
+  test('the design message shows N stories and about $X, parsed from the delivered page', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: planningTask() }).mockResolvedValue({});
+    readPlanPageMock.mockResolvedValueOnce(designPage(4));
+
+    await dispatchSlackEvent(mkEvent('t-plan', 'task_completed'), ddb);
+
+    expect(lookupRepoMock).toHaveBeenCalledWith('karlbaria/factory-shop');
+    expect(readPlanPageMock).toHaveBeenCalledWith('1015867', MAPPING, { kind: 'design' });
+    expect(postedText()).toBe('Technical design ready: 4 stories, about $2.00 for karlbaria/factory-shop');
+    expect(callsOfType('Put')[0].Item.confirm_digest).toBe(designNumbersDigest(4));
+  });
+
+  test('an unreadable design page is still announced with Start, without the numbers or a digest', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: planningTask() }).mockResolvedValue({});
+    readPlanPageMock.mockResolvedValueOnce({ ok: false, reason: 'unreadable', message: 'x' });
+
+    await dispatchSlackEvent(mkEvent('t-plan', 'task_completed'), ddb);
+
+    expect(postedText()).toBe('Technical design ready for karlbaria/factory-shop');
+    const [put] = callsOfType('Put');
+    expect(put.Item.confirm_digest).toBeUndefined();
+    expect(planActionIds()).toEqual([`plan_start:${put.Item.session_id}`, `plan_cancel:${put.Item.session_id}`]);
+  });
+
+  test('a delivered PRD gets a prd session and Approve PRD, and its page is not read', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: planningTask({ resolved_workflow: { id: 'knowledge/prd-draft-v1' } }) }).mockResolvedValue({});
+
+    await dispatchSlackEvent(mkEvent('t-plan', 'task_completed'), ddb);
+
+    const [put] = callsOfType('Put');
+    expect(put.Item).toMatchObject({ kind: 'prd', page_id: '1015867', state: 'drafted' });
+    expect(put.Item.confirm_digest).toBeUndefined();
+    expect(readPlanPageMock).not.toHaveBeenCalled();
+    expect(postedText()).toBe('PRD draft ready for karlbaria/factory-shop');
+    expect(planActionIds()).toEqual([`plan_approve:${put.Item.session_id}`, `plan_cancel:${put.Item.session_id}`]);
   });
 
   test('a failed session write still announces the plan, without buttons', async () => {
@@ -861,7 +928,7 @@ describe('dispatchSlackEvent — planning sessions', () => {
     await dispatchSlackEvent(mkEvent('t-plan', 'task_completed'), ddb);
 
     expect(fetchMock).toHaveBeenCalled();
-    expect(JSON.stringify(postedBlocks())).toContain('Planning draft ready');
+    expect(JSON.stringify(postedBlocks())).toContain('Technical design ready');
     expect(planActionIds()).toEqual([]);
   });
 

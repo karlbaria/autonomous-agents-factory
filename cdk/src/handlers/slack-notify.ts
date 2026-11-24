@@ -51,17 +51,21 @@ import { type DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk
 // so importing the type back creates no runtime cycle. ``import type``
 // is erased after compile, so the bundler sees a one-way dep.
 import type { FanOutEvent } from './fanout-task-events';
+import { readPlanPage } from './shared/confluence-page';
 import { logger } from './shared/logger';
+import { designNumbersDigest, estimatedPlanCostUsd, parsePlan, PLAN_PAGE_MAX_CHARS, planStorageToText } from './shared/plan-parse';
 import {
   createPlanningSession,
   newPlanningSessionId,
   pageIdFromPageUrl,
   setPlanningSessionMessageTs,
+  type PlanningSessionKind,
 } from './shared/planning-session';
+import { lookupRepo } from './shared/repo-config';
 import { renderSlackBlocks } from './shared/slack-blocks';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { TaskRecord } from './shared/types';
-import { FEATURE_PLANNING_WORKFLOW_ID } from './shared/workflows';
+import { FEATURE_PLANNING_WORKFLOW_ID, PRD_DRAFT_WORKFLOW_ID } from './shared/workflows';
 
 /** Terminal event types the Slack dispatcher dedups on. Stored in
  *  ``channel_metadata.slack_notified_terminal`` via a conditional write
@@ -298,21 +302,19 @@ export async function dispatchSlackEvent(
   // ``metadata: { S: ... }`` shape itself from the raw stream record.
   const eventMetadata = event.metadata;
 
-  // Task 15 (fork), #82 PR 3b-1: a delivered plan gets Approve/Cancel buttons
-  // backed by a planning-session row. Best-effort: if the row can't be written
-  // the plan is still announced, just without buttons. Throwing here would
-  // lose the message entirely, because the terminal dedup above has already
+  // Task 15 (fork), #82 PR 3b-1 and 3c: a delivered PRD gets Approve PRD and
+  // Cancel, a delivered technical design its story count and cost with Start
+  // and Cancel, backed by a planning-session row. Best-effort: if the page
+  // can't be read or the row can't be written the document is still
+  // announced, without the numbers or the buttons. Throwing here would lose
+  // the message entirely, because the terminal dedup above has already
   // claimed it.
-  const planningSessionId = eventType === 'task_completed'
-    ? await createPlanningSessionFor(ddb, task)
-    : undefined;
+  const planning = eventType === 'task_completed'
+    ? await preparePlanningDelivery(ddb, task)
+    : {};
+  const planningSessionId = planning.planningSessionId;
 
-  const message = renderSlackBlocks(
-    eventType,
-    task,
-    eventMetadata,
-    planningSessionId ? { planningSessionId } : {},
-  );
+  const message = renderSlackBlocks(eventType, task, eventMetadata, planning);
 
   const threadTs = channelMeta.slack_thread_ts;
 
@@ -560,15 +562,97 @@ const EVENT_REACTIONS: Record<string, string> = {
 /** Reactions to remove when transitioning to a new state. */
 const STALE_REACTIONS = ['eyes', 'hourglass_flowing_sand'];
 
+/** The planning document a workflow delivers (#82), if any. */
+function planningKindOf(task: TaskRecord): PlanningSessionKind | null {
+  switch (task.resolved_workflow?.id) {
+    case PRD_DRAFT_WORKFLOW_ID:
+      return 'prd';
+    case FEATURE_PLANNING_WORKFLOW_ID:
+      return 'design';
+    default:
+      return null;
+  }
+}
+
+/** What a planning task's completion message carries. */
+interface PlanningDelivery {
+  readonly planningSessionId?: string;
+  readonly designStoryCount?: number;
+  readonly designCostUsd?: number;
+}
+
 /**
- * Create the planning session for a planning task's completion, when the plan
- * was published and the requester is known. Returns the session id, or
- * undefined when there is no session (any other task, a skipped page, no
- * table configured, or a failed write).
+ * The story count of a delivered design (#82 PR 3c), read from the page as
+ * published, for the "Technical design ready: N stories, about $X" message.
+ * Undefined when the page can't be read or used; never throws.
+ */
+async function readDesignStoryCount(task: TaskRecord, repo: string, pageId: string): Promise<number | undefined> {
+  try {
+    const { config } = await lookupRepo(repo);
+    const page = await readPlanPage(pageId, config, { kind: 'design' });
+    if (!page.ok) {
+      logger.warn('[fanout/slack] could not read the design page; posting without the numbers', {
+        event: 'fanout.slack.design_page_unreadable',
+        task_id: task.task_id,
+        reason: page.reason,
+      });
+      return undefined;
+    }
+    const text = planStorageToText(page.storage);
+    if (text.length > PLAN_PAGE_MAX_CHARS) return undefined;
+    return parsePlan(text).stories.length;
+  } catch (err) {
+    logger.warn('[fanout/slack] design page read failed; posting without the numbers', {
+      event: 'fanout.slack.design_page_read_failed',
+      task_id: task.task_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return undefined; // nosemgrep: ts-silent-success-masking -- no count means the design is announced without the numbers (logged), and Start then asks with them
+  }
+}
+
+/**
+ * Prepare a planning task's completion: for a design, the story count and
+ * cost; for both kinds, the planning session behind the buttons, when the
+ * page was published and the requester is known. Returns an empty object for
+ * any other task.
+ */
+async function preparePlanningDelivery(ddb: DynamoDBDocumentClient, task: TaskRecord): Promise<PlanningDelivery> {
+  const kind = planningKindOf(task);
+  const repo = task.repo;
+  if (!kind || task.confluence_status !== 'published' || !repo) return {};
+  const pageId = pageIdFromPageUrl(task.confluence_page_url);
+  if (!pageId) {
+    logger.warn('[fanout/slack] planning page URL has no page id; posting without buttons', {
+      event: 'fanout.slack.planning_no_page_id',
+      task_id: task.task_id,
+    });
+    return {};
+  }
+  const storyCount = kind === 'design' ? await readDesignStoryCount(task, repo, pageId) : undefined;
+  const numbers = storyCount === undefined
+    ? {}
+    : { designStoryCount: storyCount, designCostUsd: estimatedPlanCostUsd(storyCount) };
+  const planningSessionId = await createPlanningSessionFor(ddb, task, { kind, repo, pageId, storyCount });
+  return { ...numbers, ...(planningSessionId && { planningSessionId }) };
+}
+
+/**
+ * Create the planning session for a planning task's completion, when the
+ * requester is known. A design's session records the digest of the numbers
+ * its message shows, so Start can tell whether they changed. Returns the
+ * session id, or undefined when there is no session (no table configured, an
+ * unknown requester, or a failed write).
  */
 async function createPlanningSessionFor(
   ddb: DynamoDBDocumentClient,
   task: TaskRecord,
+  { kind, repo, pageId, storyCount }: {
+    readonly kind: PlanningSessionKind;
+    readonly repo: string;
+    readonly pageId: string;
+    readonly storyCount: number | undefined;
+  },
 ): Promise<string | undefined> {
   const tableName = process.env.PLANNING_SESSION_TABLE_NAME;
   const meta = task.channel_metadata;
@@ -576,24 +660,7 @@ async function createPlanningSessionFor(
   const channelId = meta?.slack_channel_id;
   const userId = meta?.slack_user_id;
   const threadTs = meta?.slack_thread_ts;
-  if (
-    !tableName
-    || task.resolved_workflow?.id !== FEATURE_PLANNING_WORKFLOW_ID
-    || task.confluence_status !== 'published'
-    || !teamId
-    || !channelId
-    || !userId
-    || !task.user_id
-    || !task.repo
-  ) {
-    return undefined;
-  }
-  const pageId = pageIdFromPageUrl(task.confluence_page_url);
-  if (!pageId) {
-    logger.warn('[fanout/slack] planning page URL has no page id; posting without buttons', {
-      event: 'fanout.slack.planning_no_page_id',
-      task_id: task.task_id,
-    });
+  if (!tableName || !teamId || !channelId || !userId || !task.user_id) {
     return undefined;
   }
   const sessionId = newPlanningSessionId();
@@ -601,13 +668,15 @@ async function createPlanningSessionFor(
     await createPlanningSession(ddb, tableName, {
       session_id: sessionId,
       task_id: task.task_id,
-      repo: task.repo,
+      repo,
       page_id: pageId,
+      kind,
       slack_team_id: teamId,
       slack_user_id: userId,
       platform_user_id: task.user_id,
       slack_channel_id: channelId,
       ...(threadTs && { slack_thread_ts: threadTs }),
+      ...(storyCount !== undefined && { confirm_digest: designNumbersDigest(storyCount) }),
     }, new Date());
     return sessionId;
   } catch (err) {
@@ -616,7 +685,7 @@ async function createPlanningSessionFor(
       task_id: task.task_id,
       error: err instanceof Error ? err.message : String(err),
     });
-    return undefined; // nosemgrep: ts-silent-success-masking -- no session means the plan is posted without buttons (logged); throwing would lose the message after the terminal dedup claim
+    return undefined; // nosemgrep: ts-silent-success-masking -- no session means the document is posted without buttons (logged); throwing would lose the message after the terminal dedup claim
   }
 }
 

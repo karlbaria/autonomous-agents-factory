@@ -207,13 +207,32 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     publishesConfluence: true,
     exemptFromJiraAutoTrack: true,
   },
+  // #82 PR 3c: the PM's PRD draft, read-only like planning (Read, Glob,
+  // Grep). Approve PRD starts feature-planning-v1 from it; Jira is never
+  // auto-tracked.
+  'knowledge/prd-draft-v1': {
+    id: 'knowledge/prd-draft-v1',
+    version: '1.0.0',
+    requiresRepo: false,
+    readOnly: true,
+    requiredInputs: { allOf: ['task_description'] },
+    // deliver target s3_comment_and_confluence_prd.
+    publishesConfluence: true,
+    exemptFromJiraAutoTrack: true,
+  },
 };
 
 /** The research workflow Slack's `research …` intent routes to (Task 15 (fork), #82). */
 export const RESEARCH_WORKFLOW_ID = 'knowledge/web-research-v1';
 
-/** The planning workflow Slack's `i want to build …` / `plan …` intent routes to (#82). */
+/**
+ * The technical-design workflow (#82): `plan from <url>` routes to it, and
+ * Approve PRD starts it from an approved PRD (PR 3c).
+ */
 export const FEATURE_PLANNING_WORKFLOW_ID = 'knowledge/feature-planning-v1';
+
+/** The PRD draft workflow Slack's `i want to build …` / `plan …` intent routes to (#82 PR 3c). */
+export const PRD_DRAFT_WORKFLOW_ID = 'knowledge/prd-draft-v1';
 
 /** The platform default workflow — the last rung of the resolution ladder. */
 export const DEFAULT_WORKFLOW_ID = 'default/agent-v1';
@@ -252,7 +271,7 @@ export function resolveChannelDefaultWorkflow(repoConfig: { default_workflow?: s
 // ``TypeError: Cannot read properties of undefined (reading 'id')`` inside the
 // Lambda on the first affected task; TypeScript's ``Record<string, …>`` index
 // type will not catch it (N2).
-for (const requiredId of [DEFAULT_WORKFLOW_ID, CODING_WORKFLOW_ID, RESEARCH_WORKFLOW_ID, FEATURE_PLANNING_WORKFLOW_ID]) {
+for (const requiredId of [DEFAULT_WORKFLOW_ID, CODING_WORKFLOW_ID, RESEARCH_WORKFLOW_ID, FEATURE_PLANNING_WORKFLOW_ID, PRD_DRAFT_WORKFLOW_ID]) {
   if (!DESCRIPTORS[requiredId]) {
     throw new Error(`Workflow descriptor "${requiredId}" is missing from DESCRIPTORS`);
   }

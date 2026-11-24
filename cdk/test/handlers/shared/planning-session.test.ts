@@ -22,6 +22,7 @@ import {
   APPROVAL_LEASE_SECONDS,
   cancelPlanningSession,
   claimApprovalLease,
+  completePrdApproval,
   createPlanningSession,
   getPlanningSession,
   newPlanningSessionId,
@@ -51,7 +52,7 @@ describe('ids', () => {
 
   test('action ids round-trip', () => {
     const id = newPlanningSessionId();
-    for (const action of ['approve', 'cancel', 'confirm'] as const) {
+    for (const action of ['approve', 'start', 'cancel', 'confirm'] as const) {
       expect(parsePlanActionId(planActionId(action, id))).toEqual({ action, sessionId: id });
     }
   });
@@ -161,6 +162,28 @@ describe('the approval lease', () => {
   test('a release after a takeover is a no-op', async () => {
     send.mockRejectedValueOnce(conditionFailed);
     await expect(releaseApprovalLease(ddb, 'Sessions', 's', 1000, null)).resolves.toBeUndefined();
+  });
+
+  test('release without a digest leaves the recorded one alone (#82 PR 3c)', async () => {
+    await releaseApprovalLease(ddb, 'Sessions', 's', 1000);
+    expect(lastInput().UpdateExpression).toBe('SET #state = :drafted REMOVE approving_since');
+    expect(lastInput().ExpressionAttributeValues[':digest']).toBeUndefined();
+  });
+});
+
+describe('completePrdApproval (#82 PR 3c)', () => {
+  test('moves the lease holder to approved and records the design task', async () => {
+    expect(await completePrdApproval(ddb, 'Sessions', 's', 1000, 'task-design')).toBe(true);
+    expect(lastInput().ConditionExpression).toBe('#state = :approving AND approving_since = :since');
+    expect(lastInput().UpdateExpression).toBe('SET #state = :approved, design_task_id = :task REMOVE approving_since, confirm_digest');
+    expect(lastInput().ExpressionAttributeValues).toMatchObject({ ':approved': 'approved', ':since': 1000, ':task': 'task-design' });
+  });
+
+  test('returns false after a takeover, and rethrows anything else', async () => {
+    send.mockRejectedValueOnce(conditionFailed);
+    expect(await completePrdApproval(ddb, 'Sessions', 's', 1000, 't')).toBe(false);
+    send.mockRejectedValueOnce(new Error('throttled'));
+    await expect(completePrdApproval(ddb, 'Sessions', 's', 1000, 't')).rejects.toThrow('throttled');
   });
 });
 
