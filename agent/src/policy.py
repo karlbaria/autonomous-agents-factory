@@ -157,6 +157,8 @@ PLATFORM_TOOLS: frozenset[str] = frozenset(
         "TodoWrite",
         # The runner's clarify-before-spend tool (clarification_tool.py).
         "mcp__abca__request_clarification",
+        # The runner's merge-gate tool (clarification_tool.py, #82 PR 3a).
+        "mcp__abca__flag_concern",
         # The AgentCore Gateway's read-only repo-config tool (gateway_tools.py).
         "mcp__abca_gateway__repo_config",
     }

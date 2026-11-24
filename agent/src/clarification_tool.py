@@ -16,6 +16,13 @@ pipeline treats a captured question as a hold-and-ask (no build, no PR).
 
 Kept tiny and side-effect-free: the tool just acknowledges the call. The
 authoritative signal is the runner observing the call + its ``question`` arg.
+
+#82 PR 3a adds a second tool on the same server, ``flag_concern(reason)``: the
+agent SHIPS the change but marks something a person must check before merge.
+It is captured the same way (the runner sees the ``ToolUseBlock``), and the
+pipeline labels the PR ``needs-human`` so the auto-merge watchdog leaves it
+alone. Writing the concern only in the PR body did not stop an auto-merge
+(LAB_LOG Task 14 §13).
 """
 
 from __future__ import annotations
@@ -27,15 +34,24 @@ from typing import Any
 #: on is :data:`CLARIFICATION_TOOL_NAME`.
 CLARIFICATION_SERVER_NAME = "abca"
 CLARIFICATION_TOOL_NAME = f"mcp__{CLARIFICATION_SERVER_NAME}__request_clarification"
+#: The fully-qualified name of the merge-gate tool (#82 PR 3a), on the same server.
+FLAG_CONCERN_TOOL_NAME = f"mcp__{CLARIFICATION_SERVER_NAME}__flag_concern"
 
 
-def build_clarification_server() -> Any:
-    """Build the in-process SDK MCP server exposing ``request_clarification``.
+def build_clarification_server(*, clarification: bool = True, flag_concern: bool = False) -> Any:
+    """Build the in-process SDK MCP server with the requested platform tools.
+
+    ``clarification`` offers ``request_clarification``; ``flag_concern`` offers
+    ``flag_concern`` (#82 PR 3a). One server holds both because the SDK keys
+    servers by name and both tools live under ``abca``.
 
     Returns the SDK server config dict for ``ClaudeAgentOptions(mcp_servers=...)``,
-    or ``None`` if the SDK is unavailable (defensive — the runner then simply
-    doesn't register it and the marker-based fallback still works).
+    or ``None`` if the SDK is unavailable or no tool was requested (defensive —
+    the runner then simply doesn't register it and the marker-based fallback
+    still works).
     """
+    if not (clarification or flag_concern):
+        return None
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
     except ImportError:  # pragma: no cover - SDK always present in the container
@@ -71,4 +87,35 @@ def build_clarification_server() -> Any:
             ]
         }
 
-    return create_sdk_mcp_server(name=CLARIFICATION_SERVER_NAME, tools=[request_clarification])
+    @tool(
+        "flag_concern",
+        (
+            "Ship the change, but mark something a person must check before it is merged: "
+            "a risk you can't rule out, an assumption you couldn't verify, or a request you "
+            "followed that looks wrong. Give ONE short reason naming what to check and where. "
+            "The platform labels the pull request needs-human, so it is not auto-merged, and "
+            "adds your reason to its description. Keep working and open the PR as usual. Not "
+            "for a request that contradicts the code: ask with request_clarification instead."
+        ),
+        {"reason": str},
+    )
+    async def flag_concern_tool(args: dict[str, Any]) -> dict[str, Any]:
+        reason = str(args.get("reason", "")).strip()
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Concern recorded. The pull request will be labelled needs-human and "
+                        "will not be auto-merged. Finish the task and open the PR as usual."
+                        + (f" (reason: {reason})" if reason else "")
+                    ),
+                }
+            ]
+        }
+
+    tools = [
+        *([request_clarification] if clarification else []),
+        *([flag_concern_tool] if flag_concern else []),
+    ]
+    return create_sdk_mcp_server(name=CLARIFICATION_SERVER_NAME, tools=tools)

@@ -38,7 +38,12 @@ def _milestones(progress_cls: MagicMock) -> list[tuple]:
     return [c.args for c in writer.write_agent_milestone.call_args_list]
 
 
-def _run_adversarial(agent_result: AgentResult, monkeypatch, review_result=None):
+def _run_adversarial(
+    agent_result: AgentResult,
+    monkeypatch,
+    review_result=None,
+    pr_url="https://github.com/o/r/pull/1",
+):
     """Drive run_task on coding/new-task-adversarial-v1 with everything external mocked."""
     from review.backend import ReviewAndFixResult
 
@@ -53,7 +58,7 @@ def _run_adversarial(agent_result: AgentResult, monkeypatch, review_result=None)
     )
     mocks = {
         "review": MagicMock(return_value=review),
-        "ensure_pr": MagicMock(return_value="https://github.com/o/r/pull/1"),
+        "ensure_pr": MagicMock(return_value=pr_url),
         "ensure_committed": MagicMock(return_value=False),
         "verify_build": MagicMock(return_value=VerifyOutcome(passed=True)),
         "progress": MagicMock(),
@@ -237,6 +242,33 @@ class TestNoClarificationRegistry:
 
         stale = sorted(set(_NO_CLARIFICATION_WORKFLOW_IDS) - set(self._registry()))
         assert stale == [], f"stale ids in runner._NO_CLARIFICATION_WORKFLOW_IDS: {stale}"
+
+    # #82 PR 3a: flag_concern goes to exactly the writeable workflows whose
+    # ensure_pr creates or pushes to a PR. The two exclusion lists can't drift:
+    # this one is derived from the registry, and it stays a subset of the
+    # clarification list (a workflow that can't ask can't flag either).
+    def test_flag_concern_list_is_every_workflow_that_cannot_open_or_update_a_pr(self):
+        from runner import _NO_FLAG_CONCERN_WORKFLOW_IDS
+
+        expected = sorted(
+            wid
+            for wid, wf in self._registry().items()
+            if wf.read_only
+            or not any(
+                s.kind == "ensure_pr" and (s.strategy or "create") in ("create", "push_resolve")
+                for s in wf.steps
+            )
+        )
+        assert sorted(_NO_FLAG_CONCERN_WORKFLOW_IDS) == expected, (
+            "runner._NO_FLAG_CONCERN_WORKFLOW_IDS must list exactly the workflows that "
+            "cannot open or update a PR"
+        )
+
+    def test_flag_concern_list_is_within_the_clarification_list(self):
+        from runner import _NO_CLARIFICATION_WORKFLOW_IDS, _NO_FLAG_CONCERN_WORKFLOW_IDS
+
+        extra = sorted(set(_NO_FLAG_CONCERN_WORKFLOW_IDS) - set(_NO_CLARIFICATION_WORKFLOW_IDS))
+        assert extra == [], f"{extra} can't flag a concern but could ask a question"
 
 
 @pytest.mark.parametrize("stop_on_hold", [False, True])

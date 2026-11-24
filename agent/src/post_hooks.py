@@ -777,26 +777,102 @@ def post_review_status(repo_dir: str, repo_url: str, review_outcome: dict | None
         )
 
 
-def apply_unresolved_label(repo_dir: str, repo_url: str, pr_url: str) -> None:
-    """Add the ``review:unresolved`` label (Task 5 — ADR-026 (fork)).
+#: Task 5 (ADR-026 (fork)): the adversarial loop shipped a PR still NOT_READY.
+UNRESOLVED_LABEL = "review:unresolved"
+#: #82 PR 3a: the agent called ``flag_concern``; factory-shop's auto-merge
+#: watchdog never merges a PR carrying this label.
+NEEDS_HUMAN_LABEL = "needs-human"
+#: The PR-body heading the ``flag_concern`` reasons go under.
+NEEDS_HUMAN_HEADING = "## ⚠️ Needs a human"
+
+
+def apply_unresolved_label(
+    repo_dir: str, repo_url: str, pr_url: str, label: str = UNRESOLVED_LABEL
+) -> bool:
+    """Add ``label`` to the PR (default ``review:unresolved``, Task 5 — ADR-026 (fork)).
 
     ``on_unresolved: pr_with_warning`` (the default) still ships the PR when
     the adversarial loop exhausts ``max_iterations`` still NOT_READY — this
-    is the warning. Best-effort and non-fatal, same as the other PR-body
-    cosmetic steps: the PR itself must not be lost over a label.
+    is the warning. #82 PR 3a reuses it for ``needs-human``. Best-effort and
+    non-fatal, same as the other PR-body cosmetic steps: the PR itself must
+    not be lost over a label. Returns whether the label was applied.
     """
     result = run_cmd(
-        ["gh", "pr", "edit", pr_url, "--repo", repo_url, "--add-label", "review:unresolved"],
-        label="apply-unresolved-label",
+        ["gh", "pr", "edit", pr_url, "--repo", repo_url, "--add-label", label],
+        label="apply-unresolved-label" if label == UNRESOLVED_LABEL else "apply-label",
         cwd=repo_dir,
         check=False,
     )
     if result.returncode != 0:
         log(
             "WARN",
-            f"failed to add review:unresolved label to {pr_url} (non-fatal, rc="
+            f"failed to add {label} label to {pr_url} (non-fatal, rc="
             f"{result.returncode}): {result.stderr.strip() if result.stderr else '(no stderr)'}",
         )
+        return False
+    return True
+
+
+def needs_human_section(reason: str) -> str:
+    """The PR-body section for the ``flag_concern`` reason(s), one bullet each."""
+    lines = [line.strip() for line in reason.splitlines() if line.strip()]
+    bullets = "\n".join(f"- {line}" for line in lines) or "- (no reason given)"
+    return (
+        f"{NEEDS_HUMAN_HEADING}\n\n"
+        "The agent flagged this for a person to check before merge, so the PR is "
+        f"labelled `{NEEDS_HUMAN_LABEL}` and won't be auto-merged. Remove the label "
+        "once it's checked.\n\n"
+        f"{bullets}"
+    )
+
+
+def flag_pr_for_human(repo_dir: str, repo_url: str, pr_url: str, reason: str) -> str:
+    """Hold a PR for a person (#82 PR 3a): label it ``needs-human`` and say why.
+
+    The label is the merge gate, so a failure to apply it is not left there:
+    when ``gh pr edit --add-label`` fails (typically because the label does not
+    exist in the repo yet), the label is created and applied again; if that
+    fails too, the PR is converted to a draft, which cannot be merged either.
+    The reason is then appended to the PR body under :data:`NEEDS_HUMAN_HEADING`.
+
+    Returns how the PR is held: ``"labelled"``, ``"draft"`` or ``"unheld"``
+    (every step failed; logged as an error).
+    """
+    held = "labelled"
+    if not apply_unresolved_label(repo_dir, repo_url, pr_url, label=NEEDS_HUMAN_LABEL):
+        run_cmd(
+            [
+                "gh",
+                "label",
+                "create",
+                NEEDS_HUMAN_LABEL,
+                "--repo",
+                repo_url,
+                "--force",
+                "--color",
+                "B60205",
+                "--description",
+                "Flagged by the factory agent: a person must check before merge",
+            ],
+            label="create-needs-human-label",
+            cwd=repo_dir,
+            check=False,
+        )
+        if not apply_unresolved_label(repo_dir, repo_url, pr_url, label=NEEDS_HUMAN_LABEL):
+            draft = run_cmd(
+                ["gh", "pr", "ready", pr_url, "--repo", repo_url, "--undo"],
+                label="draft-flagged-pr",
+                cwd=repo_dir,
+                check=False,
+            )
+            held = "draft" if draft.returncode == 0 else "unheld"
+            log(
+                "ERROR" if held == "unheld" else "WARN",
+                f"could not label {pr_url} {NEEDS_HUMAN_LABEL}; "
+                + ("converted it to a draft instead" if held == "draft" else "it is NOT held"),
+            )
+    _append_pr_appendix(repo_dir, repo_url, pr_url, needs_human_section(reason))
+    return held
 
 
 def _append_pr_appendix(repo_dir: str, repo_url: str, pr_url: str, appendix: str) -> None:
