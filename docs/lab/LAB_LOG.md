@@ -875,3 +875,25 @@ All three were submitted from Slack against `karlbaria/factory-shop`.
 
   Chat shaping and Revise-by-chat are dropped: open questions live in the page, and PMs edit in Confluence. Reasons: Linear agents (@mention in place), Kiro specs (review comments on the document), GitHub Spec Kit (separate entry points, a clarify step), and the Atlassian PRD template (the page is the single source of truth).
 - **Tag.** `known-good-task15-pr3a` at the commit of this entry.
+
+### 8. PR 3b-1: Approve/Cancel with the edited-plan check (#87)
+
+- **What shipped ([#87](https://github.com/karlbaria/autonomous-agents-factory/pull/87)).**
+  - A planning-session table: one new resource, a 7-day TTL, and no message or page text. The fan-out Slack dispatcher writes a row when it posts "Planning draft ready".
+  - Approve and Cancel buttons on that message, carrying only the opaque session id. Only the requester may click; anyone else gets a private "Only the requester can approve this plan." The interactions Lambda hands the click to the Slack command processor asynchronously.
+  - Approve re-reads the current page, so the PM's edits are what get checked. The check flags no stories, a story without acceptance criteria, an unknown or cyclic `Blocked by`, an unanswered open question, more than 15 stories, and an oversized page. Each problem is posted in the thread.
+  - Above 5 stories, Approve first asks for a confirmation with the story count and estimated cost.
+  - Plans now have an "Open questions" section: `### Q<n>: <question>` with an `Answer:` line.
+  - Approve files nothing yet: a passing check says "Check passed — filing arrives in the next update".
+  - IAM: three statements. The fan-out has PutItem and UpdateItem on the session table, the command processor has GetItem and UpdateItem on it, and the interactions Lambda may invoke the command processor.
+  - Census: one inline stress profile (`agentcore-gw1-reg1-vault1-none-email-fork-expanded-models`) re-marked expected-to-fail under decision 6; its `-split` counterpart fits.
+- **Demo results.** All on the plan from task `01M87HQKA1NGEEAP9A6KSXCWRD` (`knowledge/feature-planning-v1`, from [PRD: Wishlist](https://karlvb.atlassian.net/wiki/spaces/SD/pages/1048580/PRD+Wishlist)): COMPLETED in 57 s, $0.24. It published [Plan: Wishlist (Save for later) · SXCWRD](https://karlvb.atlassian.net/wiki/spaces/SD/pages/1409025/Plan+Wishlist+Save+for+later+SXCWRD). It is the only planning task since the deploy.
+  - An unanswered open question was listed in the thread and blocked Approve. Once it was answered in Confluence, the check passed.
+  - With the plan at 6 stories, Approve asked for the confirmation, and Confirm passed.
+  - Cancel posted "Plan cancelled. Nothing was filed, and the Confluence page is unchanged."
+  - No Jira cards were created.
+- **Finding.** The open questions read like engineering questions, not PM questions. The plan page mixes requirements, design and tasks.
+- **Next.** Split the questions into "Product questions" and "Technical decisions":
+  - Product questions are for the PM, and an unanswered one blocks Approve.
+  - Technical decisions are made by Jarvis with a reason. The PM can edit them, and they don't block Approve.
+- **Tag.** `known-good-task15-pr3b1` at the commit of this entry.
