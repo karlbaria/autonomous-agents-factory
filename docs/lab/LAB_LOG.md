@@ -920,3 +920,32 @@ All three were submitted from Slack against `karlbaria/factory-shop`.
 - **Finding.** Both page titles carry the id twice: `· AW7G4 · ZAW7G4` and `· FZZXB · 7FZZXB`. The agent wrote a 5-character id into its heading, and the deliverer only strips a 6-character one before adding the real id. Fix: strip any trailing `· <id>` from the heading, or stop asking the prompt for the id.
 - **Deferred.** A named engineer approver for the design: a per-repo setting, so that Start also needs that person's click.
 - **Tag.** `known-good-task15-pr3c` at the commit of this entry.
+
+### 10. Merge path for stacked builds (#89: #90, factory-shop#56)
+
+- **Finding (3b-2 Phase 0).** A multi-story build could never reach `main`.
+  - In a chain, every PR after the first targeted a predecessor branch, which factory-shop's watchdog never sweeps, and nothing retargeted them.
+  - In a fan-out, the first green story merged and left the rest behind `main`.
+  - A `needs-human` story's code could also reach `main` unflagged, through the integration PR.
+  - These problems existed for any Jira epic with subtasks, not just 3b-2.
+- **Fix ([#90](https://github.com/karlbaria/autonomous-agents-factory/pull/90), [factory-shop#56](https://github.com/karlbaria/factory-shop/pull/56)).**
+  - Every orchestration with two or more stories gets an integration node, chains included. It branches off `main` and merges every leaf.
+  - Story PRs are labelled `factory-stacked`, and factory-shop's watchdog never merges them. Only the integration PR reaches `main`.
+  - A child inherits `needs-human` from its base branch's PR or any merged-in predecessor's PR. It fails closed: if those labels can't be read, it is held too.
+  - Running orchestrations are unchanged.
+  - A new agent input, `orchestration_stacked`, is passed in `channel_metadata`.
+  - No IAM or resource changes.
+- **Demo.** A hand-made Epic "Demo #89 chain" with SHOP-44 (S1) and SHOP-45 (S2, blocked by S1), labelled `bgagent`.
+  - S1 ran first and S2 after it. Both story PRs were labelled `factory-stacked` and didn't merge on their own:
+    - S1: [factory-shop#57](https://github.com/karlbaria/factory-shop/pull/57), based on `main`.
+    - S2: [factory-shop#58](https://github.com/karlbaria/factory-shop/pull/58), based on S1's branch.
+  - The integration PR [factory-shop#59](https://github.com/karlbaria/factory-shop/pull/59) auto-merged (merged by the watchdog, 2026-11-25 01:32 UTC). GitHub then marked #57 merged by itself, since its commits were in `main` (same merge commit).
+  - #58 stayed open and was closed by hand.
+  - Jira showed "ABCA orchestration complete" with all three succeeded.
+- **Limits.**
+  - Leftover stacked PRs are closed by hand.
+  - Removing `needs-human` doesn't start a watchdog sweep, so merge by hand.
+  - A story added to a running orchestration reaches `main` only by a human merge.
+  - A `needs-human` label added to a predecessor after a dependent's PR has opened doesn't propagate.
+  - Angle-bracket placeholders in a Jira description (`<number>`) were dropped before reaching the agent: SHOP-45's task text ended with `--port .`. Write placeholders in words.
+- **Tag.** `known-good-task15-merge-path` at the commit of this entry.
