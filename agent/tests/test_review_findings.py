@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from review.findings import parse_review_output
+from review.findings import Finding, ReviewOutcome, enforce_probe_waivers, parse_review_output
+from review.probes import Probe, ProbeResult
 
 
 class TestParseReviewOutputValid:
@@ -227,3 +228,58 @@ class TestParseReviewOutputInvalidProbes:
         out = parse_review_output(text)
         assert out.verdict == "NOT_READY"
         assert out.parse_error is not None
+
+
+def _result(filename: str, *, passed: bool, runnable: bool = True, package_dir: str = ""):
+    probe = Probe(id=filename, intent="i", filename=filename, source="", package_dir=package_dir)
+    return ProbeResult(probe=probe, passed=passed, output="", runnable=runnable)
+
+
+class TestEnforceProbeWaivers:
+    """#97: READY can't stand over a failing probe that wasn't marked invalid."""
+
+    def test_ready_over_an_unwaived_failure_becomes_not_ready(self):
+        outcome = ReviewOutcome(verdict="READY")
+        refused = enforce_probe_waivers(outcome, [_result("test_a.py", passed=False)])
+        assert refused.verdict == "NOT_READY"
+        assert refused.parse_error == (
+            "READY refused: failing probe(s) not marked invalid: `test_a.py`"
+        )
+
+    def test_findings_and_waivers_are_kept(self):
+        finding = Finding(id="finding-1", type="comment", title="t", description="d", evidence="e")
+        outcome = ReviewOutcome(
+            verdict="READY", findings=[finding], invalid_probes={"test_b.py": "out of scope"}
+        )
+        results = [_result("test_a.py", passed=False), _result("test_b.py", passed=False)]
+        refused = enforce_probe_waivers(outcome, results)
+        assert refused.findings == [finding]
+        assert refused.invalid_probes == {"test_b.py": "out of scope"}
+        assert "`test_a.py`" in (refused.parse_error or "")
+        assert "test_b.py" not in (refused.parse_error or "")
+
+    def test_a_waiver_by_bare_filename_counts(self):
+        outcome = ReviewOutcome(verdict="READY", invalid_probes={"x.test.js": "r"})
+        result = _result("x.test.js", passed=False, package_dir="frontend")
+        assert enforce_probe_waivers(outcome, [result]).verdict == "READY"
+
+    def test_a_waiver_by_key_counts(self):
+        outcome = ReviewOutcome(verdict="READY", invalid_probes={"frontend/x.test.js": "r"})
+        result = _result("x.test.js", passed=False, package_dir="frontend")
+        assert enforce_probe_waivers(outcome, [result]).verdict == "READY"
+
+    def test_not_ready_is_unchanged(self):
+        outcome = ReviewOutcome(verdict="NOT_READY")
+        assert enforce_probe_waivers(outcome, [_result("a.py", passed=False)]) is outcome
+
+    def test_a_probe_that_could_not_run_does_not_block(self):
+        outcome = ReviewOutcome(verdict="READY")
+        result = _result("a.test.js", passed=False, runnable=False)
+        assert enforce_probe_waivers(outcome, [result]).verdict == "READY"
+
+    def test_a_waiver_naming_a_passing_or_unknown_probe_waives_nothing(self):
+        outcome = ReviewOutcome(
+            verdict="READY", invalid_probes={"test_ok.py": "r", "test_ghost.py": "r"}
+        )
+        results = [_result("test_ok.py", passed=True), _result("test_a.py", passed=False)]
+        assert enforce_probe_waivers(outcome, results).verdict == "NOT_READY"

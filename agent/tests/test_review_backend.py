@@ -11,7 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 from typing import ClassVar
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -854,3 +854,194 @@ class TestAdversarialInvalidProbeDoesNotBlock:
             "test_out_of_scope.py": "tests behavior the issue never asked for"
         }
         assert len(result.rounds) == 1  # READY — no fixer, no second round
+
+
+_FAILING_SRC = "def test_x():\n    assert False\n"
+_PASSING_SRC = "def test_ok():\n    assert True\n"
+
+
+def _adversarial(config, setup, tmp_path, fake, **kwargs):
+    ledger = AgentInvocationLedger()
+    with patch("runner.run_agent", new=AsyncMock(side_effect=fake)) as mock:
+        result = run_review_and_fix(
+            config=config,
+            setup=setup,
+            ledger=ledger,
+            review_mode="adversarial",
+            workspace_base_dir=str(tmp_path / "workspace"),
+            **kwargs,
+        )
+    return result, mock, ledger
+
+
+def _invalid_block(*names: str) -> str:
+    entries = ", ".join(f'{{"filename": "{n}", "reason": "out of scope"}}' for n in names)
+    return f"INVALID_PROBES:\n```json\n[{entries}]\n```\n"
+
+
+class TestReadyRefusedOverAnUnwaivedFailingProbe:
+    """#97: a failing probe blocks READY unless Call 2 marks it invalid."""
+
+    def _fake(self, probes, reviewer_text, fixer_calls):
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                _probe_writer_fake(_scratch_dir_from_prompt(user_prompt), probes)
+                return AgentResult(status="success", cost_usd=0.01, result_text=_manifest(probes))
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                fixer_calls.append(user_prompt)
+                return AgentResult(status="success", cost_usd=0.01, result_text="Tried.")
+            return AgentResult(status="success", cost_usd=0.01, result_text=reviewer_text)
+
+        return fake
+
+    def test_ready_with_an_unwaived_failure_is_not_ready_and_the_fixer_runs(
+        self, config, setup, tmp_path
+    ):
+        fixer: list[str] = []
+        fake = self._fake({"test_gap.py": _FAILING_SRC}, "VERDICT: READY\n", fixer)
+        result, _, _ = _adversarial(config, setup, tmp_path, fake, max_iterations=2)
+        first = result.rounds[0]
+        assert first.verdict == "NOT_READY"
+        assert first.parse_error == (
+            "READY refused: failing probe(s) not marked invalid: `test_gap.py`"
+        )
+        assert len(fixer) == 1  # the refused READY still runs the fixer
+        # …and the unwaived probe is rerun in round 2.
+        assert "test_gap.py" in {r.probe.filename for r in result.rounds[1].probe_results}
+
+    def test_a_waiver_by_filename_lets_ready_stand(self, config, setup, tmp_path):
+        probes = {"test_gap.py": _FAILING_SRC, "test_ok.py": _PASSING_SRC}
+        text = "VERDICT: READY\nFINDINGS:\n```json\n[]\n```\n" + _invalid_block("test_gap.py")
+        result, _, _ = _adversarial(config, setup, tmp_path, self._fake(probes, text, []))
+        assert result.verdict == "READY"
+        assert result.rounds[0].parse_error is None
+        # A probe passed, so the change was verified: no hold.
+        assert result.no_independent_verification is False
+
+    def test_every_failure_waived_and_none_passing_is_flagged(self, config, setup, tmp_path):
+        probes = {"test_a.py": _FAILING_SRC, "test_b.py": _FAILING_SRC}
+        text = "VERDICT: READY\n" + _invalid_block("test_a.py", "test_b.py")
+        result, _, _ = _adversarial(config, setup, tmp_path, self._fake(probes, text, []))
+        assert result.verdict == "READY"
+        assert result.no_independent_verification is True
+        assert result.invalid_probes == {"test_a.py": "out of scope", "test_b.py": "out of scope"}
+
+    def test_a_partial_waiver_is_refused_and_not_flagged(self, config, setup, tmp_path):
+        probes = {"test_a.py": _FAILING_SRC, "test_b.py": _FAILING_SRC}
+        text = "VERDICT: READY\n" + _invalid_block("test_a.py")
+        result, _, _ = _adversarial(
+            config, setup, tmp_path, self._fake(probes, text, []), max_iterations=1
+        )
+        assert result.verdict == "NOT_READY"
+        assert "`test_b.py`" in (result.parse_error or "")
+        assert result.no_independent_verification is False
+
+    def test_the_round_event_counts_waived_probes(self, config, setup, tmp_path):
+        probes = {"test_a.py": _FAILING_SRC, "test_ok.py": _PASSING_SRC}
+        text = "VERDICT: READY\n" + _invalid_block("test_a.py")
+        progress = MagicMock()
+        ledger = AgentInvocationLedger()
+        with patch("runner.run_agent", new=AsyncMock(side_effect=self._fake(probes, text, []))):
+            run_review_and_fix(
+                config=config,
+                setup=setup,
+                ledger=ledger,
+                progress=progress,
+                review_mode="adversarial",
+                workspace_base_dir=str(tmp_path / "workspace"),
+            )
+        events = {c.args[0]: c.args[1] for c in progress.write_agent_milestone.call_args_list}
+        round_event = events["review_round"]
+        assert "probes_failed=1 probes_invalid=1" in round_event
+
+
+class TestReviewerOutOfTurns:
+    """#98: a reviewer that runs out of turns gets a verdict-only retry."""
+
+    def _fake(self, reviewer_results, calls):
+        async def fake(user_prompt, system_prompt, call_config, cwd=None, trajectory=None):
+            if system_prompt == PROBE_WRITER_SYSTEM_PROMPT:
+                return AgentResult(status="success", cost_usd=0.01, result_text="PROBES:\n")
+            if system_prompt == FIXER_SYSTEM_PROMPT:
+                return AgentResult(status="success", cost_usd=0.01, result_text="Tried.")
+            calls.append((user_prompt, call_config))
+            return reviewer_results[len(calls) - 1]
+
+        return fake
+
+    def test_turn_limit_then_verdict_only_retry(self, config, setup, tmp_path):
+        calls: list = []
+        results = [
+            AgentResult(status="error_max_turns", cost_usd=0.03, num_turns=31),
+            AgentResult(status="success", cost_usd=0.01, result_text="VERDICT: READY\n"),
+        ]
+        result, _, ledger = _adversarial(
+            config, setup, tmp_path, self._fake(results, calls), max_iterations=1
+        )
+        assert result.verdict == "READY"
+        (first_prompt, first_cfg), (retry_prompt, retry_cfg) = calls
+        assert first_cfg.max_turns == 30
+        assert "You have at most 30 turns" in first_prompt
+        assert retry_cfg.max_turns == 2
+        assert retry_cfg.allowed_tools == ["Read", "Glob", "Grep"]  # never [] (unrestricted)
+        assert retry_prompt.startswith(first_prompt)
+        assert "Do not investigate further and do not use any tools" in retry_prompt
+        # Both attempts are billed.
+        reviewer_costs = [r.cost_usd for r in ledger.calls if r.stage == "code_reviewer"]
+        assert reviewer_costs == [0.03, 0.01]
+
+    def test_both_attempts_out_of_turns_names_the_limit(self, config, setup, tmp_path):
+        calls: list = []
+        results = [
+            AgentResult(status="error_max_turns", cost_usd=0.03),
+            AgentResult(status="error_max_turns", cost_usd=0.01),
+        ]
+        result, _, _ = _adversarial(
+            config, setup, tmp_path, self._fake(results, calls), max_iterations=1
+        )
+        assert result.verdict == "NOT_READY"
+        assert result.parse_error == (
+            "reviewer hit the 30-turn limit before writing a verdict; "
+            "reviewer hit the 2-turn limit before writing a verdict"
+        )
+
+    def test_an_empty_final_message_also_gets_the_verdict_only_retry(self, config, setup, tmp_path):
+        calls: list = []
+        results = [
+            AgentResult(status="success", cost_usd=0.03, result_text="  "),
+            AgentResult(status="success", cost_usd=0.01, result_text="VERDICT: NOT-READY\n"),
+        ]
+        result, _, _ = _adversarial(
+            config, setup, tmp_path, self._fake(results, calls), max_iterations=1
+        )
+        assert result.verdict == "NOT_READY"
+        assert result.parse_error is None
+        assert calls[1][1].max_turns == 2
+
+    def test_an_unparseable_answer_still_retries_with_the_full_prompt(
+        self, config, setup, tmp_path
+    ):
+        calls: list = []
+        results = [
+            AgentResult(status="success", cost_usd=0.03, result_text="no verdict here"),
+            AgentResult(status="success", cost_usd=0.01, result_text="VERDICT: READY\n"),
+        ]
+        result, _, _ = _adversarial(
+            config, setup, tmp_path, self._fake(results, calls), max_iterations=1
+        )
+        assert result.verdict == "READY"
+        assert calls[0] == calls[1]  # same prompt, same budget
+
+    def test_reviewer_max_turns_still_overrides_the_default(self, config, setup, tmp_path):
+        calls: list = []
+        results = [AgentResult(status="success", cost_usd=0.01, result_text="VERDICT: READY\n")]
+        _adversarial(
+            config,
+            setup,
+            tmp_path,
+            self._fake(results, calls),
+            max_iterations=1,
+            reviewer_max_turns=12,
+        )
+        assert calls[0][1].max_turns == 12
+        assert "You have at most 12 turns" in calls[0][0]

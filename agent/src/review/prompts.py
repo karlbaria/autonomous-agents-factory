@@ -142,7 +142,9 @@ INVALID_PROBES:
 Omit the INVALID_PROBES: block entirely when every probe is in scope — it \
 is optional, unlike FINDINGS:. Blocking is still your verdict, never a raw \
 probe failure count: a probe you mark invalid here must not be why you \
-wrote NOT-READY.
+wrote NOT-READY. The reverse is checked, not trusted: a READY verdict with \
+a FAILING probe you did not mark invalid is refused and counts as \
+NOT-READY.
 """
 
 FIXER_SYSTEM_PROMPT = """\
@@ -188,12 +190,15 @@ def code_reviewer_user_prompt(
     diff_text: str,
     probe_results: list[ProbeResult],
     block_on_severity: str = "major",
+    max_turns: int | None = None,
 ) -> str:
     """Call 2's task-specific content: requirements, diff, probe results.
 
     ``block_on_severity`` (Task 5 — ADR-026 (fork)) names the floor this task
     uses for NOT-READY: an evidence-backed `issue` finding below that
     severity is informational only, same as a `comment`/`question`.
+    ``max_turns`` (#98) states the call's turn budget, so the reviewer stops
+    investigating in time to write its verdict.
     """
     if probe_results:
         probes_block = "\n".join(
@@ -213,7 +218,31 @@ def code_reviewer_user_prompt(
         "(minor < medium < major < critical), or a failing probe that reflects the "
         "task's actual requirements. A lower-severity issue is informational — report "
         "it, but still write READY if nothing else blocks.\n"
+        + (_turn_budget_block(max_turns) if max_turns else "")
     )
+
+
+def _turn_budget_block(max_turns: int) -> str:
+    stop_by = max(1, max_turns - VERDICT_RESERVED_TURNS)
+    return (
+        f"\n## Turn budget\n\nYou have at most {max_turns} turns, and a call that runs "
+        "out of turns has no verdict at all. Stop investigating by turn "
+        f"{stop_by} and write the VERDICT / FINDINGS / INVALID_PROBES block.\n"
+    )
+
+
+#: Turns kept back for the final message (#98).
+VERDICT_RESERVED_TURNS = 2
+
+#: Appended to the full prompt for the retry after a call that ran out of
+#: turns or wrote no final message (#98).
+VERDICT_ONLY_INSTRUCTION = (
+    "\n## Write your verdict now\n\nAn earlier review of this same change ran out "
+    "of turns before it wrote a verdict. Do not investigate further and do not "
+    "use any tools. Using only the requirements, the diff and the probe results "
+    "above, write the VERDICT / FINDINGS / INVALID_PROBES block now, in exactly "
+    "the form the system prompt gives.\n"
+)
 
 
 def _probe_status(result: ProbeResult) -> str:

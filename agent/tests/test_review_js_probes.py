@@ -378,7 +378,9 @@ class TestBackendWithJsProbes:
 
         result, milestones = self._run(repo, tmp_path, fake, review_mode="adversarial")
         assert milestones["review_probes_run"] == "count=1 passed=0 failed=0 not_runnable=1"
-        assert "probes_failed=0 probes_not_runnable=1" in milestones["review_round"]
+        assert (
+            "probes_failed=0 probes_invalid=0 probes_not_runnable=1" in milestones["review_round"]
+        )
         assert result.committed_probe_paths == []
         body = "\n".join(_render_round_probes_and_findings(result.rounds[0].model_dump()))
         assert "NOT RUNNABLE `test_continue_shopping.jsx`" in body
