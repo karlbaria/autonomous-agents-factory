@@ -226,6 +226,50 @@ class TestDeliver:
             result = deliver("s3", _ctx(result_text=answer))
         assert result.artifact_uri == "s3://b/k"
 
+    @pytest.mark.parametrize(
+        "document",
+        [
+            # #94: the knowledge/prd-draft-v1 failure, a requirement in the body.
+            (
+                "# PRD: Persistent shopping bag\n\n## Problem\n\nThe bag is lost on a "
+                "page refresh.\n\n## Requirements\n\n"
+                "- R1: The bag survives a page refresh.\n"
+                "- R2: Customers can come back later and still find their bag.\n"
+                "- R3: Bag contents sync across tabs.\n\n"
+                "## Metrics\n\n- Bag abandonment after refresh\n- Return-visit conversion\n\n"
+                "## Open questions\n\n- How long is a guest bag kept?\n"
+                "- Do we merge a guest bag on sign-in?\n- Which storage backs it?\n"
+            ),
+            # "check back later" inside a requirement mid-document.
+            (
+                "# Design: Order status page\n\n## Requirements\n\n"
+                "- Shoppers whose order is still processing are told to check back later.\n"
+                "- The page refreshes the status every 30 seconds.\n\n"
+                "## Approach\n\nPoll the order API.\n\n## Risks\n\n"
+                "- API rate limits\n- Stale caches\n- Clock skew\n- Partial outages\n"
+            ),
+        ],
+    )
+    def test_deferral_phrase_in_document_body_not_rejected(self, monkeypatch, document):
+        # #94: only the closing lines are checked, where a deferral appears.
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        with patch("workflow.deliverers._upload_to_s3", return_value="s3://b/k"):
+            result = deliver("s3", _ctx(result_text=document))
+        assert result.artifact_uri == "s3://b/k"
+
+    def test_long_message_ending_in_deferral_rejected(self, monkeypatch):
+        # #94: a long message whose closing line defers still fails.
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        body = "\n".join(f"- Finding {i}: preliminary note." for i in range(20))
+        message = f"# Research status\n\n{body}\n\nResults will follow shortly."
+        with pytest.raises(ValueError, match="defers the work"):
+            deliver("s3", _ctx(result_text=message))
+
+    def test_message_that_is_only_a_deferral_rejected(self, monkeypatch):
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        with pytest.raises(ValueError, match="defers the work"):
+            deliver("s3", _ctx(result_text="Please come back later."))
+
     def test_comment_writes_milestone_no_s3(self):
         progress = MagicMock()
         result = deliver("comment", _ctx(result_text="findings", progress=progress))
