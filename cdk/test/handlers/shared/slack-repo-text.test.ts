@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { extractRepoCandidates, removeRepoMention } from '../../../src/handlers/shared/slack-repo-text';
+import { extractRepoCandidates, parseExplicitSubmit, removeRepoMention } from '../../../src/handlers/shared/slack-repo-text';
 
 const PAGE = 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015867/Plan+Customer+wishlist';
 
@@ -46,6 +46,49 @@ describe('extractRepoCandidates', () => {
   test('a Confluence URL alone yields no candidate', () => {
     expect(extractRepoCandidates(`plan from <${PAGE}>`)).toEqual([]);
     expect(extractRepoCandidates('see https://karlvb.atlassian.net/wiki/spaces/SD/pages/1/x for it')).toEqual([]);
+  });
+});
+
+// #92: file paths are never repo candidates.
+describe('extractRepoCandidates — path-like tokens (#92)', () => {
+  test.each([
+    ['three or more segments', 'edit frontend/src/App.jsx'],
+    ['three segments, no extension', 'put it in frontend/src/pages'],
+    ['trailing slash', 'build output goes to frontend/dist/'],
+    ['file extension', 'see frontend/index.html'],
+    ['leading ./', 'run ./scripts/build'],
+    ['leading /', 'call /api/products'],
+    ['inside a longer path', 'look at backend/app/main.py and ../shared/types'],
+  ])('%s is not a candidate: %s', (_label, text) => {
+    expect(extractRepoCandidates(text)).toEqual([]);
+  });
+
+  test('one real repo plus several paths resolves to the repo', () => {
+    const text = 'In karlbaria/factory-shop, add a page under frontend/src/pages, '
+      + 'build to frontend/dist/ and update backend/app/main.py and ./scripts/build';
+    expect(extractRepoCandidates(text)).toEqual(['karlbaria/factory-shop']);
+  });
+
+  test('two real repos are both still candidates', () => {
+    expect(extractRepoCandidates('port frontend/src/App.jsx from karlbaria/factory-sandbox-py to karlbaria/factory-shop'))
+      .toEqual(['karlbaria/factory-sandbox-py', 'karlbaria/factory-shop']);
+  });
+});
+
+describe('parseExplicitSubmit (#92)', () => {
+  test('takes the repo after a leading submit, with the rest as description', () => {
+    expect(parseExplicitSubmit('submit karlbaria/factory-shop fix frontend/src and frontend/dist'))
+      .toEqual({ repo: 'karlbaria/factory-shop', description: 'fix frontend/src and frontend/dist' });
+    expect(parseExplicitSubmit('Submit org/repo#42')).toEqual({ repo: 'org/repo#42', description: '' });
+  });
+
+  test.each([
+    ['no submit', 'fix the bug in karlbaria/factory-shop'],
+    ['submit not first', 'please submit karlbaria/factory-shop fix it'],
+    ['no repo after submit', 'submit fix the bug'],
+    ['a path after submit', 'submit frontend/src/App.jsx fix it'],
+  ])('returns null for %s', (_label, text) => {
+    expect(parseExplicitSubmit(text)).toBeNull();
   });
 });
 
