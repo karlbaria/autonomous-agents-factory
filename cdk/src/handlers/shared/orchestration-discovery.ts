@@ -132,12 +132,15 @@ export async function discoverOrchestration(
     return { kind: 'rejected', reason: validation.reason, message: validation.message };
   }
 
-  // ── 2b. Auto-integration node for fan-out. If the validated DAG has
-  // >1 leaf, append a synthetic node depending on all leaves so a pure
-  // fan-out still produces ONE combined result (the node is a diamond
-  // fan-in, reusing the existing predecessor merge). No-op for linear chains / explicit
-  // diamonds (≤1 leaf). The orchestration id is derived deterministically
-  // from the parent issue, so we can name the synthetic node before seeding.
+  // ── 2b. Auto-integration node (#89). If the validated DAG has two or more
+  // sub-issues, append a synthetic node depending on all leaves, so the build
+  // produces ONE combined PR to main (the node branches off main and merges
+  // every leaf, reusing the existing predecessor merge). No-op for a single
+  // sub-issue. The orchestration id is derived deterministically from the
+  // parent issue, so we can name the synthetic node before seeding. Only the
+  // SEED uses the augmented graph: an extend (below) diffs the fetched graph,
+  // so an orchestration seeded without an integration node is not given one
+  // part-way through.
   const orchestrationId = deriveOrchestrationId(parentIssueRef);
   const augmented = withIntegrationNode(fetched.children, orchestrationId);
   let childrenToSeed = augmented.nodes;
@@ -154,7 +157,7 @@ export async function discoverOrchestration(
       });
       childrenToSeed = fetched.children;
     } else {
-      logger.info('Orchestration fan-out detected — added integration node', {
+      logger.info('Orchestration has several sub-issues — added integration node', {
         parent_issue_ref: parentIssueRef,
         orchestration_id: orchestrationId,
         // the synthetic node is last; its predecessors are the leaves it merges
@@ -209,7 +212,7 @@ export async function discoverOrchestration(
         parentIssueRef,
         credentialsRef,
         repo,
-        graph: childrenToSeed,
+        graph: fetched.children,
         now,
         ...(ttl !== undefined && { ttl }),
       });

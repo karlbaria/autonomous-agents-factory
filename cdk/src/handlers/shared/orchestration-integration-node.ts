@@ -20,14 +20,15 @@
 /**
  * Auto-integration node for fan-out orchestrations.
  *
- * When a validated DAG has MORE THAN ONE leaf (a sub-issue with no
- * successors), each leaf is an independent PR and nothing combines them —
- * there is no single "see it all together" artifact. We append a synthetic
- * integration node that depends on ALL leaves. Because it has multiple
- * predecessors it is a diamond fan-in, so the existing multi-predecessor
- * path (``selectBaseBranch`` → ``_merge_predecessor_branch``) merges every
- * leaf branch into the integration branch with no new merge code — its PR
- * is the combined result.
+ * When a validated DAG has TWO OR MORE sub-issues, we append a synthetic
+ * integration node that depends on ALL leaves (sub-issues with no
+ * successors). It always branches off the default branch and merges every
+ * leaf branch in, even a single one (``selectBaseBranch`` with
+ * ``mergeIntoDefault`` → ``_merge_predecessor_branch``), so its PR is the
+ * combined result and the build's only PR to target ``main`` (#89). Every
+ * other child PR is labelled ``factory-stacked`` and never auto-merged: a
+ * story PR merged on its own leaves the others behind ``main`` or stranded on
+ * a story branch.
  *
  * Pure (no I/O), so the leaf computation + node construction is unit-tested
  * in isolation. The discovery composer calls this AFTER ``validateDag``
@@ -35,9 +36,10 @@
  * ``seedOrchestration``, re-validating the augmented graph.
  *
  * Cases:
- *  - 0–1 leaf (linear chain, or an explicit diamond fan-in): nothing added —
- *    a single leaf already IS the combined result.
- *  - >1 leaf (pure fan-out): one synthetic node added over all leaves.
+ *  - 0–1 sub-issue: nothing added — the single task's own PR is the result.
+ *  - 2+ sub-issues (a chain, a fan-out or a diamond): one synthetic node added
+ *    over all leaves. Before #89 a chain or diamond fan-in (one leaf) got none,
+ *    so its final PR targeted a predecessor branch and never reached ``main``.
  */
 
 import type { SubIssueNode } from './linear-subissue-fetch';
@@ -72,8 +74,8 @@ export function computeLeaves(nodes: readonly SubIssueNode[]): readonly string[]
 
 /**
  * Given a validated DAG, return the node list to seed: unchanged when there
- * is 0–1 leaf, or with a synthetic integration node appended (depending on
- * all leaves) when there is more than one leaf.
+ * are 0–1 sub-issues, or with a synthetic integration node appended
+ * (depending on all leaves) when there are two or more.
  *
  * ``orchestrationId`` namespaces the synthetic node's id so it is unique +
  * recognizable (``<orchestrationId>__integration`` — see
@@ -86,10 +88,11 @@ export function withIntegrationNode(
   nodes: readonly SubIssueNode[],
   orchestrationId: string,
 ): { readonly nodes: readonly SubIssueNode[]; readonly added: boolean } {
-  const leaves = computeLeaves(nodes);
-  if (leaves.length <= 1) {
+  const realNodes = nodes.filter((n) => !isIntegrationNode(n.id));
+  if (realNodes.length < 2 || realNodes.length !== nodes.length) {
     return { nodes, added: false };
   }
+  const leaves = computeLeaves(nodes);
   const integration: SubIssueNode = {
     id: `${orchestrationId}${INTEGRATION_NODE_SUFFIX}`,
     depends_on: leaves,

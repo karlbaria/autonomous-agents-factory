@@ -175,7 +175,19 @@ export interface ReleaseChildParams {
    * retried epic.
    */
   readonly retry?: boolean;
+  /**
+   * The child is a story of an orchestration that has an integration node
+   * (#89): its PR is labelled ``factory-stacked`` so it is never auto-merged
+   * on its own; the integration PR carries its commits to main.
+   */
+  readonly stackedStory?: boolean;
 }
+
+/**
+ * ``channel_metadata`` key telling the agent to label the child's PR
+ * ``factory-stacked`` when it opens it (#89).
+ */
+const ORCHESTRATION_STACKED_METADATA_KEY = 'orchestration_stacked';
 
 export type ReleaseChildResult =
   | { readonly kind: 'released'; readonly taskId: string }
@@ -398,6 +410,7 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   if (params.mergeBranches && params.mergeBranches.length > 0) {
     channelMetadata.orchestration_merge_branches = JSON.stringify(params.mergeBranches);
   }
+  if (params.stackedStory) channelMetadata[ORCHESTRATION_STACKED_METADATA_KEY] = 'true';
 
   // Deterministic idempotency key: same child never creates two tasks.
   // Separator is '_' (NOT '#') because createTaskCore validates the key
@@ -715,8 +728,14 @@ export async function releaseReadyChildren(
       budget: maxToRelease,
     });
   }
+  // #89: in an orchestration with an integration node, only the integration
+  // PR is meant to reach main. Every other child's PR is labelled
+  // factory-stacked, and the integration node always branches off main and
+  // merges every leaf in, even a single one.
+  const hasIntegrationNode = all.some((c) => isIntegrationNode(c.sub_issue_id));
   const results: ReleaseChildReadyResult[] = [];
   for (const row of releasable) {
+    const integration = isIntegrationNode(row.sub_issue_id);
     // Derive the base from this child's predecessors' persisted branches.
     const selection = selectBaseBranch({
       predecessors: row.depends_on.map((sub) => ({
@@ -724,6 +743,7 @@ export async function releaseReadyChildren(
         branch_name: branchOf.get(sub) ?? '',
       })),
       defaultBranch,
+      mergeIntoDefault: integration,
     });
     const childResult = await releaseChild({
       ddb,
@@ -767,6 +787,7 @@ export async function releaseReadyChildren(
       createTaskCore,
       now,
       retry,
+      ...(hasIntegrationNode && !integration && { stackedStory: true }),
     });
     // Correlate the result to its child so callers can patch their in-memory
     // view: a terminally-failed child must be reflected in the settle that

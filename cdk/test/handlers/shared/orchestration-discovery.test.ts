@@ -86,7 +86,7 @@ describe('discoverOrchestration', () => {
     });
     expect(result.kind).toBe('seeded');
     if (result.kind === 'seeded') {
-      expect(result.childCount).toBe(2);
+      expect(result.childCount).toBe(3); // A, B + the integration node (#89)
       expect(result.rootSubIssueIds).toEqual(['A']);
       expect(result.alreadyExisted).toBe(false);
     }
@@ -156,6 +156,8 @@ describe('discoverOrchestration', () => {
     // alreadyExisted, so discovery routes to extendOrchestration. extend's own
     // loadOrchestration Query returns the existing children (A, B); the fetched
     // graph is identical → no new nodes → extended with empty addedSubIssueIds.
+    // The persisted chain predates #89 and has no integration node: extend
+    // diffs the FETCHED graph, so it is not given one part-way through.
     const orchId = '#meta';
     const ddb = {
       send: jest.fn()
@@ -224,7 +226,7 @@ describe('discoverOrchestration', () => {
       });
       expect(result.kind).toBe('seeded');
       if (result.kind === 'seeded') {
-        expect(result.childCount).toBe(3);
+        expect(result.childCount).toBe(4); // three phases + the integration node (#89)
         expect(result.rootSubIssueIds).toEqual(['phase-1']); // layer 0
       }
     });
@@ -276,7 +278,8 @@ describe('discoverOrchestration', () => {
       expect([...(integ!.depends_on as string[])].sort()).toEqual(['B', 'C']);
     });
 
-    test('linear chain → NO integration node added', async () => {
+    // #89: a chain gets an integration node too, so its final PR targets main.
+    test('linear chain → integration node added over its one leaf', async () => {
       const ddb = { send: jest.fn().mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({}) };
       const result = await discoverOrchestration({
         ...base,
@@ -284,7 +287,18 @@ describe('discoverOrchestration', () => {
         graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) }),
       });
       expect(result.kind).toBe('seeded');
-      if (result.kind === 'seeded') expect(result.childCount).toBe(2); // no synthetic node
+      if (result.kind === 'seeded') expect(result.childCount).toBe(3); // A, B + integration
+    });
+
+    test('a single sub-issue → NO integration node added (unchanged)', async () => {
+      const ddb = { send: jest.fn().mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({}) };
+      const result = await discoverOrchestration({
+        ...base,
+        ddb: ddb as never,
+        graphSource: declarativeGraphSource([{ id: 'only', depends_on: [] }]),
+      });
+      expect(result.kind).toBe('seeded');
+      if (result.kind === 'seeded') expect(result.childCount).toBe(1);
     });
 
     test('declarative fan-out also gets an integration node', async () => {
