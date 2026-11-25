@@ -802,6 +802,9 @@ The upstream integ, deploy and Documentation workflows are disabled on the fork.
 - **Reviewer findings JSON sometimes fails to parse (invalid escape),** which forces a NOT_READY round on a correct diff (~$0.20 extra on the Task 15 PR 1 coding demo). Watch for repeats; fix the parser or the prompt if it happens again.
 - **factory-shop watchdog only sweeps on build/status events,** so removing `needs-human` doesn't trigger a merge. Merge by hand, or add a `pull_request` `labeled`/`unlabeled` trigger later.
 - **factory-shop's `.github/scripts` tests (`node --test`) don't run in its build or CI.**
+- **Onboarded-repo filter for Slack repo detection** (needs events-Lambda read access to RepoConfig). Deferred from [#92](https://github.com/karlbaria/autonomous-agents-factory/issues/92) (Task 15 §12).
+- **Screenshot links on auto-tracked (Slack/CLI) Jira cards,** if missing.
+- **React Router v7 future-flag warnings in factory-shop tests.**
 
 ## Task 15: Feature-planning workflow — PR 1 (Slack intent routing + read-only planning)
 
@@ -949,3 +952,59 @@ All three were submitted from Slack against `karlbaria/factory-shop`.
   - A `needs-human` label added to a predecessor after a dependent's PR has opened doesn't propagate.
   - Angle-bracket placeholders in a Jira description (`<number>`) were dropped before reaching the agent: SHOP-45's task text ended with `--port .`. Write placeholders in words.
 - **Tag.** `known-good-task15-merge-path` at the commit of this entry.
+
+### 11. PR 3b-2: Start files Jira and starts the build (#91)
+
+- **What shipped ([#91](https://github.com/karlbaria/autonomous-agents-factory/pull/91)).**
+  - **Screening and filing.** Start screens every story with the guardrail. It then files an Epic and its Stories, or one Story for a one-story design. Stories get Blocks links and a `factory-plan-<sid8>` resume label. Each description carries the acceptance criteria, the technical notes and links to the PRD and the design.
+  - **Checkpoints.** Every write is checkpointed, so a retry resumes without duplicates.
+  - **The build.** It starts as the approver. The filed stories go straight to the orchestration, not re-read from Jira. The page is marked final, and "Started — N stories filed" is posted.
+  - **Forge.** New operations: `create_issue` with parent and label, and `link_issues` (Blocks only). The app was redeployed with `forge deploy`.
+  - **IAM.** One new managed policy, because the role's inline policy was full. It has exact statements on the orchestration and user-concurrency tables.
+  - **Census.** One inline census cell (Lambda MicroVM + tool gateway + registry + Linear vault + managed image) now needs the split network topology.
+  - **Timeout.** The command processor's timeout is now 120 s.
+- **Fixes found on the way.**
+  - A resume bug, caught by tests: a retry recreated issues that were already checkpointed.
+  - Tag-like text such as `<number>` is now written as `‹…›`, so the sanitizer keeps it.
+  - An unused `nosemgrep` failed `security-pr`. It was removed in `cf9bc38`.
+- **Single-story demo: lab price filter (confirmed).**
+  - **PRD:** task `01M88JN41CX9KNSXWBYNXJBX8J` (`knowledge/prd-draft-v1`, from Slack). COMPLETED in 34 s, $0.12. It published [PRD: Lab page price range filter](https://karlvb.atlassian.net/wiki/spaces/SD/pages/1540141/PRD+Lab+page+price+range+filter+XJBX8J).
+  - **Technical design:** task `01M88JTMWD9PS65J1JX41079FA` (`knowledge/feature-planning-v1`). COMPLETED in 1 min 09 s, $0.24. It published [Technical design: Lab page price range filter](https://karlvb.atlassian.net/wiki/spaces/SD/pages/1605657/Technical+design+Lab+page+price+range+filter+1079FA).
+  - **Story:** Start filed one Jira issue, **SHOP-50**. Its text says it was "approved in Slack" at 05:30 UTC, and that everything touches only `frontend/src/lab/`, "so it is delivered as one story". The design produced one story on its own; it was not split or merged by hand. That SHOP-50 is of type Story, and that it has the `factory-plan-` label, is not confirmed here (Jira wasn't read).
+  - **Build:** task `01M88JZ00B0VVD5BT5Q377YMFY` (`coding/new-task-adversarial-v1`, channel `jira`). COMPLETED in 6 min 11 s, $0.21. It opened [factory-shop#64](https://github.com/karlbaria/factory-shop/pull/64), which got review READY and a passing build. The watchdog auto-merged it at 2026-11-25 05:40 UTC (`factory/auto-merge`: merged).
+  - The "Started — N stories filed" Slack post and the page going final weren't checked for this entry.
+- **Two-story demo: lab "Recently viewed" (not confirmed).** At the time of this entry there is no "Recently viewed" task in `bgagent list --repo karlbaria/factory-shop` (last 40 tasks), and no factory-shop PR for it. So these are all unrecorded: the Epic with two Stories, S2 "is blocked by" S1, the `factory-stacked` story PRs, the auto-merged integration PR, and whether the design was split into two stories by hand. Add them once the run has happened.
+- **Tag.** `known-good-task15-pr3b2` at the commit of this entry.
+
+### 12. Slack repo detection (#92, #93)
+
+- **Problem ([#92](https://github.com/karlbaria/autonomous-agents-factory/issues/92)).** The events handler ran repo-candidate extraction over the whole message before it looked for `submit`. A message with paths such as `frontend/src` or `frontend/dist` got "I see more than one repo-looking name in that message", even when it started with `submit karlbaria/factory-shop`, the escape the reply itself suggests.
+- **Fix ([#93](https://github.com/karlbaria/autonomous-agents-factory/pull/93), merged 2026-11-25 05:08 UTC).**
+  - A message that starts with `submit <owner/repo>` uses that repo and skips extraction.
+  - Path-like tokens are never candidates: three or more segments, a file extension, a leading `/` or `./`, or a match inside a longer path or URL.
+  - Unchanged: one real repo resolves to it, two real repos still ask which one, and no repo falls back to the channel default.
+  - No IAM or resource changes: the synth comparison against `main` found only the new `SlackEventsFn` version.
+- **Limits.**
+  - A bare two-segment path such as `frontend/src`, without `submit`, still looks like `owner/repo`, so next to a real repo it is still ambiguous.
+  - **Deferred:** the onboarded-repo filter would fix that, but it needs read access to RepoConfig, which the events Lambda doesn't have.
+  - Repos with a dot in the name (for example `vercel/next.js`) need `submit`.
+- **Verified** with the "Back to top" message, task `01M88JM3AX2SZSFG0QHJV5Q0TK` (2026-11-25 05:24 UTC). Its text names the path `frontend/src/lab/`, and the task was created against `karlbaria/factory-shop` with no ambiguity reply. The old code would have taken `frontend/src` as a candidate: it would either have asked, or submitted against a repo named `frontend/src`. The task later shows CANCELLED after its PRD draft finished; the reason isn't recorded. The price filter PRD request (`01M88JN41CX9KNSXWBYNXJBX8J`), whose text names `frontend/src/lab/` and `frontend/package.json`, also went through.
+
+### 13. New storefront and the frozen lab (factory-shop #61, #62, #63)
+
+- **Routing ([factory-shop#61](https://github.com/karlbaria/factory-shop/pull/61), merged 2026-11-25 03:16 UTC).** Client-side routing with `react-router-dom`. The old single page moved unchanged to `/lab`, and a minimal storefront home went to `/`. The PR had the `needs-human` label and was merged by hand.
+- **Layout ([factory-shop#62](https://github.com/karlbaria/factory-shop/pull/62), merged 2026-11-25 03:30 UTC).**
+  - The lab page is in `frontend/src/lab/`, and the storefront code is in `frontend/src/store/`.
+  - The Lab link moved to the storefront footer.
+  - New identical `CLAUDE.md` and `AGENTS.md` at the repo root. Their rule: feature work goes in the store unless a task explicitly says "lab", and `/lab` is frozen.
+- **Amplify rewrite.** In the Amplify console, the default 404 rewrite was changed to a 200 single-page-app rewrite to `/index.html`, so deep links and screenshots work.
+  - The repo doesn't hold this setting. factory-shop's `CLAUDE.md` says it lives in the console.
+  - Observed on the PR #64 preview: `/lab` and an unknown deep path both return 200 `text/html`.
+- **Visual foundation ([factory-shop#63](https://github.com/karlbaria/factory-shop/pull/63), `feat/storefront-foundation`, merged by hand 2026-11-25 05:22 UTC).** Built in Kiro, so `.kiro/specs/storefront-foundation/` is in the repo. It covers:
+  - design tokens;
+  - the home, listing, product detail, bag and not-found pages;
+  - a catalog data layer over bundled demo data;
+  - 28 generated images, the photos added in `7260195`.
+
+  The lab is unchanged.
+- **Why Kiro.** Visual iteration needs a fast local feedback loop. The factory builds features on top.
