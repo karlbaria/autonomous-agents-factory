@@ -171,7 +171,7 @@ The operator role running this command needs `cloudformation:DescribeStacks`; `d
 
 ### 4. Install the dedicated outbound app
 
-The repository includes a narrow Forge app under `integrations/jira-forge-app`. Its web trigger accepts only five signed operations: identity probe, create comment, update comment, read transitions, and perform transition. It does not expose a general Jira REST proxy.
+The repository includes a narrow Forge app under `integrations/jira-forge-app`. Its web trigger accepts only seven signed operations: identity probe, create comment, update comment, read transitions, perform transition, create issue, and link issues. Create issue takes an optional parent and at most one label, which must be a planning label (`factory-plan-` and eight base32 characters), so it can never apply a trigger label; link issues creates only `Blocks` links between two different issues. It does not expose a general Jira REST proxy.
 
 Run the login in an interactive terminal. Forge asks for your Atlassian email and the Forge CLI scoped token from the prerequisites; the Jira 3LO access token is not a Forge CLI credential. On the first registration, Forge also asks you to create or select a **Developer Space**.
 
@@ -373,6 +373,8 @@ Only the combined pull request is meant to merge. Each subtask's own pull reques
 
 To extend an existing orchestration, add Jira subtasks and re-apply the trigger label. ABCA appends only genuinely new issue keys: existing tasks, branches, statuses, and dependencies are preserved. A new child starts immediately when all of its declared predecessors have already succeeded; otherwise it remains blocked for the reconciler. A new child with no explicit blocker stacks on the existing epic tip rather than bare `main`.
 
+A technical design started from Slack (Start, Task 15) is filed this way: an Epic with one Story child per design story, under the Epic through its parent field, and a `Blocks` link for each `Blocked by:`. Every filed issue carries the planning label `factory-plan-<id>`. Start then runs the orchestration directly, attributed to the PM who clicked it, so no trigger label is applied. A one-story design is filed as a single Story and runs as one task.
+
 Re-applying the label without adding a child is an idempotent no-op. Changes only to blocker links between existing children are also ignored; dependency edits do not rewrite work that may already be running or complete. Extending a terminal orchestration reopens the parent progress panel and settles it again when the added work finishes.
 
 ## Issue context: attachments and comments
@@ -480,6 +482,16 @@ Expected, not a broken install. The stored access token lives ~1 hour and is onl
 - Check the agent logs for `jira_reactions: comment_task_started`. `proxy_error=invalid_signature` means Forge and ABCA have different `BGAGENT_PROXY_SECRET` values or the signed request is stale. `proxy_error=proxy_not_configured` means the production Forge variable is missing/short or was set after the last deploy. A Jira `403` without a proxy error code means the app lacks a required scope or project permission.
 - Re-run `bgagent jira app-setup <cloud-id> --proxy-url <url> --region "$REGION" --stack-name "$STACK_NAME"` after rotating the Forge secret or recreating the web-trigger URL. The identity probe catches a wrong secret, dead URL, wrong actor type, wrong Jira tenant, and missing app access before saving.
 - If no app-actor fields exist, ABCA logs that it is using the OAuth migration fallback. A fallback `401`/`403` usually means the 3LO token was revoked; re-run `bgagent jira setup`.
+
+### Remove a Start filing that went wrong
+
+Everything Start filed carries the label `factory-plan-<id>`, where `<id>` is the first eight characters of the planning session. Start posts the keys in the Slack thread; to find them in Jira, search `labels = factory-plan-<id>`. Then, in order:
+
+1. Cancel any task the build started: `bgagent cancel <task-id>` for each running child (the epic panel and `bgagent list` show them).
+2. In the target repo, close the build's pull requests and delete their `bgagent/…` branches.
+3. Delete the Stories, then the Epic, as a person with Delete Issues permission (the Forge app has no delete operation). Their links and the epic panel comment go with them.
+4. On the design page in Confluence, remove `factory-final` and add `factory-draft` back.
+5. Leave the planning session to expire (7 days). It holds no page or message text, and it blocks filing again only from that Slack message; ask for a new design to file again. The orchestration record is keyed on the Epic's key, so a new filing never collides with it.
 
 ### Forge login or registration fails
 

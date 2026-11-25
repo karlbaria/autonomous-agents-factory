@@ -18,6 +18,10 @@
  */
 
 import {
+  createIssueRequest,
+  createJiraIssueViaOauth,
+  linkIssuesRequest,
+  linkJiraIssuesViaOauth,
   requestJiraAppActor,
   signJiraAppActorRequest,
   validateJiraAppActorProxyUrl,
@@ -189,5 +193,83 @@ describe('requestJiraAppActor', () => {
     await jest.advanceTimersByTimeAsync(5000);
 
     await expect(pending).resolves.toEqual({ ok: false, retryable: true });
+  });
+});
+
+// #82 PR 3b-2: the requests Start's filing sends, through the proxy or OAuth.
+describe('filing requests (#82 PR 3b-2)', () => {
+  const fields = {
+    projectKey: 'SHOP',
+    issueTypeName: 'Story',
+    summary: 'Save for later',
+    description: { type: 'doc', version: 1, content: [] },
+    parentKey: 'SHOP-1',
+    labels: ['factory-plan-abcdefgh'],
+  };
+
+  test('the proxy create request carries the parent and the plan label', () => {
+    expect(createIssueRequest('cloud-1', fields)).toEqual({
+      version: 1,
+      operation: 'create_issue',
+      cloud_id: 'cloud-1',
+      project_key: 'SHOP',
+      issue_type_name: 'Story',
+      summary: 'Save for later',
+      body: fields.description,
+      parent_key: 'SHOP-1',
+      labels: ['factory-plan-abcdefgh'],
+    });
+  });
+
+  test('the proxy link request is Blocks: the blocker outward, the blocked inward', () => {
+    expect(linkIssuesRequest('cloud-1', 'SHOP-2', 'SHOP-3')).toEqual({
+      version: 1,
+      operation: 'link_issues',
+      cloud_id: 'cloud-1',
+      link_type: 'Blocks',
+      outward_issue_key: 'SHOP-2',
+      inward_issue_key: 'SHOP-3',
+    });
+  });
+
+  test('the OAuth twins send what the proxy sends to Jira', async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const fetchImpl = jest.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, body: JSON.parse(String(init.body)) });
+      return new Response('{"id":"10002","key":"SHOP-2"}', { status: 201 });
+    });
+    const created = await createJiraIssueViaOauth('tok', 'cloud-1', { ...fields, issueTypeName: 'Epic', epicNameField: 'customfield_10011' }, fetchImpl as unknown as typeof fetch);
+    await linkJiraIssuesViaOauth('tok', 'cloud-1', 'SHOP-2', 'SHOP-3', fetchImpl as unknown as typeof fetch);
+    expect(created).toEqual({ ok: true, status: 201, body: '{"id":"10002","key":"SHOP-2"}' });
+    expect(calls[0].url).toBe('https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/issue');
+    expect(calls[0].body).toEqual({
+      fields: {
+        project: { key: 'SHOP' },
+        issuetype: { name: 'Epic' },
+        summary: 'Save for later',
+        description: fields.description,
+        parent: { key: 'SHOP-1' },
+        labels: ['factory-plan-abcdefgh'],
+        customfield_10011: 'Save for later',
+      },
+    });
+    expect(calls[1].url).toBe('https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/issueLink');
+    expect(calls[1].body).toEqual({ type: { name: 'Blocks' }, outwardIssue: { key: 'SHOP-2' }, inwardIssue: { key: 'SHOP-3' } });
+  });
+
+  test('an OAuth 5xx or network error is retryable (an unknown outcome); a 4xx is not', async () => {
+    const respond = (status: number) => jest.fn(async () => new Response('{}', { status })) as unknown as typeof fetch;
+    expect(await linkJiraIssuesViaOauth('tok', 'c', 'A-1', 'A-2', respond(502))).toMatchObject({ ok: false, retryable: true });
+    expect(await linkJiraIssuesViaOauth('tok', 'c', 'A-1', 'A-2', respond(400))).toMatchObject({ ok: false, retryable: false });
+    const broken = jest.fn(async () => { throw new Error('reset'); }) as unknown as typeof fetch;
+    expect(await linkJiraIssuesViaOauth('tok', 'c', 'A-1', 'A-2', broken)).toEqual({ ok: false, retryable: true });
+  });
+
+  test('the proxy\'s filing error codes are recognised', async () => {
+    for (const code of ['invalid_parent_key', 'invalid_plan_label', 'invalid_epic_name_field', 'invalid_link_issues_request']) {
+      const fetchImpl = jest.fn(async () => new Response(JSON.stringify({ error: code }), { status: 400 })) as unknown as typeof fetch;
+      const result = await requestJiraAppActor(CONFIG, linkIssuesRequest('cloud-1', 'SHOP-2', 'SHOP-3'), fetchImpl);
+      expect(result).toMatchObject({ ok: false, retryable: false, errorCode: code });
+    }
   });
 });

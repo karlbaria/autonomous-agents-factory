@@ -909,6 +909,40 @@ describe('AgentStack', () => {
     expect(JSON.stringify(puts[0].Resource)).toContain('bgagent-jira-oauth-*');
   });
 
+  // Task 15 (fork), #82 PR 3b-2: Start starts the build through
+  // startJiraParentWork, so the processor seeds the orchestration and reads the
+  // concurrency budget, like the Jira webhook processor.
+  test('the Slack command processor can seed an orchestration and read the concurrency budget', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const fn = Object.entries(fns).find(([id]) => id.startsWith('SlackIntegrationCommandProcessorFn'));
+    const vars = (fn![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+      .Properties?.Environment?.Variables ?? {};
+    expect(vars.ORCHESTRATION_TABLE_NAME).toBeDefined();
+    expect(vars.USER_CONCURRENCY_TABLE_NAME).toBeDefined();
+    expect(vars.MAX_CONCURRENT_TASKS_PER_USER).toBeDefined();
+
+    // The role's inline policy is full, so CDK moves these into an overflow
+    // managed policy: look in both.
+    const statements = Object.entries({
+      ...template.findResources('AWS::IAM::Policy'),
+      ...template.findResources('AWS::IAM::ManagedPolicy'),
+    })
+      .filter(([logicalId]) => logicalId.startsWith('SlackIntegrationCommandProcessorFn'))
+      .flatMap(([, policy]) => (policy as { Properties: { PolicyDocument: { Statement: Array<{ Action: string | string[]; Resource: unknown }> } } })
+        .Properties.PolicyDocument.Statement);
+    const on = (table: string) => statements.filter((st) => JSON.stringify(st.Resource).includes(table));
+    const orchestration = on('OrchestrationTable');
+    expect(orchestration).toHaveLength(1);
+    expect(([] as string[]).concat(orchestration[0].Action).sort()).toEqual(
+      ['dynamodb:BatchWriteItem', 'dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:UpdateItem'],
+    );
+    // The table itself, never an index wildcard.
+    expect(JSON.stringify(orchestration[0].Resource)).not.toContain('/index/');
+    const concurrency = on('UserConcurrencyTable');
+    expect(concurrency).toHaveLength(1);
+    expect(concurrency[0].Action).toBe('dynamodb:GetItem');
+  });
+
   test('webhook-create-task.ts is NOT wired for Jira auto-tracking (scoped to slack + api only)', () => {
     const fns = template.findResources('AWS::Lambda::Function');
     const fn = Object.entries(fns).find(([id]) => id.startsWith('TaskApiWebhookCreateTaskFn'));

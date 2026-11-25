@@ -20,14 +20,15 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { PlanPageReadResult } from '../../../src/handlers/shared/confluence-page';
 import {
-  CHECK_PASSED_TEXT,
   handlePlanAction,
   ONLY_REQUESTER_TEXT,
   PRD_APPROVED_TEXT,
+  STARTED_TEXT,
   type PlanActionDeps,
   type PlanActionEvent,
   type StartDesignResult,
 } from '../../../src/handlers/shared/plan-approve';
+import type { DesignToFile, FileDesignResult } from '../../../src/handlers/shared/plan-file';
 import { designNumbersDigest } from '../../../src/handlers/shared/plan-parse';
 import { APPROVAL_LEASE_SECONDS, type PlanningSession } from '../../../src/handlers/shared/planning-session';
 import type { SlackMessage } from '../../../src/handlers/shared/slack-blocks';
@@ -82,6 +83,10 @@ class FakeTable {
       Object.assign(row, { state: 'approved', design_task_id: v[':task'] });
       delete row.approving_since;
       delete row.confirm_digest;
+    } else if (expr.startsWith('SET #state = :filed')) {
+      if (!holdsLease) return fail();
+      row.state = 'filed';
+      delete row.approving_since;
     } else if (expr.startsWith('SET #state = :cancelled')) {
       if (!live || !(row.state === 'drafted' || staleLease)) return fail();
       row.state = 'cancelled';
@@ -166,7 +171,24 @@ interface Harness {
   readonly readPlanPage: jest.Mock;
   readonly startDesignFromPrd: jest.Mock;
   readonly markPageFinal: jest.Mock;
+  readonly fileDesign: jest.Mock;
+  readonly updateDesignMessage: jest.Mock;
   now: number;
+}
+
+/** What a passing Start posts: "Started — N stories filed". */
+const CHECK_PASSED_TEXT = `${STARTED_TEXT} — `;
+
+/** A filing that went through: one issue per story, under an epic when there are several. */
+function started(design: DesignToFile): FileDesignResult {
+  const stories = design.plan.stories.map((st, i) => ({ storyId: st.id, key: `SHOP-${i + 2}` }));
+  return {
+    kind: 'started',
+    parent: { key: 'SHOP-1', id: '10001' },
+    parentIsEpic: stories.length > 1,
+    stories: stories.length > 1 ? stories : [{ storyId: stories[0].storyId, key: 'SHOP-1' }],
+    siteUrl: 'https://example.atlassian.net',
+  };
 }
 
 function harness(pages: PlanPageReadResult[] | PlanPageReadResult, row = session()): Harness {
@@ -176,6 +198,8 @@ function harness(pages: PlanPageReadResult[] | PlanPageReadResult, row = session
   const readPlanPage = jest.fn(async () => (queue ? queue.shift()! : pages as PlanPageReadResult));
   const startDesignFromPrd = jest.fn(async (): Promise<StartDesignResult> => ({ ok: true, taskId: 'task-design' }));
   const markPageFinal = jest.fn(async () => true);
+  const fileDesign = jest.fn(async (_s: PlanningSession, _since: number, design: DesignToFile) => started(design));
+  const updateDesignMessage = jest.fn(async () => undefined);
   const h: Harness = {
     table,
     posts: [],
@@ -183,6 +207,8 @@ function harness(pages: PlanPageReadResult[] | PlanPageReadResult, row = session
     readPlanPage,
     startDesignFromPrd,
     markPageFinal,
+    fileDesign,
+    updateDesignMessage,
     now: NOW,
     deps: undefined as unknown as PlanActionDeps,
   };
@@ -198,6 +224,8 @@ function harness(pages: PlanPageReadResult[] | PlanPageReadResult, row = session
     postInThread: async (_s, message) => {
       h.posts.push(message);
     },
+    fileDesign,
+    updateDesignMessage,
     replyEphemeral: async (_url, text) => {
       h.ephemerals.push(text);
     },
@@ -349,14 +377,20 @@ describe('Approve PRD (#82 PR 3c)', () => {
 });
 
 describe('Start re-reads and checks the design', () => {
-  test('a ready design with the numbers the message showed passes, files nothing, and goes back to drafted', async () => {
+  test('a ready design with the numbers the message showed is filed and started, and the session ends filed', async () => {
     const h = harness(page(story(1), story(2, 'S1')), session({}, 2));
     await handlePlanAction(click('start'), h.deps);
     expect(h.readPlanPage).toHaveBeenCalledWith('1015867', MAPPING, 'design');
-    expect(postedText(h)).toContain(CHECK_PASSED_TEXT);
-    expect(postedText(h)).toContain('2 stories and nothing has been filed');
-    expect(rowOf(h)).toMatchObject({ state: 'drafted', confirm_digest: designNumbersDigest(2) });
+    expect(h.fileDesign).toHaveBeenCalledTimes(1);
+    expect(postedText(h)).toContain('Started — 2 stories filed:* S1 <https://example.atlassian.net/browse/SHOP-2|SHOP-2>');
+    expect(postedText(h)).toContain('under the epic <https://example.atlassian.net/browse/SHOP-1|SHOP-1>');
+    expect(rowOf(h).state).toBe('filed');
     expect(rowOf(h).approving_since).toBeUndefined();
+    // The page is marked final, and the message's buttons are replaced.
+    expect(h.markPageFinal).toHaveBeenCalledWith('1015867', MAPPING);
+    const updated = h.updateDesignMessage.mock.calls[0][1] as SlackMessage;
+    expect(textOf([updated])).toContain('Technical design started: 2 stories.');
+    expect(actionIds(updated)).toEqual([]);
   });
 
   test('a design of more than 5 stories passes on the first Start: the message was the confirmation', async () => {
@@ -459,7 +493,7 @@ describe('Start asks again when the numbers changed (decision 20)', () => {
     await handlePlanAction(click('start'), h.deps);
     const text = postedText(h);
     expect(text).toContain('number of stories changed');
-    expect(text).toContain('Technical design ready: 6 stories, about $3.00');
+    expect(text).toContain('Technical design ready: 6 stories, about $3.50');
     expect(text).not.toContain(CHECK_PASSED_TEXT);
     expect(actionIds(h.posts[1])).toEqual([`plan_confirm:${SID}`, `plan_cancel:${SID}`]);
     expect(rowOf(h)).toMatchObject({ state: 'drafted', confirm_digest: designNumbersDigest(6) });
@@ -478,7 +512,7 @@ describe('Start asks again when the numbers changed (decision 20)', () => {
     await handlePlanAction(click('start'), h.deps);
     h.posts.length = 0;
     await handlePlanAction(click('confirm'), h.deps);
-    expect(postedText(h)).toContain('7 stories, about $3.50');
+    expect(postedText(h)).toContain('7 stories, about $4.00');
     expect(postedText(h)).not.toContain(CHECK_PASSED_TEXT);
     expect(rowOf(h).confirm_digest).toBe(designNumbersDigest(7));
   });
@@ -515,7 +549,11 @@ describe('the approval lease', () => {
     const h = harness(page(story(1)), session({ state: 'approving', approving_since: NOW - APPROVAL_LEASE_SECONDS - 1 }));
     await handlePlanAction(click('start'), h.deps);
     expect(postedText(h)).toContain(CHECK_PASSED_TEXT);
-    expect(rowOf(h).state).toBe('drafted');
+    expect(rowOf(h).state).toBe('filed');
+  });
+
+  test('the lease outlasts the 120 s processor timeout (decision 16)', () => {
+    expect(APPROVAL_LEASE_SECONDS).toBe(150);
   });
 
   test('an unexpired lease is not taken over', async () => {
@@ -554,5 +592,79 @@ describe('Cancel', () => {
     await handlePlanAction(click('cancel'), h.deps);
     expect(h.ephemerals).toEqual([expect.stringContaining('cancelled'), expect.stringContaining('cancelled')]);
     expect(h.readPlanPage).not.toHaveBeenCalled();
+  });
+});
+
+describe('Start files the design (#82 PR 3b-2)', () => {
+  test('nothing is filed when the check fails', async () => {
+    const h = harness(page(story(1), story(2, 'S9')), session({}, 2));
+    await handlePlanAction(click('start'), h.deps);
+    expect(h.fileDesign).not.toHaveBeenCalled();
+    expect(rowOf(h).state).toBe('drafted');
+  });
+
+  test('nothing is filed when the numbers changed: the PM is asked again first', async () => {
+    const h = harness(page(story(1), story(2), story(3)), session({}, 2));
+    await handlePlanAction(click('start'), h.deps);
+    expect(h.fileDesign).not.toHaveBeenCalled();
+  });
+
+  test('the PM\'s edited page is what gets filed', async () => {
+    const edited = page(story(1, 'none', 'Save items for later'), story(2, 'S1', 'Move a saved item to the cart'));
+    const h = harness(edited, session({}, 2));
+    await handlePlanAction(click('start'), h.deps);
+    const design = h.fileDesign.mock.calls[0][2] as DesignToFile;
+    expect(design.plan.stories.map((st) => [st.id, st.title, st.blockedBy])).toEqual([
+      ['S1', 'Save items for later', []],
+      ['S2', 'Move a saved item to the cart', ['S1']],
+    ]);
+    expect(design.plan.stories[1].technicalNotes).toEqual(['Change file 2']);
+    expect(design).toMatchObject({ pageId: '1015867', pageTitle: 'Technical design: Wishlist · ABC123', pageVersion: 3 });
+    // Filing runs under the lease Start took.
+    expect(h.fileDesign.mock.calls[0][1]).toBe(NOW);
+  });
+
+  test('a story the guardrail blocks is named, and the session stays open', async () => {
+    const h = harness(page(story(1), story(2, 'S1')), session({}, 2));
+    h.fileDesign.mockResolvedValueOnce({ kind: 'blocked', storyId: 'S2', title: 'Story 2' });
+    await handlePlanAction(click('start'), h.deps);
+    expect(postedText(h)).toContain('Story S2 (“Story 2”) was blocked by the content policy, so nothing was filed.');
+    expect(rowOf(h).state).toBe('drafted');
+    expect(h.markPageFinal).not.toHaveBeenCalled();
+    expect(h.updateDesignMessage).not.toHaveBeenCalled();
+  });
+
+  test('a stopped filing posts why and keeps the session open for another Start', async () => {
+    const h = harness(page(story(1), story(2, 'S1')), session({}, 2));
+    h.fileDesign.mockResolvedValueOnce({ kind: 'stopped', message: 'Jira <!channel> said no. Filed so far: SHOP-1.' });
+    await handlePlanAction(click('start'), h.deps);
+    expect(postedText(h)).toContain('Jira &lt;!channel&gt; said no. Filed so far: SHOP-1.');
+    expect(rowOf(h).state).toBe('drafted');
+    expect(h.markPageFinal).not.toHaveBeenCalled();
+  });
+
+  test('a one-story design says the build started on that story', async () => {
+    const h = harness(page(story(1)), session({}, 1));
+    await handlePlanAction(click('start'), h.deps);
+    expect(postedText(h)).toContain('Started — 1 story filed:* S1 <https://example.atlassian.net/browse/SHOP-1|SHOP-1>.');
+    expect(postedText(h)).not.toContain('under the epic');
+  });
+
+  test('a page that can\'t be marked final is reported, and the build still counts as started', async () => {
+    const h = harness(page(story(1)), session({}, 1));
+    h.markPageFinal.mockResolvedValueOnce(false);
+    await handlePlanAction(click('start'), h.deps);
+    expect(postedText(h)).toContain('I couldn\'t mark the design page final');
+    expect(rowOf(h).state).toBe('filed');
+  });
+
+  test('Cancel after a partial filing says what is already in Jira', async () => {
+    const h = harness(page(story(1)), session({
+      filing_plan_digest: 'd',
+      filing_parent: { key: 'SHOP-1', id: '1' },
+      filing_children: { S1: { key: 'SHOP-2', id: '2' } },
+    }));
+    await handlePlanAction(click('cancel'), h.deps);
+    expect(postedText(h)).toContain('These issues were already filed in Jira and are still there: SHOP-1, SHOP-2.');
   });
 });

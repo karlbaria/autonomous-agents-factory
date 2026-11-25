@@ -1949,6 +1949,29 @@ export class AgentStack extends Stack {
           actions: ['secretsmanager:PutSecretValue'],
           resources: [jiraOauthSecretArn],
         }));
+
+        // Task 15 (fork), #82 PR 3b-2: Start files the design in Jira and
+        // starts the build through startJiraParentWork, the same path as the
+        // Jira label trigger (decision 13): it reads and seeds the
+        // orchestration (Query, GetItem, BatchWriteItem), releases its first
+        // stories and records the epic panel's comment id (UpdateItem), within
+        // the user's concurrency budget (GetItem on the counter). Exactly those
+        // actions, on the tables themselves (no index): the broader table
+        // grants push this role past the inline-policy limit into an overflow
+        // policy. Its Jira, guardrail and task-creation grants already exist
+        // (above, and in SlackIntegration).
+        const startFn = slackIntegration.commandProcessorFn;
+        startFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:BatchWriteItem', 'dynamodb:UpdateItem'],
+          resources: [orchestrationTable.table.tableArn],
+        }));
+        startFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['dynamodb:GetItem'],
+          resources: [userConcurrencyTable.table.tableArn],
+        }));
+        startFn.addEnvironment('ORCHESTRATION_TABLE_NAME', orchestrationTable.table.tableName);
+        startFn.addEnvironment('USER_CONCURRENCY_TABLE_NAME', userConcurrencyTable.table.tableName);
+        startFn.addEnvironment('MAX_CONCURRENT_TASKS_PER_USER', String(maxConcurrentTasksPerUser));
       }
     }
 

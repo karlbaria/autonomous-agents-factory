@@ -263,9 +263,11 @@ describe('checkPlan catches each problem', () => {
 });
 
 describe('the cost estimate and the numbers digest (decision 20)', () => {
-  test('$0.50 a story', () => {
+  test('$0.50 a story, plus the integration task when there are two or more stories', () => {
     expect(PER_STORY_COST_USD).toBe(0.5);
-    expect(estimatedPlanCostUsd(6)).toBe(3);
+    expect(estimatedPlanCostUsd(1)).toBe(0.5);
+    expect(estimatedPlanCostUsd(2)).toBe(1.5);
+    expect(estimatedPlanCostUsd(6)).toBe(3.5);
   });
 
   test('the digest changes with the story count only', () => {

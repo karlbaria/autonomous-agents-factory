@@ -587,6 +587,27 @@ class TestPlanDelivery:
         assert _plan_page_title("no heading", "task-abcdef", "") == ""
         assert _plan_page_title("# Plan:\n\nbody", "task-abcdef", "  ") == ""
 
+    def test_title_strips_any_trailing_ids_before_adding_the_real_one(self):
+        # LAB_LOG Task 15 §9: the agent wrote a 5-character id, the deliverer
+        # stripped only 6-character ones, and the title carried two ids.
+        from workflow.deliverers import _plan_page_title
+
+        real = "01M87X0ZRA9YY75NGS467FZZXB"
+        for heading in (
+            "# Technical design: Product reviews page · FZZXB",
+            "# Technical design: Product reviews page · 7FZZXB",
+            "# Technical design: Product reviews page · FZZXB · 7FZZXB",
+            "# Technical design: Product reviews page",
+        ):
+            assert (
+                _plan_page_title(f"{heading}\n\nbody", real, "")
+                == "Technical design: Product reviews page · 7FZZXB"
+            ), heading
+        assert (
+            _plan_page_title("# PRD: Product reviews page · AW7G4\n\nbody", real, "", kind="prd")
+            == "PRD: Product reviews page · 7FZZXB"
+        )
+
     def test_design_title_replaces_the_agents_own_prefix_and_id(self):
         # #82 PR 3c: the agent writes "# Technical design: <feature> · <id>";
         # the deliverer's prefix and the real task id win.

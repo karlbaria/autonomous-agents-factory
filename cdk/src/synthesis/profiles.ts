@@ -120,9 +120,16 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
     context: { ...externalConsent.context, linearVaultHostedReturnUrl: 'https://example.com/consent' },
   });
   // Keeping the named AgentCore log groups across backend switches pushes
-  // this two-zone MicroVM combination over budget as well.
-  const widestInlineMicrovm = 'lambda-microvm-gw1-reg1-vault1-managed-email-fork';
-  const topologies: SynthesisProfile[] = [...profiles.map(candidate => candidate.name === widestInlineMicrovm
+  // this two-zone MicroVM combination over budget as well. Since #82 PR 3b-2
+  // (decision 6) the widest inline MicroVM profile without the email/fork
+  // options exceeds it too: Start's grants overflow the Slack command
+  // processor's inline policy into one managed policy. Their `-split`
+  // counterparts fit.
+  const overBudgetInline = new Set([
+    'lambda-microvm-gw1-reg1-vault1-managed-email-fork',
+    'lambda-microvm-gw1-reg1-vault1-managed',
+  ]);
+  const topologies: SynthesisProfile[] = [...profiles.map(candidate => overBudgetInline.has(candidate.name)
     ? { ...candidate, expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources } }
     : candidate), ...profiles.map(candidate => ({
     ...candidate,

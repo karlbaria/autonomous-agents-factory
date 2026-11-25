@@ -111,11 +111,11 @@ Without a PRD page, the Source section is the single line
 
 Your final message IS the deliverable: it is published as the design page, so
 it must be the complete doc in Markdown, and nothing else (no preamble, no
-closing remarks). The heading ends with the last six characters of the Task
-ID. Use exactly this layout:
+closing remarks). The heading is the feature name only: the platform adds
+the document's id to the page title. Use exactly this layout:
 
 ```
-# Technical design: <short feature name> · <6-char id>
+# Technical design: <short feature name>
 
 ## Summary
 Two or three sentences: what will be built and the number of stories.

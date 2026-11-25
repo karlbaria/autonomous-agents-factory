@@ -29,6 +29,14 @@ const TRANSITION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 // Mirrors cli/src/commands/jira.ts's PROJECT_KEY_RE.
 const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{1,99}$/;
 const MAX_SUMMARY_LENGTH = 255; // Jira's own summary field limit.
+// #82 PR 3b-2: the only label a created issue may carry is the planning
+// session's own `factory-plan-<8 base32 chars>` marker, never a trigger label.
+const PLAN_LABEL_RE = /^factory-plan-[a-z2-7]{8}$/;
+const MAX_CREATE_LABELS = 1;
+// A company-managed project's Epic Name field, set only to the summary.
+const EPIC_NAME_FIELD_RE = /^customfield_\d{1,10}$/;
+// The only link type `link_issues` creates.
+const BLOCKS_LINK_TYPE = 'Blocks';
 
 function response(statusCode, body = '') {
   return {
@@ -231,6 +239,22 @@ export function createProxyHandler({
           ) {
             return response(400, { error: 'invalid_create_issue_request' });
           }
+          if (payload.parent_key !== undefined && !ISSUE_KEY_RE.test(payload.parent_key ?? '')) {
+            return response(400, { error: 'invalid_parent_key' });
+          }
+          if (
+            payload.labels !== undefined
+            && (
+              !Array.isArray(payload.labels)
+              || payload.labels.length > MAX_CREATE_LABELS
+              || !payload.labels.every((label) => typeof label === 'string' && PLAN_LABEL_RE.test(label))
+            )
+          ) {
+            return response(400, { error: 'invalid_plan_label' });
+          }
+          if (payload.epic_name_field !== undefined && !EPIC_NAME_FIELD_RE.test(payload.epic_name_field ?? '')) {
+            return response(400, { error: 'invalid_epic_name_field' });
+          }
           return jiraResponse(await requestJira(
             route`/rest/api/3/issue`,
             {
@@ -245,7 +269,36 @@ export function createProxyHandler({
                   issuetype: { name: payload.issue_type_name },
                   summary: payload.summary,
                   ...(payload.body !== undefined && { description: payload.body }),
+                  ...(payload.parent_key !== undefined && { parent: { key: payload.parent_key } }),
+                  ...(payload.labels !== undefined && payload.labels.length > 0 && { labels: payload.labels }),
+                  ...(payload.epic_name_field !== undefined && { [payload.epic_name_field]: payload.summary }),
                 },
+              }),
+            },
+          ));
+        case 'link_issues':
+          // "outward_issue_key blocks inward_issue_key". Only the Blocks type,
+          // between two different issues.
+          if (
+            payload.link_type !== BLOCKS_LINK_TYPE
+            || !ISSUE_KEY_RE.test(payload.outward_issue_key ?? '')
+            || !ISSUE_KEY_RE.test(payload.inward_issue_key ?? '')
+            || payload.outward_issue_key === payload.inward_issue_key
+          ) {
+            return response(400, { error: 'invalid_link_issues_request' });
+          }
+          return jiraResponse(await requestJira(
+            route`/rest/api/3/issueLink`,
+            {
+              method: 'POST',
+              headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                type: { name: BLOCKS_LINK_TYPE },
+                outwardIssue: { key: payload.outward_issue_key },
+                inwardIssue: { key: payload.inward_issue_key },
               }),
             },
           ));

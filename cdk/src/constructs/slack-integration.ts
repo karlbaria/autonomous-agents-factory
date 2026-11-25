@@ -40,8 +40,12 @@ const DEFAULT_TASK_RETENTION_DAYS = 90;
 /** OAuth-callback Lambda timeout (seconds). */
 const OAUTH_CALLBACK_TIMEOUT_SECONDS = 15;
 
-/** Slash-command processor (async worker) Lambda timeout (seconds). */
-const COMMAND_PROCESSOR_TIMEOUT_SECONDS = 30;
+/**
+ * Slash-command processor (async worker) Lambda timeout (seconds). 120 for
+ * Start, which files up to 15 stories with their links and starts the build
+ * (#82 decision 16); the planning session's lease (150 s) outlasts it.
+ */
+const COMMAND_PROCESSOR_TIMEOUT_SECONDS = 120;
 
 /** Slash-command acknowledger Lambda timeout (seconds). */
 const COMMAND_ACK_TIMEOUT_SECONDS = 3;

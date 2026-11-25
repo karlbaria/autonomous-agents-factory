@@ -33,7 +33,9 @@
  *   fixed structure and checks it. The "Technical design ready: N stories,
  *   about $X" message is the cost confirmation (decision 20): when the page no
  *   longer gives the numbers the latest message showed, Start asks again with
- *   the new ones. In this PR a passing check files nothing.
+ *   the new ones. A passing check files the design in Jira and starts the
+ *   build (PR 3b-2, `plan-file.ts`), then marks the page final, posts what
+ *   was filed and replaces the message's buttons.
  * - Each problem is posted in the thread; the PM fixes it in Confluence and
  *   clicks again. Cancel changes nothing but the session.
  *
@@ -45,6 +47,7 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { PlanningPageKind, PlanPageReadResult } from './confluence-page';
 import { logger } from './logger';
+import type { DesignToFile, FileDesignResult } from './plan-file';
 import {
   checkPlan,
   checkPrd,
@@ -59,6 +62,7 @@ import {
 import {
   cancelPlanningSession,
   claimApprovalLease,
+  completeFiling,
   completePrdApproval,
   getPlanningSession,
   releaseApprovalLease,
@@ -110,6 +114,10 @@ export interface PlanActionDeps {
   readonly markPageFinal: (pageId: string, mapping: ConfluenceMapping | null) => Promise<boolean>;
   /** Post in the session's Slack thread. */
   readonly postInThread: (session: PlanningSession, message: SlackMessage) => Promise<void>;
+  /** File a checked design in Jira and start the build (#82 PR 3b-2). */
+  readonly fileDesign: (session: PlanningSession, leaseSince: number, design: DesignToFile) => Promise<FileDesignResult>;
+  /** Replace the "Technical design ready" message (and its buttons) with `message`. */
+  readonly updateDesignMessage: (session: PlanningSession, message: SlackMessage) => Promise<void>;
   /** Reply only to the clicker. */
   readonly replyEphemeral: (responseUrl: string, text: string) => Promise<void>;
 }
@@ -118,7 +126,6 @@ export interface PlanActionDeps {
 const MAX_LISTED_PROBLEMS = 20;
 
 export const ONLY_REQUESTER_TEXT = ':no_entry: Only the requester can use these buttons.';
-export const CHECK_PASSED_TEXT = 'Check passed — filing arrives in the next update';
 export const PRD_APPROVED_TEXT = 'PRD approved — writing the technical design';
 
 function plain(text: string): SlackMessage {
@@ -204,10 +211,7 @@ async function handle(event: PlanActionEvent, deps: PlanActionDeps): Promise<voi
 
   if (event.action === 'cancel') {
     if (await cancelPlanningSession(deps.ddb, deps.tableName, session.session_id, nowSeconds())) {
-      const text = isPrd(session)
-        ? ':no_entry_sign: PRD cancelled. No technical design will be written, and the Confluence page is unchanged.'
-        : ':no_entry_sign: Technical design cancelled. Nothing was filed, and the Confluence page is unchanged.';
-      await deps.postInThread(session, plain(text));
+      await deps.postInThread(session, plain(cancelledText(session)));
     } else {
       const current = await getPlanningSession(deps.ddb, deps.tableName, session.session_id, nowSeconds());
       await deps.replyEphemeral(event.response_url, closedText(current));
@@ -235,19 +239,30 @@ async function handle(event: PlanActionEvent, deps: PlanActionDeps): Promise<voi
   try {
     confirmDigest = isPrd(session)
       ? await approvePrd(session, leaseSince, deps)
-      : await checkAndGateDesign(event.action, session, deps);
+      : await checkAndGateDesign(event.action, session, leaseSince, deps);
   } finally {
     await releaseApprovalLease(deps.ddb, deps.tableName, session.session_id, leaseSince, confirmDigest);
   }
 }
 
-/** The page's plain text, or null (with the problem posted) when it can't be used. */
+/** What Cancel says: what was already filed, if anything (#82 PR 3b-2). */
+function cancelledText(session: PlanningSession): string {
+  if (isPrd(session)) return ':no_entry_sign: PRD cancelled. No technical design will be written, and the Confluence page is unchanged.';
+  const filed = [session.filing_parent?.key, ...Object.values(session.filing_children ?? {}).map((c) => c.key)]
+    .filter((k): k is string => Boolean(k));
+  if (filed.length === 0) return ':no_entry_sign: Technical design cancelled. Nothing was filed, and the Confluence page is unchanged.';
+  const build = session.filing_build_started ? ' The build had already started; cancel its tasks with `bgagent cancel` if you need to.' : '';
+  return `:no_entry_sign: Technical design cancelled. These issues were already filed in Jira and are still there: ${filed.join(', ')}.`
+    + `${build} Remove them by hand if you don't want them.`;
+}
+
+/** The page as Start read it, or null (with the problem posted) when it can't be used. */
 async function readPageText(
   session: PlanningSession,
   mapping: ConfluenceMapping | null,
   kind: PlanningPageKind,
   deps: PlanActionDeps,
-): Promise<string | null> {
+): Promise<{ readonly text: string; readonly title: string; readonly version: number | null } | null> {
   const page = await deps.readPlanPage(session.page_id, mapping, kind);
   if (!page.ok) {
     await deps.postInThread(session, plain(`:warning: ${escapeSlackText(page.message)}`));
@@ -263,7 +278,7 @@ async function readPageText(
     return null;
   }
   logger.info('Planning page read', { session_id: session.session_id, page_id: session.page_id, kind, page_version: page.version });
-  return text;
+  return { text, title: page.title, version: page.version };
 }
 
 /**
@@ -272,10 +287,10 @@ async function readPageText(
  */
 async function approvePrd(session: PlanningSession, leaseSince: number, deps: PlanActionDeps): Promise<undefined> {
   const mapping = await deps.lookupRepoConfig(session.repo);
-  const text = await readPageText(session, mapping, 'prd', deps);
-  if (text === null) return undefined;
+  const page = await readPageText(session, mapping, 'prd', deps);
+  if (page === null) return undefined;
 
-  const prd = parsePrd(text);
+  const prd = parsePrd(page.text);
   const problems = checkPrd(prd);
   logger.info('PRD checked', {
     session_id: session.session_id,
@@ -307,16 +322,21 @@ async function approvePrd(session: PlanningSession, leaseSince: number, deps: Pl
 
 /**
  * Start: re-read, parse and check the design, then either post the problems,
- * ask again when the numbers changed, or report a passing check. Returns the
- * digest of the numbers a new message showed, or undefined to keep the one
+ * ask again when the numbers changed, or file it and start the build. Returns
+ * the digest of the numbers a new message showed, or undefined to keep the one
  * the session has.
  */
-async function checkAndGateDesign(action: PlanAction, session: PlanningSession, deps: PlanActionDeps): Promise<string | undefined> {
+async function checkAndGateDesign(
+  action: PlanAction,
+  session: PlanningSession,
+  leaseSince: number,
+  deps: PlanActionDeps,
+): Promise<string | undefined> {
   const mapping = await deps.lookupRepoConfig(session.repo);
-  const text = await readPageText(session, mapping, 'design', deps);
-  if (text === null) return undefined;
+  const page = await readPageText(session, mapping, 'design', deps);
+  if (page === null) return undefined;
 
-  const plan = parsePlan(text);
+  const plan = parsePlan(page.text);
   const problems = checkPlan(plan);
   logger.info('Design checked', {
     session_id: session.session_id,
@@ -337,7 +357,58 @@ async function checkAndGateDesign(action: PlanAction, session: PlanningSession, 
     return digest;
   }
 
-  const stories = storyCount === 1 ? '1 story' : `${storyCount} stories`;
-  await deps.postInThread(session, plain(`:white_check_mark: ${CHECK_PASSED_TEXT}. The design has ${stories} and nothing has been filed.`));
+  const filed = await deps.fileDesign(session, leaseSince, {
+    plan,
+    pageId: session.page_id,
+    pageTitle: page.title,
+    pageVersion: page.version,
+  });
+  if (filed.kind === 'blocked') {
+    await deps.postInThread(session, plain(
+      `:no_entry: Story ${filed.storyId} (“${escapeSlackText(filed.title)}”) was blocked by the content policy, so nothing was filed. `
+      + 'Change it in Confluence, then click Start again.',
+    ));
+    return undefined;
+  }
+  if (filed.kind === 'stopped') {
+    await deps.postInThread(session, plain(`:warning: ${escapeSlackText(filed.message)}`));
+    return undefined;
+  }
+
+  if (!await completeFiling(deps.ddb, deps.tableName, session.session_id, leaseSince)) {
+    logger.warn('Filing lease was taken over after the build started', { session_id: session.session_id });
+  }
+  const finalOk = await deps.markPageFinal(session.page_id, mapping);
+  await deps.postInThread(session, startedMessage(filed));
+  if (!finalOk) {
+    await deps.postInThread(session, plain(':warning: I couldn\'t mark the design page final in Confluence; it still has the `factory-draft` label.'));
+  }
+  await deps.updateDesignMessage(session, startedDesignMessage(filed, storyCount));
   return undefined;
+}
+
+/** A Slack link to a Jira issue. */
+function issueLink(siteUrl: string, key: string): string {
+  return `<${siteUrl.replace(/\/$/, '')}/browse/${encodeURIComponent(key)}|${escapeSlackText(key)}>`;
+}
+
+export const STARTED_TEXT = 'Started';
+
+/** "Started — N stories filed: …" in the thread. */
+function startedMessage(filed: Extract<FileDesignResult, { kind: 'started' }>): SlackMessage {
+  const count = filed.stories.length === 1 ? '1 story' : `${filed.stories.length} stories`;
+  const stories = filed.stories.map((s) => `${escapeSlackText(s.storyId)} ${issueLink(filed.siteUrl, s.key)}`).join(', ');
+  const epic = filed.parentIsEpic ? ` under the epic ${issueLink(filed.siteUrl, filed.parent.key)}` : '';
+  const build = filed.parentIsEpic
+    ? 'The build runs them in dependency order, and the epic shows its progress.'
+    : 'The build has started; the story shows its progress.';
+  const text = `:rocket: *${STARTED_TEXT} — ${count} filed:* ${stories}${epic}. ${build}`;
+  return { text: `${STARTED_TEXT} — ${count} filed`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] };
+}
+
+/** The design message once started: its headline, without the buttons. */
+function startedDesignMessage(filed: Extract<FileDesignResult, { kind: 'started' }>, storyCount: number): SlackMessage {
+  const count = storyCount === 1 ? '1 story' : `${storyCount} stories`;
+  const text = `:white_check_mark: *Technical design started: ${count}.* Filed as ${issueLink(filed.siteUrl, filed.parent.key)}.`;
+  return { text: `Technical design started: ${count}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] };
 }

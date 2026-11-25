@@ -93,6 +93,10 @@ export interface ParsedPlan {
   readonly openQuestions: readonly PlanOpenQuestion[];
   /** The questions section has text that isn't `Q<n>` headings or "None". */
   readonly openQuestionsMalformed: boolean;
+  /** The "Summary" section's text (#82 PR 3b-2: the filed parent's description). */
+  readonly summary: string;
+  /** The "Source" section's text: the PRD link, or "the request in Slack". */
+  readonly source: string;
 }
 
 /** The structure Approve PRD works from. */
@@ -291,7 +295,12 @@ interface ParsedPage {
   readonly decisions: DecisionDraft[];
   readonly questions: QuestionDraft[];
   readonly questionsStray: boolean;
+  /** Lines of the free-text sections the filing reads, by section name. */
+  readonly sections: ReadonlyMap<string, readonly string[]>;
 }
+
+/** Free-text sections of a design whose text is kept (#82 PR 3b-2). */
+const TEXT_SECTIONS: ReadonlySet<string> = new Set(['summary', 'source']);
 
 /**
  * One pass over a page's plain text. Questions are read only in
@@ -307,6 +316,7 @@ function parsePage(text: string, questionSections: ReadonlySet<string>): ParsedP
   let question: QuestionDraft | null = null;
   let decision: DecisionDraft | null = null;
   let questionsStray = false;
+  const sections = new Map<string, string[]>();
 
   for (const rawLine of text.split('\n')) {
     const line = rawLine.replace(/\u00a0/g, ' ').trim();
@@ -322,6 +332,10 @@ function parsePage(text: string, questionSections: ReadonlySet<string>): ParsedP
     }
     const inQuestions = questionSections.has(section);
     const inDecisions = section === DECISIONS_SECTION;
+    if (TEXT_SECTIONS.has(section)) {
+      sections.set(section, [...(sections.get(section) ?? []), h ? h.text : line]);
+      continue;
+    }
 
     if (h && h.level === ITEM_HEADING_LEVEL) {
       story = null;
@@ -365,7 +379,7 @@ function parsePage(text: string, questionSections: ReadonlySet<string>): ParsedP
       addStoryLine(story, line, h);
     }
   }
-  return { stories, decisions, questions, questionsStray };
+  return { stories, decisions, questions, questionsStray, sections };
 }
 
 function finishQuestions(questions: readonly QuestionDraft[]): PlanOpenQuestion[] {
@@ -392,6 +406,8 @@ export function parsePlan(text: string): ParsedPlan {
     })),
     openQuestions: finishQuestions(page.questions),
     openQuestionsMalformed: page.questionsStray,
+    summary: (page.sections.get('summary') ?? []).join('\n').trim(),
+    source: (page.sections.get('source') ?? []).join('\n').trim(),
   };
 }
 
@@ -502,9 +518,13 @@ export function checkPlan(plan: ParsedPlan): PlanProblem[] {
   return problems;
 }
 
-/** Estimated coding cost of a design, in USD. */
+/**
+ * Estimated coding cost of a design, in USD: one task per story, plus the
+ * integration task an orchestration of two or more stories ends with (#89).
+ */
 export function estimatedPlanCostUsd(storyCount: number): number {
-  return storyCount * PER_STORY_COST_USD;
+  const tasks = storyCount >= 2 ? storyCount + 1 : storyCount;
+  return tasks * PER_STORY_COST_USD;
 }
 
 /**
@@ -520,11 +540,18 @@ export function designNumbersDigest(storyCount: number): string {
 
 /**
  * Digest of what would be filed: the stories' ids, titles, bodies, blockers,
- * criteria and technical notes. For PR 3b-2's filing checkpoint: an edit to
- * any story changes it; an edit elsewhere in the page (Risks, Repo findings)
+ * criteria and technical notes, the technical decisions, the Summary and the
+ * Source. PR 3b-2's filing freezes it before the first Jira write, so a retry
+ * resumes only while the page still says the same thing: an edit to any of
+ * those changes it; an edit elsewhere in the page (Risks, Repo findings)
  * doesn't.
  */
 export function planDigest(plan: ParsedPlan): string {
-  const canonical = plan.stories.map((s) => [s.id, s.title, s.body, s.blockedBy, s.acceptanceCriteria, s.technicalNotes]);
+  const canonical = [
+    plan.stories.map((s) => [s.id, s.title, s.body, s.blockedBy, s.acceptanceCriteria, s.technicalNotes]),
+    plan.decisions.map((d) => [d.id, d.decision, d.reason, d.body]),
+    plan.summary,
+    plan.source,
+  ];
   return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
