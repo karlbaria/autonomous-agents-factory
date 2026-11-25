@@ -34,6 +34,7 @@ def test_fixture_set_is_not_empty():
         "code_blocks",
         "escaping_and_lossy",
         "headings_and_inline",
+        "identifiers",
         "lists",
         "table",
     } <= set(FIXTURE_NAMES)
@@ -104,6 +105,14 @@ class TestBlocks:
         # Only [A-Za-z0-9_+#.-] survive: no quote or tag can break out.
         assert '<ac:parameter ac:name="language">c++x</ac:parameter>' in out
         _parse(out)
+
+    def test_intraword_double_underscore_is_not_bold(self):
+        # #96: two BEM classes in one line are identifiers, not bold text.
+        out = markdown_to_confluence_storage("site-header__bag-count and site-header__bag")
+        assert out == "<p>site-header__bag-count and site-header__bag</p>"
+
+    def test_double_underscore_bold_still_renders(self):
+        assert markdown_to_confluence_storage("a __b__ c") == "<p>a <strong>b</strong> c</p>"
 
     def test_heading_with_closing_hashes(self):
         assert markdown_to_confluence_storage("## Title ##") == "<h2>Title</h2>"

@@ -41,7 +41,9 @@ _CODE_LANGUAGE_RE = re.compile(r"[^A-Za-z0-9_+#.-]")
 _CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1", re.DOTALL)
 # ``(?<!!)`` keeps an image ``![alt](src)`` out — images are lossy plain text.
 _LINK_RE = re.compile(r"(?<!!)\[([^\[\]]+)\]\(([^()\s]+)\)")
-_BOLD_RE = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")
+# ``__`` is word-bounded like ``_`` (#96): ``site-header__bag-count and
+# site-header__bag`` is two identifiers, not bold text between them.
+_BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<![\w_])__(?=\S)(.+?)(?<=\S)__(?![\w_])")
 _ITALIC_STAR_RE = re.compile(r"(?<![\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])")
 _ITALIC_UNDERSCORE_RE = re.compile(r"(?<![\w_])_(?=[^\s_])(.+?)(?<=[^\s_])_(?![\w_])")
 _SAFE_URL_RE = re.compile(r"^(?:https?://|mailto:|/|#|\./|\.\./)", re.IGNORECASE)
@@ -105,7 +107,7 @@ def _inline(text: str) -> str:
 
 
 def _emphasis(escaped: str) -> str:
-    escaped = _BOLD_RE.sub(r"<strong>\2</strong>", escaped)
+    escaped = _BOLD_RE.sub(lambda m: f"<strong>{m.group(1) or m.group(2)}</strong>", escaped)
     escaped = _ITALIC_STAR_RE.sub(r"<em>\1</em>", escaped)
     return _ITALIC_UNDERSCORE_RE.sub(r"<em>\1</em>", escaped)
 

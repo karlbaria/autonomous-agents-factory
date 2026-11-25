@@ -1,0 +1,31 @@
+## Summary
+
+Shoppers can add items to a bag.
+
+## Source
+
+The request in Slack.
+
+## Technical decisions
+
+### D1: Keep the bag in `localStorage` under `factory_shop.bag`
+
+Reason: it survives a refresh; `TTL_MS` expires it.
+
+## Stories
+
+### S1: Add `MAX_PER_LINE` items to the bag
+
+Blocked by: none
+
+**Acceptance criteria**
+
+- Adding a line already at `MAX_PER_LINE` shows `LIMIT_MESSAGE`.
+- The header badge `.site-header__bag-count` shows the total.
+
+**Technical notes**
+
+- `MAX_PER_LINE = 3`, `LIMIT_MESSAGE`, `TTL_MS = 30 * 60 * 1000`
+- Bare names too: MAX_PER_LINE, TTL_MS = 30 * 60 * 1000
+- Bare BEM classes: site-header__bag-count next to site-header__bag
+- Real emphasis still renders: **bold**, *italic*, _italic_ and __bold__
