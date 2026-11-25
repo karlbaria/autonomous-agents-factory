@@ -23,7 +23,7 @@ import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import { slackFetch } from './shared/slack-api';
-import { extractRepoCandidates, removeRepoMention } from './shared/slack-repo-text';
+import { extractRepoCandidates, parseExplicitSubmit, removeRepoMention } from './shared/slack-repo-text';
 import { getSlackSecret, SLACK_SECRET_PREFIX, verifySlackRequest } from './shared/slack-verify';
 import { makeClient, makeDocClient } from './shared/ua';
 import type { MentionEvent, SlackFileRef } from './slack-command-processor';
@@ -191,13 +191,17 @@ async function handleAppMention(
   // default exists. Keeping that decision in one place (the processor) avoids
   // duplicating the channel-mapping lookup in the events handler.
   //
-  // `extractRepoCandidates` excludes a match that's actually a deeper segment
-  // of a longer path (e.g. "api/products" lifted out of the URL
-  // "/api/products/count") — see its doc comment. Two or more surviving
+  // An explicit `submit <owner/repo> …` wins outright and skips candidate
+  // extraction (#92): it's the escape the ambiguity reply below suggests.
+  //
+  // `extractRepoCandidates` excludes path-like tokens ("frontend/src/App.jsx",
+  // "/api/products/count", "dist/index.html") and anything inside a link —
+  // see its doc comment. Two or more surviving
   // candidates is genuine ambiguity (two real-looking repo names in one
   // message): rather than guess, ask in-thread which one was meant and don't
   // forward to the processor at all.
-  const repoCandidates = extractRepoCandidates(text);
+  const explicit = parseExplicitSubmit(text);
+  const repoCandidates = explicit ? [] : extractRepoCandidates(text);
   if (repoCandidates.length > 1) {
     if (botToken && mentionTs) {
       await slackFetch(botToken, 'chat.postMessage', {
@@ -215,7 +219,9 @@ async function handleAppMention(
   }
 
   let commandText: string;
-  if (repoCandidates.length === 1) {
+  if (explicit) {
+    commandText = `submit ${explicit.repo} ${explicit.description}`.trim();
+  } else if (repoCandidates.length === 1) {
     const repo = repoCandidates[0];
     // Drops the words that only pointed at the repo too ("In owner/repo, add
     // X" → "add X"; "add X in owner/repo" → "add X"), never touching a link.

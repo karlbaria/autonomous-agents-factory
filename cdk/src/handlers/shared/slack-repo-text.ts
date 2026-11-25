@@ -23,11 +23,30 @@
  *
  * Links are masked before the scan, so nothing inside a URL — a Confluence
  * page such as `…/wiki/spaces/SD/pages/123/Title`, or any other link — is
- * read as a repo, and the repo is never cut out of a link.
+ * read as a repo, and the repo is never cut out of a link. File paths are
+ * not read as repos either (#92).
  */
 
 /** Pattern for an "owner/repo" or "owner/repo#N" candidate inside free text. */
 const REPO_CANDIDATE_PATTERN = /\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:#\d+)?)\b/g;
+
+/** A file extension at the end of the last segment (`src/main.tsx`, `dist/index.html`). */
+const FILE_EXTENSION = /\.[a-zA-Z][a-zA-Z0-9]{0,4}$/;
+
+/** `submit <owner/repo>[ description]` — the explicit form (#92). */
+const EXPLICIT_SUBMIT = /^submit\s+([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:#\d+)?)(?:\s+([\s\S]*))?$/i;
+
+/**
+ * The repo and description of a message written as `submit <owner/repo>
+ * <description>`, or `null` when the message doesn't start that way. The
+ * repo is taken as given: the rest of the message is not scanned for
+ * candidates, so paths or other repo names in the description don't matter.
+ */
+export function parseExplicitSubmit(text: string): { repo: string; description: string } | null {
+  const match = EXPLICIT_SUBMIT.exec(text.trim());
+  if (!match) return null;
+  return { repo: match[1], description: (match[2] ?? '').trim() };
+}
 
 /**
  * A link as Slack sends it (`<https://…>` or `<https://…|label>`, also any
@@ -51,8 +70,12 @@ function findRepoMentions(text: string): RepoMention[] {
   const mentions: RepoMention[] = [];
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(masked)) !== null) {
-    // A deeper segment of a longer path ("api/products" in "/api/products/count").
-    if (masked[match.index - 1] === '/') continue;
+    // Part of a longer path: a deeper segment ("api/products" in
+    // "/api/products/count", also "./x/y"), or the start of one with three or
+    // more segments ("frontend/src" in "frontend/src/App.jsx").
+    if (masked[match.index - 1] === '/' || masked[match.index + match[0].length] === '/') continue;
+    // A file, not a repo ("frontend/index.html").
+    if (FILE_EXTENSION.test(match[1])) continue;
     mentions.push({ token: match[1], index: match.index });
   }
   return mentions;
@@ -60,10 +83,10 @@ function findRepoMentions(text: string): RepoMention[] {
 
 /**
  * Candidate "owner/repo[#N]" tokens found in free text, in order of first
- * appearance, de-duplicated. Excludes a match that's actually a deeper
- * segment of a longer path rather than a real repo mention — e.g.
- * "api/products" lifted out of the URL path "/api/products/count" — detected
- * by the character immediately before the match being a "/", and anything
+ * appearance, de-duplicated. Path-like tokens are never candidates: a match
+ * with a "/" directly before or after it (a path of three or more segments,
+ * a leading "/" or "./", or a deeper segment such as "api/products" in
+ * "/api/products/count"), a match ending in a file extension, and anything
  * inside a link (see {@link maskLinks}).
  */
 export function extractRepoCandidates(text: string): string[] {

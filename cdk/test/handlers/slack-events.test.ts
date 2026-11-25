@@ -309,6 +309,95 @@ describe('slack-events handler', () => {
     });
   });
 
+  // #92: file paths are never repo candidates, and `submit <owner/repo>` wins.
+  describe('repo detection with file paths (#92)', () => {
+    function mockSlack(): void {
+      fetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+      smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+        if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
+          return Promise.resolve({ SecretString: SIGNING_SECRET });
+        }
+        return Promise.resolve({ SecretString: 'xoxb-bot' });
+      });
+    }
+
+    async function mention(text: string): Promise<void> {
+      const body = JSON.stringify({
+        type: 'event_callback',
+        team_id: 'T1',
+        event: { type: 'app_mention', user: 'U1', channel: 'C1', text: `<@BOT> ${text}`, ts: '1234.0200' },
+      });
+      const result = await handler(signedEvent(body));
+      expect(result.statusCode).toBe(200);
+    }
+
+    async function forwardedText(text: string): Promise<string> {
+      mockSlack();
+      lambdaSend.mockResolvedValueOnce({});
+      await mention(text);
+      expect(lambdaSend).toHaveBeenCalledTimes(1);
+      const [invokeCmd] = lambdaSend.mock.calls[0];
+      return JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload)).text;
+    }
+
+    function clarifyReply(): string | undefined {
+      const call = fetchMock.mock.calls.find(
+        ([url, opts]) => String(url).includes('chat.postMessage')
+          && String((opts as { body: string }).body).includes('more than one repo-looking name'),
+      );
+      return call ? JSON.parse((call[1] as { body: string }).body).text : undefined;
+    }
+
+    const FAILING = 'In karlbaria/factory-shop, add a product detail page: the component goes in '
+      + 'frontend/src/pages/ProductDetail.jsx and the build output in frontend/dist/';
+
+    test('reported message 1: one repo plus frontend/src and frontend/dist paths resolves to the repo', async () => {
+      expect(await forwardedText(FAILING)).toBe(
+        'submit karlbaria/factory-shop add a product detail page: the component goes in '
+        + 'frontend/src/pages/ProductDetail.jsx and the build output in frontend/dist/',
+      );
+      expect(clarifyReply()).toBeUndefined();
+    });
+
+    test('reported message 2: the same message with a submit karlbaria/factory-shop prefix', async () => {
+      expect(await forwardedText(`submit karlbaria/factory-shop ${FAILING}`))
+        .toBe(`submit karlbaria/factory-shop ${FAILING}`);
+      expect(clarifyReply()).toBeUndefined();
+    });
+
+    test('submit <owner/repo> wins over bare two-segment paths and other repo names', async () => {
+      expect(await forwardedText('submit karlbaria/factory-shop move frontend/src to frontend/dist, like org/other does'))
+        .toBe('submit karlbaria/factory-shop move frontend/src to frontend/dist, like org/other does');
+      expect(clarifyReply()).toBeUndefined();
+    });
+
+    test('one real repo plus several paths resolves to that repo', async () => {
+      expect(await forwardedText('In karlbaria/factory-shop, update backend/app/main.py, ./scripts/build and frontend/index.html'))
+        .toBe('submit karlbaria/factory-shop update backend/app/main.py, ./scripts/build and frontend/index.html');
+    });
+
+    test('two real repos plus paths still ask which one, and do not forward', async () => {
+      mockSlack();
+      await mention('port frontend/src/App.jsx from karlbaria/factory-sandbox-py to karlbaria/factory-shop');
+      expect(lambdaSend).not.toHaveBeenCalled();
+      const reply = clarifyReply();
+      expect(reply).toContain('`karlbaria/factory-sandbox-py`, `karlbaria/factory-shop`');
+      expect(reply).not.toContain('frontend/src');
+    });
+
+    test('only paths, no repo, falls back to the channel default', async () => {
+      expect(await forwardedText('fix the layout in frontend/src/App.jsx and frontend/dist/'))
+        .toBe('submit fix the layout in frontend/src/App.jsx and frontend/dist/');
+    });
+
+    test('plan from <Confluence URL> in owner/repo resolves the repo and never reads the URL', async () => {
+      const url = 'https://karlvb.atlassian.net/wiki/spaces/SD/pages/1015867/Wishlist+PRD';
+      expect(await forwardedText(`plan from <${url}> in karlbaria/factory-shop`))
+        .toBe(`submit karlbaria/factory-shop plan from <${url}>`);
+      expect(clarifyReply()).toBeUndefined();
+    });
+  });
+
   // Two real, non-URL-path candidates — don't guess; ask in-thread instead.
   test('asks for clarification in-thread when more than one repo candidate remains, and does not forward', async () => {
     fetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
