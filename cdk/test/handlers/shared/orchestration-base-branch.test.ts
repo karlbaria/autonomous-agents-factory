@@ -81,4 +81,20 @@ describe('selectBaseBranch', () => {
     expect(sel.base_branch).toBe('same');
     expect(sel.merge_branches).toEqual([]);
   });
+
+  // #89: the integration node always branches off main and merges every leaf,
+  // even a single one, so its PR targets main.
+  test('mergeIntoDefault with one predecessor → diamond off main, merging it', () => {
+    const sel = selectBaseBranch({ predecessors: [pred('B', 'bgagent/taskB/step-b')], mergeIntoDefault: true });
+    expect(sel).toEqual({ base_branch: 'main', merge_branches: ['bgagent/taskB/step-b'], shape: 'diamond' });
+  });
+
+  test('mergeIntoDefault with several predecessors → the usual diamond', () => {
+    const sel = selectBaseBranch({ predecessors: [pred('B', 'b'), pred('C', 'c')], mergeIntoDefault: true });
+    expect(sel).toEqual({ base_branch: 'main', merge_branches: ['b', 'c'], shape: 'diamond' });
+  });
+
+  test('mergeIntoDefault with no usable predecessor branch → root', () => {
+    expect(selectBaseBranch({ predecessors: [pred('B', '')], mergeIntoDefault: true }).shape).toBe('root');
+  });
 });

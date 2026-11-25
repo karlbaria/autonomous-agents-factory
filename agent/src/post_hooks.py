@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -784,6 +785,12 @@ UNRESOLVED_LABEL = "review:unresolved"
 NEEDS_HUMAN_LABEL = "needs-human"
 #: The PR-body heading the ``flag_concern`` reasons go under.
 NEEDS_HUMAN_HEADING = "## ⚠️ Needs a human"
+#: #89: a story PR of an orchestration that has an integration node. Only the
+#: integration PR, which merges every story branch, is meant to reach the
+#: default branch; factory-shop's watchdog never merges a PR carrying this.
+FACTORY_STACKED_LABEL = "factory-stacked"
+#: The ``channel_metadata`` flag the platform sets on such a story's task.
+ORCHESTRATION_STACKED_KEY = "orchestration_stacked"
 
 
 def apply_unresolved_label(
@@ -838,41 +845,155 @@ def flag_pr_for_human(repo_dir: str, repo_url: str, pr_url: str, reason: str) ->
     Returns how the PR is held: ``"labelled"``, ``"draft"`` or ``"unheld"``
     (every step failed; logged as an error).
     """
-    held = "labelled"
-    if not apply_unresolved_label(repo_dir, repo_url, pr_url, label=NEEDS_HUMAN_LABEL):
-        run_cmd(
-            [
-                "gh",
-                "label",
-                "create",
-                NEEDS_HUMAN_LABEL,
-                "--repo",
-                repo_url,
-                "--force",
-                "--color",
-                "B60205",
-                "--description",
-                "Flagged by the factory agent: a person must check before merge",
-            ],
-            label="create-needs-human-label",
-            cwd=repo_dir,
-            check=False,
-        )
-        if not apply_unresolved_label(repo_dir, repo_url, pr_url, label=NEEDS_HUMAN_LABEL):
-            draft = run_cmd(
-                ["gh", "pr", "ready", pr_url, "--repo", repo_url, "--undo"],
-                label="draft-flagged-pr",
-                cwd=repo_dir,
-                check=False,
-            )
-            held = "draft" if draft.returncode == 0 else "unheld"
-            log(
-                "ERROR" if held == "unheld" else "WARN",
-                f"could not label {pr_url} {NEEDS_HUMAN_LABEL}; "
-                + ("converted it to a draft instead" if held == "draft" else "it is NOT held"),
-            )
+    held = _hold_pr_with_label(
+        repo_dir,
+        repo_url,
+        pr_url,
+        NEEDS_HUMAN_LABEL,
+        color="B60205",
+        description="Flagged by the factory agent: a person must check before merge",
+    )
     _append_pr_appendix(repo_dir, repo_url, pr_url, needs_human_section(reason))
     return held
+
+
+def _hold_pr_with_label(
+    repo_dir: str, repo_url: str, pr_url: str, label: str, *, color: str, description: str
+) -> str:
+    """Apply a merge-gate ``label``, creating it if needed, else draft the PR.
+
+    Returns ``"labelled"``, ``"draft"`` or ``"unheld"`` (every step failed;
+    logged as an error).
+    """
+    if apply_unresolved_label(repo_dir, repo_url, pr_url, label=label):
+        return "labelled"
+    run_cmd(
+        [
+            "gh",
+            "label",
+            "create",
+            label,
+            "--repo",
+            repo_url,
+            "--force",
+            "--color",
+            color,
+            "--description",
+            description,
+        ],
+        label=f"create-{label}-label",
+        cwd=repo_dir,
+        check=False,
+    )
+    if apply_unresolved_label(repo_dir, repo_url, pr_url, label=label):
+        return "labelled"
+    draft = run_cmd(
+        ["gh", "pr", "ready", pr_url, "--repo", repo_url, "--undo"],
+        label="draft-flagged-pr",
+        cwd=repo_dir,
+        check=False,
+    )
+    held = "draft" if draft.returncode == 0 else "unheld"
+    log(
+        "ERROR" if held == "unheld" else "WARN",
+        f"could not label {pr_url} {label}; "
+        + ("converted it to a draft instead" if held == "draft" else "it is NOT held"),
+    )
+    return held
+
+
+def _inherited_hold_reason(repo_dir: str, repo_url: str, branch: str) -> str | None:
+    """Why this PR must inherit ``needs-human`` from ``branch``'s PR, or ``None``.
+
+    Any PR state counts (a predecessor's PR is normally still open). Fails
+    closed: when the PR list can't be read, the PR is held too, with the
+    reason saying so, since a flagged predecessor can't be ruled out.
+    """
+    unreadable = (
+        f"Could not check whether the PR of `{branch}`, which this PR builds on, is "
+        f"labelled `{NEEDS_HUMAN_LABEL}`, so this PR is held as well."
+    )
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo_url,
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--json",
+                "number,labels",
+            ],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        prs = json.loads(result.stdout or "[]") if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        log("WARN", f"could not list PRs of {branch} ({type(exc).__name__}) — holding")
+        return unreadable
+    if not isinstance(prs, list):
+        log("WARN", f"could not list PRs of {branch} (rc={result.returncode}) — holding")
+        return unreadable
+    for pr in prs:
+        labels = pr.get("labels") if isinstance(pr, dict) else None
+        names = {lbl.get("name") for lbl in labels or [] if isinstance(lbl, dict)}
+        if NEEDS_HUMAN_LABEL in names and isinstance(pr.get("number"), int):
+            number = pr["number"]
+            return (
+                f"Inherited from #{number}: this PR builds on #{number}, which is labelled "
+                f"`{NEEDS_HUMAN_LABEL}`."
+            )
+    return None
+
+
+def hold_orchestration_pr(
+    repo_dir: str, config: TaskConfig, pr_url: str, default_branch: str
+) -> None:
+    """Gate an orchestration child's new PR before its review status is posted (#89).
+
+    - A story of an orchestration with an integration node is labelled
+      ``factory-stacked``: only the integration PR is meant to reach main.
+    - A child built on a flagged predecessor inherits ``needs-human``: if the
+      PR of its base branch, or of any predecessor branch merged into it, is
+      labelled ``needs-human``, so is this one, with "inherited from #N" in
+      its body. That covers the integration PR, and chains transitively.
+
+    Runs before ``post_review_status`` so the watchdog never sees a green PR
+    that is about to be held. No-op for a task that isn't an orchestration child.
+    """
+    meta = config.channel_metadata or {}
+    if not meta.get("orchestration_id"):
+        return
+    if meta.get(ORCHESTRATION_STACKED_KEY) == "true":
+        held = _hold_pr_with_label(
+            repo_dir,
+            config.repo_url,
+            pr_url,
+            FACTORY_STACKED_LABEL,
+            color="5319E7",
+            description="A story PR of a factory build: it reaches main through the integration PR",
+        )
+        log("POST", f"Story PR of a multi-story build — {FACTORY_STACKED_LABEL}: {held}")
+    predecessors = [
+        b
+        for b in dict.fromkeys(
+            [*([config.base_branch] if config.base_branch else []), *config.merge_branches]
+        )
+        if b and b != default_branch
+    ]
+    for branch in predecessors:
+        reason = _inherited_hold_reason(repo_dir, config.repo_url, branch)
+        if reason is None:
+            continue
+        held = flag_pr_for_human(repo_dir, config.repo_url, pr_url, reason)
+        log("POST", f"{NEEDS_HUMAN_LABEL} inherited through {branch} — PR held: {held}")
+        return
 
 
 def _append_pr_appendix(repo_dir: str, repo_url: str, pr_url: str, appendix: str) -> None:
@@ -1029,6 +1150,7 @@ def ensure_pr(
         appendix = _cost_line(agent_result, ledger) + _review_section(review_outcome)
         if appendix.strip():
             _append_pr_appendix(repo_dir, config.repo_url, pr_url, appendix)
+        hold_orchestration_pr(repo_dir, config, pr_url, default_branch)
         post_review_status(repo_dir, config.repo_url, review_outcome)
         return pr_url
 
@@ -1140,6 +1262,7 @@ def ensure_pr(
     if pr_result.returncode == 0:
         pr_url = pr_result.stdout.strip()
         log("POST", f"PR created: {pr_url}")
+        hold_orchestration_pr(repo_dir, config, pr_url, default_branch)
         post_review_status(repo_dir, config.repo_url, review_outcome)
         return pr_url
     log("POST", "Failed to create PR")

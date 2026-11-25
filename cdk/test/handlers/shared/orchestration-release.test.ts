@@ -18,6 +18,7 @@
  */
 
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { withIntegrationNode } from '../../../src/handlers/shared/orchestration-integration-node';
 import {
   applyTerminalCreateFailures,
   readConcurrencyBudget,
@@ -904,6 +905,75 @@ describe('releaseReadyChildren — the concurrency throttle', () => {
       .filter(Boolean);
     const releaseOrder = subsPerCall.filter((s, i) => s !== subsPerCall[i - 1]);
     expect(releaseOrder).toEqual(['L00', 'L01']);
+  });
+});
+
+// #89: only the integration PR may reach main. Every story PR carries
+// orchestration_stacked (the agent labels it factory-stacked, which the
+// watchdog never merges), and the integration node branches off main and
+// merges every leaf in, even a single one.
+describe('releaseReadyChildren — only the integration PR targets main unheld', () => {
+  interface Released {
+    readonly sub: string;
+    readonly base: string;
+    readonly merges: readonly string[];
+    readonly stacked: boolean;
+  }
+
+  /** Release the graph layer by layer, as the seed and the reconciler would. */
+  async function runGraph(nodes: { id: string; depends_on: string[] }[]): Promise<Released[]> {
+    const graph = withIntegrationNode(nodes.map((n) => ({ ...n, title: n.id })), 'orch_abc').nodes;
+    let rows: OrchestrationChildRow[] = graph.map((n) => makeRow({
+      sub_issue_id: n.id, depends_on: [...n.depends_on], child_status: n.depends_on.length === 0 ? 'ready' : 'blocked',
+    }));
+    const released: Released[] = [];
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    for (let layer = 0; layer < graph.length && rows.some((r) => r.child_status !== 'succeeded'); layer++) {
+      const createTaskCore = jest.fn().mockImplementation((_body: unknown, ctx: { channelMetadata: Record<string, string> }) => {
+        const sub = ctx.channelMetadata.orchestration_sub_issue_id;
+        released.push({
+          sub,
+          base: ctx.channelMetadata.orchestration_base_branch ?? 'main',
+          merges: ctx.channelMetadata.orchestration_merge_branches
+            ? JSON.parse(ctx.channelMetadata.orchestration_merge_branches) as string[]
+            : [],
+          stacked: ctx.channelMetadata.orchestration_stacked === 'true',
+        });
+        return Promise.resolve({ statusCode: 201, body: JSON.stringify({ data: { task_id: `T-${sub}`, branch_name: `br-${sub}` } }) });
+      });
+      await releaseReadyChildren(ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
+        createTaskCore as never, NOW, rows, 'main');
+      // Every released task succeeds; children whose predecessors all succeeded become ready.
+      const done = new Set(rows.filter((r) => r.child_status === 'ready' || r.child_status === 'succeeded').map((r) => r.sub_issue_id));
+      rows = rows.map((r) => (done.has(r.sub_issue_id)
+        ? { ...r, child_status: 'succeeded', child_branch_name: `br-${r.sub_issue_id}` }
+        : r.depends_on.every((d) => done.has(d)) ? { ...r, child_status: 'ready' } : r));
+    }
+    return released;
+  }
+
+  /** A PR the watchdog could merge into main: based on main and not factory-stacked. */
+  const mergeableToMain = (rs: Released[]) => rs.filter((r) => r.base === 'main' && !r.stacked).map((r) => r.sub);
+  const INTEGRATION = 'orch_abc__integration';
+
+  test('a chain S1 → S2 has exactly one unheld PR to main: the integration PR, merging S2', async () => {
+    const rs = await runGraph([{ id: 'S1', depends_on: [] }, { id: 'S2', depends_on: ['S1'] }]);
+    expect(rs.map((r) => r.sub)).toEqual(['S1', 'S2', INTEGRATION]);
+    expect(mergeableToMain(rs)).toEqual([INTEGRATION]);
+    expect(rs.find((r) => r.sub === 'S2')).toMatchObject({ base: 'br-S1', stacked: true });
+    expect(rs.find((r) => r.sub === INTEGRATION)).toEqual({ sub: INTEGRATION, base: 'main', merges: ['br-S2'], stacked: false });
+  });
+
+  test('a fan-out S1, S2 has exactly one unheld PR to main: the integration PR, merging both', async () => {
+    const rs = await runGraph([{ id: 'S1', depends_on: [] }, { id: 'S2', depends_on: [] }]);
+    expect(mergeableToMain(rs)).toEqual([INTEGRATION]);
+    expect(rs.filter((r) => r.sub !== INTEGRATION).every((r) => r.stacked)).toBe(true);
+    expect(rs.find((r) => r.sub === INTEGRATION)?.merges).toEqual(['br-S1', 'br-S2']);
+  });
+
+  test('a single-story orchestration is unchanged: one root, not stacked, no integration node', async () => {
+    const rs = await runGraph([{ id: 'S1', depends_on: [] }]);
+    expect(rs).toEqual([{ sub: 'S1', base: 'main', merges: [], stacked: false }]);
   });
 });
 

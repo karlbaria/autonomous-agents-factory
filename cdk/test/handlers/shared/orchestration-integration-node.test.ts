@@ -47,15 +47,34 @@ describe('computeLeaves', () => {
 });
 
 describe('withIntegrationNode', () => {
-  test('linear chain (1 leaf) → unchanged, not added', () => {
+  // #89: every graph of two or more sub-issues gets one, so the build has
+  // exactly one PR to main.
+  test('linear chain (1 leaf) → appends an integration node over that leaf', () => {
     const r = withIntegrationNode([n('A'), n('B', ['A'])], ORCH);
-    expect(r.added).toBe(false);
-    expect(r.nodes).toHaveLength(2);
+    expect(r.added).toBe(true);
+    expect(r.nodes).toHaveLength(3);
+    expect(r.nodes[2].id).toBe(`${ORCH}${INTEGRATION_NODE_SUFFIX}`);
+    expect(r.nodes[2].depends_on).toEqual(['B']);
   });
 
-  test('explicit diamond (1 leaf D) → unchanged, not added', () => {
+  test('explicit diamond (1 leaf D) → appends an integration node over D', () => {
     const r = withIntegrationNode([n('A'), n('B', ['A']), n('C', ['A']), n('D', ['B', 'C'])], ORCH);
+    expect(r.added).toBe(true);
+    expect(r.nodes[r.nodes.length - 1].depends_on).toEqual(['D']);
+  });
+
+  test('a single sub-issue → unchanged, not added', () => {
+    const r = withIntegrationNode([n('A')], ORCH);
     expect(r.added).toBe(false);
+    expect(r.nodes).toHaveLength(1);
+    expect(withIntegrationNode([], ORCH).added).toBe(false);
+  });
+
+  test('a graph that already has an integration node → unchanged', () => {
+    const once = withIntegrationNode([n('A'), n('B')], ORCH);
+    const twice = withIntegrationNode(once.nodes, ORCH);
+    expect(twice.added).toBe(false);
+    expect(twice.nodes).toHaveLength(3);
   });
 
   test('pure fan-out (>1 leaf) → appends a synthetic node over all leaves', () => {

@@ -29,6 +29,8 @@
  *     predecessor branches into the child's branch before work starts,
  *     so the child sees every predecessor's code. (No human merge needed;
  *     starts as soon as all predecessors are task-complete.)
+ *   - The integration node (``mergeIntoDefault``) → always the diamond
+ *     shape, even with one predecessor, so its PR targets main (#89).
  *
  * Pure: takes the predecessors' resolved branch names + the repo default
  * branch, returns the base + merge-list the release path threads to the
@@ -60,6 +62,12 @@ export interface SelectBaseBranchParams {
   readonly predecessors: readonly PredecessorBranch[];
   /** Repo default branch (root base / diamond base). Defaults to 'main'. */
   readonly defaultBranch?: string;
+  /**
+   * Branch off the default branch and merge every predecessor branch in,
+   * even when there is only one (the integration node, #89), instead of
+   * stacking on a single predecessor.
+   */
+  readonly mergeIntoDefault?: boolean;
 }
 
 /**
@@ -84,7 +92,7 @@ export function selectBaseBranch(params: SelectBaseBranchParams): BaseBranchSele
   if (branches.length === 0) {
     return { base_branch: defaultBranch, merge_branches: [], shape: 'root' };
   }
-  if (branches.length === 1) {
+  if (branches.length === 1 && !params.mergeIntoDefault) {
     return { base_branch: branches[0], merge_branches: [], shape: 'linear' };
   }
   // Diamond: branch off the default branch, merge every distinct
