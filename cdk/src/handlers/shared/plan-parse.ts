@@ -147,9 +147,37 @@ const DESIGN_QUESTION_SECTIONS: ReadonlySet<string> = new Set(['questions for th
 const PRD_QUESTION_SECTIONS: ReadonlySet<string> = new Set(['product questions']);
 const DECISIONS_SECTION = 'technical decisions';
 
-/** Drop Markdown emphasis wrappers and surrounding whitespace. */
-function clean(text: string): string {
+/** A `**\u2026**` wrapper around a whole value (raw text the editor didn't turn into bold). */
+const WHOLE_BOLD = /^\*\*(?=\S)(.*\S)\*\*$/;
+
+/**
+ * A value as written (#96): whitespace normalised and a `**\u2026**` wrapper around
+ * the whole value removed, nothing else. `MAX_PER_LINE`,
+ * `site-header__bag-count` and `30 * 60 * 1000` survive.
+ */
+function contentText(text: string): string {
+  const normalised = text.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  const bold = WHOLE_BOLD.exec(normalised);
+  return bold ? bold[1].trim() : normalised;
+}
+
+/**
+ * Text for recognising keywords, ids and headers only: every emphasis marker
+ * and code tick dropped. Never kept as a value \u2014 it strips the underscores of
+ * identifiers (#96).
+ */
+function matchText(text: string): string {
   return text.replace(/\u00a0/g, ' ').replace(/[*_`]+/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * An item heading (`S1: \u2026`, `Q1: \u2026`, `D1: \u2026`): its number and the rest as
+ * written. Tried on the text as written first, so the rest keeps its
+ * identifiers; then with emphasis dropped, for a wrapped id such as `**S1**:`.
+ */
+function itemHeading(pattern: RegExp, text: string): { readonly n: number; readonly rest: string } | null {
+  const match = pattern.exec(contentText(text)) ?? pattern.exec(matchText(text));
+  return match ? { n: Number(match[1]), rest: contentText(match[2]) } : null;
 }
 
 /**
@@ -173,7 +201,7 @@ interface Heading {
 
 function heading(line: string): Heading | null {
   const match = HEADING.exec(line);
-  return match ? { level: match[1].length, text: clean(match[2]) } : null;
+  return match ? { level: match[1].length, text: contentText(match[2]) } : null;
 }
 
 const LEADING_NONE = /^(?:none|n\/a|nothing|no|[-–—])(?=$|[\s.,;])\.?\s*(.*)$/i;
@@ -187,7 +215,7 @@ const LEADING_REFS = /^(S\s*\d+(?:\s*(?:[,;&]|\band\b)\s*S\s*\d+)*)(?=$|[\s.,;])
  * unknown blocker, for the check to report.
  */
 function parseBlockers(raw: string): { readonly refs: string[]; readonly rest: string } {
-  const text = clean(raw);
+  const text = matchText(raw);
   if (!text) return { refs: [], rest: '' };
   const none = LEADING_NONE.exec(text);
   if (none) return { refs: [], rest: none[1] };
@@ -228,21 +256,21 @@ interface DecisionDraft {
 
 function isAnswered(answer: string[] | null): boolean {
   if (answer === null) return false;
-  const text = clean(answer.join(' '));
+  const text = matchText(answer.join(' '));
   return text.length > 0 && !PLACEHOLDER_ANSWER.test(text);
 }
 
 /** A line inside a story: its blockers, criteria, notes or body. */
 function addStoryLine(story: StoryDraft, line: string, h: Heading | null): void {
-  const plain = h ? h.text : clean(line);
-  if (ACCEPTANCE_HEADER.test(plain)) {
+  const plain = h ? h.text : contentText(line);
+  if (ACCEPTANCE_HEADER.test(matchText(plain))) {
     story.list = 'criteria';
     return;
   }
-  const notesHeader = TECHNICAL_NOTES_HEADER.exec(plain);
+  const notesHeader = TECHNICAL_NOTES_HEADER.exec(plain) ?? TECHNICAL_NOTES_HEADER.exec(matchText(plain));
   if (notesHeader) {
     story.list = 'notes';
-    const inline = clean(notesHeader[1] ?? '');
+    const inline = contentText(notesHeader[1] ?? '');
     if (inline) story.notes.push(inline);
     return;
   }
@@ -255,13 +283,13 @@ function addStoryLine(story: StoryDraft, line: string, h: Heading | null): void 
   }
   const item = h ? null : LIST_ITEM.exec(line);
   if (story.list === 'criteria' && item) {
-    const criterion = clean(item[1]);
+    const criterion = contentText(item[1]);
     if (criterion) story.criteria.push(criterion);
     return;
   }
   if (story.list === 'notes') {
     // Notes written as a paragraph rather than a list still count as notes.
-    const note = clean(item ? item[1] : plain);
+    const note = contentText(item ? item[1] : plain);
     if (note) story.notes.push(note);
     return;
   }
@@ -324,7 +352,7 @@ function parsePage(text: string, questionSections: ReadonlySet<string>): ParsedP
     const h = heading(line);
 
     if (h && h.level <= SECTION_HEADING_MAX_LEVEL) {
-      section = h.text.toLowerCase().replace(/:$/, '');
+      section = matchText(h.text).toLowerCase().replace(/:$/, '');
       story = null;
       question = null;
       decision = null;
@@ -342,9 +370,9 @@ function parsePage(text: string, questionSections: ReadonlySet<string>): ParsedP
       question = null;
       decision = null;
       if (inQuestions) {
-        const q = QUESTION_HEADING.exec(h.text);
+        const q = itemHeading(QUESTION_HEADING, h.text);
         if (q) {
-          question = { id: `Q${Number(q[1])}`, question: clean(q[2]), answer: null };
+          question = { id: `Q${q.n}`, question: q.rest, answer: null };
           questions.push(question);
         } else {
           questionsStray = true;
@@ -352,17 +380,17 @@ function parsePage(text: string, questionSections: ReadonlySet<string>): ParsedP
         continue;
       }
       if (inDecisions) {
-        const d = DECISION_HEADING.exec(h.text);
+        const d = itemHeading(DECISION_HEADING, h.text);
         if (d) {
-          decision = { id: `D${Number(d[1])}`, decision: clean(d[2]), reason: null, body: [] };
+          decision = { id: `D${d.n}`, decision: d.rest, reason: null, body: [] };
           decisions.push(decision);
         }
         continue;
       }
-      const s = STORY_HEADING.exec(h.text);
+      const s = itemHeading(STORY_HEADING, h.text);
       if (s) {
         story = {
-          id: `S${Number(s[1])}`, title: clean(s[2]), body: [], blockedBy: [], criteria: [], notes: [], list: 'body',
+          id: `S${s.n}`, title: s.rest, body: [], blockedBy: [], criteria: [], notes: [], list: 'body',
         };
         stories.push(story);
       }
@@ -372,7 +400,7 @@ function parsePage(text: string, questionSections: ReadonlySet<string>): ParsedP
     if (question) {
       addQuestionLine(question, line, h);
     } else if (inQuestions) {
-      if (!NONE_TEXT.test(clean(line))) questionsStray = true;
+      if (!NONE_TEXT.test(matchText(line))) questionsStray = true;
     } else if (decision) {
       addDecisionLine(decision, line, h);
     } else if (story) {
@@ -401,7 +429,7 @@ export function parsePlan(text: string): ParsedPlan {
     decisions: page.decisions.map((d) => ({
       id: d.id,
       decision: d.decision,
-      reason: clean((d.reason ?? []).join(' ')),
+      reason: contentText((d.reason ?? []).join(' ')),
       body: d.body.join('\n').trim(),
     })),
     openQuestions: finishQuestions(page.questions),
