@@ -91,11 +91,11 @@ sub-agent, and never end with a promise of later results.
 
 Your final message IS the deliverable: it is published as the PRD page, so it
 must be the complete PRD in Markdown, and nothing else (no preamble, no
-closing remarks). The heading ends with the last six characters of the Task
-ID. Use exactly this layout:
+closing remarks). The heading is the feature name only: the platform adds
+the document's id to the page title. Use exactly this layout:
 
 ```
-# PRD: <short feature name> · <6-char id>
+# PRD: <short feature name>
 
 ## Problem
 What users struggle with today, and why it matters.

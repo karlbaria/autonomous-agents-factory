@@ -1,8 +1,8 @@
 # Jira Forge app actor
 
 This Forge app is the outbound Jira identity for ABCA. Its web trigger verifies
-an HMAC-signed request, allows only identity, comment, and transition operations,
-then calls Jira with `api.asApp().requestJira(...)`. The identity response also
+an HMAC-signed request, allows only identity, comment, transition, create-issue
+and link-issues operations, then calls Jira with `api.asApp().requestJira(...)`. The identity response also
 returns Jira's server URL so setup can bind the installation to the intended
 tenant.
 
@@ -53,8 +53,11 @@ expected tenant.
 
 The web trigger has no Forge-managed caller authentication. ABCA signs
 `timestamp + "." + rawBody` with HMAC-SHA256; the handler enforces a five-minute
-clock window and allows only identity, comment, read-transition, and transition
-operations. Jira calls use `api.asApp()`, so their actor is the installed
+clock window and allows only seven operations: identity, create comment, update
+comment, read transitions, transition, create issue (optionally under a parent
+and with one `factory-plan-<8 base32 chars>` label; for a company-managed Epic,
+the Epic Name field is set to the summary), and link issues (`Blocks` only,
+between two different issues: `outward_issue_key` blocks `inward_issue_key`). Jira calls use `api.asApp()`, so their actor is the installed
 `bgagent` app rather than the 3LO setup user.
 
 The handler rejects bodies larger than 256 KiB before computing the HMAC. The

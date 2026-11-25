@@ -43,7 +43,7 @@ import {
   type RenderedComment,
 } from './jira-attachments';
 import { resolveJiraOauthToken } from './jira-oauth-resolver';
-import type { JiraSubIssueNode } from './jira-subissue-fetch';
+import type { FetchJiraSubIssueGraphResult, JiraSubIssueNode } from './jira-subissue-fetch';
 import type { SubIssueNode } from './linear-subissue-fetch';
 import { logger } from './logger';
 import { lookupValueOr } from './lookup-result';
@@ -107,7 +107,33 @@ export interface StartJiraParentWorkInput {
   readonly platformUserId: string;
   /** Idempotency key for the single-task path. */
   readonly idempotencyKey?: string;
+  /**
+   * The parent's authored subtask graph, when the caller already knows it
+   * (#82 PR 3b-2: Start has just filed the children, which Jira search may not
+   * list yet). Absent: read through Jira search, as for the label trigger.
+   */
+  readonly graph?: () => Promise<FetchJiraSubIssueGraphResult>;
+  /**
+   * Treat a 409 from the single task's idempotency key (a task with that key
+   * already exists) as already started rather than a failure. Start's retries
+   * reuse one key; the label trigger keys each delivery separately.
+   */
+  readonly duplicateIsStarted?: boolean;
 }
+
+/** What {@link startJiraParentWork} did. The webhook processor ignores it; Start reports it. */
+export type StartJiraParentWorkResult =
+  | { readonly kind: 'orchestration_seeded'; readonly orchestrationId: string; readonly childCount: number }
+  /** Already seeded (a replay), extended with nothing new, or re-triggered with no subtasks. */
+  | { readonly kind: 'orchestration_unchanged' }
+  | { readonly kind: 'orchestration_extended'; readonly addedCount: number }
+  | { readonly kind: 'task_created'; readonly taskId: string }
+  /** The single task's idempotency key matched an existing task. */
+  | { readonly kind: 'task_already_started' }
+  /** Reported on the issue with this message. */
+  | { readonly kind: 'failed'; readonly message: string }
+  /** The tenant could not be resolved; nothing was reported. */
+  | { readonly kind: 'dropped' };
 
 /**
  * Start the parent's work: seed or extend its orchestration, or create its
@@ -117,14 +143,20 @@ export interface StartJiraParentWorkInput {
 export async function startJiraParentWork(
   deps: StartJiraParentWorkDeps,
   input: StartJiraParentWorkInput,
-): Promise<void> {
+): Promise<StartJiraParentWorkResult> {
   const { ddb, s3Client, screeningConfig } = deps;
   const WORKSPACE_REGISTRY_TABLE = deps.workspaceRegistryTable;
   const ORCHESTRATION_TABLE = deps.orchestrationTable;
   const USER_CONCURRENCY_TABLE = deps.userConcurrencyTable;
   const MAX_CONCURRENT = deps.maxConcurrent;
   const ATTACHMENTS_BUCKET = deps.attachmentsBucket;
-  const safeReportIssueFailure = deps.reportFailure;
+  // Every failure is reported on the issue and returned, with the same text.
+  let failedMessage = '';
+  const safeReportIssueFailure = async (issueIdOrKey: string, failedCloudId: string | undefined, message: string): Promise<void> => {
+    failedMessage = message;
+    await deps.reportFailure(issueIdOrKey, failedCloudId, message);
+  };
+  const failed = (): StartJiraParentWorkResult => ({ kind: 'failed', message: failedMessage });
   const { issue, cloudId, projectKey, mapping, repo, labelFilter, platformUserId, idempotencyKey } = input;
 
   // Convert the ADF description to markdown once and reuse it for both the
@@ -164,7 +196,7 @@ export async function startJiraParentWork(
         jira_cloud_id: cloudId,
         issue_key: issue.key,
       });
-      return;
+      return { kind: 'dropped' };
     }
     resolvedJira = resolved;
     channelMetadata.jira_oauth_secret_arn = resolved.oauthSecretArn;
@@ -185,24 +217,26 @@ export async function startJiraParentWork(
     );
     existingOrchestration = existing !== null;
 
-    const graphResult = await jiraGraphSource(
-      resolvedJira.accessToken,
-      cloudId,
-      issue.key,
-    )();
+    const graphResult = input.graph
+      ? await input.graph()
+      : await jiraGraphSource(
+        resolvedJira.accessToken,
+        cloudId,
+        issue.key,
+      )();
     if (graphResult.kind === 'error') {
       await safeReportIssueFailure(
         issue.key,
         cloudId,
         `❌ ABCA couldn't read this issue's Jira subtasks: ${graphResult.message}`,
       );
-      return;
+      return failed();
     }
     if (graphResult.kind === 'no_children' && existingOrchestration) {
       logger.info('Jira orchestration re-trigger has no current subtasks — no-op', {
         issue_key: issue.key,
       });
-      return;
+      return { kind: 'orchestration_unchanged' };
     }
     if (graphResult.kind === 'ok') {
       const routed = await routeJiraOrchestrationChildren(deps, {
@@ -216,7 +250,7 @@ export async function startJiraParentWork(
       });
       if (!routed.ok) {
         await safeReportIssueFailure(issue.key, cloudId, `❌ ${routed.message}`);
-        return;
+        return failed();
       }
       orchestrationChildren = routed.children;
     }
@@ -263,7 +297,7 @@ export async function startJiraParentWork(
           cloudId,
           '❌ This Jira issue has file attachments, but ABCA attachment screening is not configured. Contact your ABCA admin.',
         );
-        return;
+        return failed();
       }
       // Combined cap: URL image attachments already consume slots.
       const remainingSlots = 10 - urlAttachments.length;
@@ -285,7 +319,7 @@ export async function startJiraParentWork(
             cloudId,
             `❌ ABCA couldn't safely process an attachment on this issue: ${err.message} Remove or fix the attachment and re-apply the trigger label.`,
           );
-          return;
+          return failed();
         }
         throw err;
       }
@@ -329,7 +363,7 @@ export async function startJiraParentWork(
         cloudId,
         `❌ ABCA couldn't create this Jira orchestration: ${discovery.message}`,
       );
-      return;
+      return failed();
     }
 
     // A concurrent replay can win between the preflight read and the seed
@@ -339,7 +373,7 @@ export async function startJiraParentWork(
       if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
         await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
       }
-      return;
+      return { kind: 'orchestration_unchanged' };
     }
 
     if (discovery.kind === 'seeded') {
@@ -418,7 +452,7 @@ export async function startJiraParentWork(
         orchestration_id: discovery.orchestrationId,
         child_count: discovery.childCount,
       });
-      return;
+      return { kind: 'orchestration_seeded', orchestrationId: discovery.orchestrationId, childCount: discovery.childCount };
     }
     if (discovery.kind === 'extended') {
       if (discovery.addedSubIssueIds.length === 0) {
@@ -426,7 +460,7 @@ export async function startJiraParentWork(
           issue_key: issue.key,
           orchestration_id: discovery.orchestrationId,
         });
-        return;
+        return { kind: 'orchestration_unchanged' };
       }
 
       const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
@@ -510,7 +544,7 @@ export async function startJiraParentWork(
         added_count: discovery.addedSubIssueIds.length,
         releasable_count: discovery.releasableSubIssueIds.length,
       });
-      return;
+      return { kind: 'orchestration_extended', addedCount: discovery.addedSubIssueIds.length };
     }
   }
 
@@ -556,7 +590,15 @@ export async function startJiraParentWork(
     if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
       await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
     }
-    return;
+    return { kind: 'task_already_started' };
+  }
+
+  if (result.statusCode === 409 && input.duplicateIsStarted) {
+    logger.info('Jira parent task already exists for this idempotency key', {
+      issue_key: issue.key,
+      request_id: requestId,
+    });
+    return { kind: 'task_already_started' };
   }
 
   if (result.statusCode !== 201) {
@@ -575,7 +617,7 @@ export async function startJiraParentWork(
       cloudId,
       buildCreateTaskFailureMessage(result.statusCode, result.body),
     );
-    return;
+    return failed();
   }
 
   logger.info('Jira-triggered task created', {
@@ -584,6 +626,7 @@ export async function startJiraParentWork(
     repo,
     request_id: requestId,
   });
+  return { kind: 'task_created', taskId };
 }
 
 type ProjectMapping = Readonly<Record<string, unknown>>;

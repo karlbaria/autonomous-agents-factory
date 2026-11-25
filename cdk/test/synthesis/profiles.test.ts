@@ -49,8 +49,13 @@ describe('structural synthesis profiles', () => {
     }
   });
 
-  test('expects all backend and optional-service combinations to synthesize', () => {
-    expect(matrix.filter(p => p.expectedError)).toHaveLength(0);
+  test('expects all backend and optional-service combinations to synthesize but one', () => {
+    // #82 PR 3b-2 (decision 6, owner-approved): Start's grants overflow the
+    // Slack command processor's inline policy into a managed policy, which
+    // takes the widest inline MicroVM cell one resource over budget. Its
+    // split cell fits; no other cell is affected.
+    expect(matrix.filter(p => p.expectedError).map(p => p.name)).toEqual(['lambda-microvm-gw1-reg1-vault1-managed']);
+    expect(matrix.find(p => p.name === 'lambda-microvm-gw1-reg1-vault1-managed-split')!.expectedError).toBeUndefined();
   });
 
   test(
@@ -152,7 +157,8 @@ describe('structural synthesis profiles', () => {
 
   test('distinguishes configured images from provisioning-only MicroVM profiles', () => {
     const microvm = matrix.filter(p => p.context.compute_types === 'lambda-microvm' && !p.expectedError);
-    expect(microvm.filter(p => p.microvmImageConfigured)).toHaveLength(32);
+    // 32 configured-image cells, less the inline one over budget since #82 PR 3b-2.
+    expect(microvm.filter(p => p.microvmImageConfigured)).toHaveLength(31);
     for (const p of matrix) {
       expect(p.microvmImageConfigured).toBe(!!(p.context.microvm_base_image_arn || p.context.microvm_image_identifier));
       expect(!!p.context.microvm_base_image_arn && !!p.context.microvm_image_identifier).toBe(false);

@@ -24,6 +24,8 @@ import { buildPrdTaskDescription, PRD_MAX_CHARS, readPrdPage, readPrdPageById } 
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
 import { handlePlanAction, type PlanActionEvent, type StartDesignResult } from './shared/plan-approve';
+import { fileDesign } from './shared/plan-file';
+import { makeFileDesignDeps } from './shared/plan-start';
 import type { PlanningSession } from './shared/planning-session';
 import { lookupRepo, type RepoConfig } from './shared/repo-config';
 import { slackFetch } from './shared/slack-api';
@@ -90,6 +92,12 @@ const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
 const INSTALLATION_TABLE = process.env.SLACK_INSTALLATION_TABLE_NAME!;
 const CHANNEL_MAPPING_TABLE = process.env.SLACK_CHANNEL_MAPPING_TABLE_NAME;
 const PLANNING_SESSION_TABLE = process.env.PLANNING_SESSION_TABLE_NAME;
+// Start's filing and build start (#82 PR 3b-2).
+const JIRA_PROJECT_MAPPING_TABLE = process.env.JIRA_PROJECT_MAPPING_TABLE_NAME;
+const JIRA_WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
+const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
 
 /** Link code TTL. */
 const LINK_CODE_TTL_S = 10 * 60; // 10 minutes
@@ -587,6 +595,16 @@ async function handlePlanButton(event: PlanActionEvent): Promise<void> {
     await postToSlack(event.response_url, ':warning: Plan approval isn\'t available right now.');
     return;
   }
+  const fileDeps = makeFileDesignDeps({
+    ddb,
+    planningSessionTable: PLANNING_SESSION_TABLE,
+    ...(JIRA_PROJECT_MAPPING_TABLE && { projectMappingTable: JIRA_PROJECT_MAPPING_TABLE }),
+    ...(JIRA_WORKSPACE_REGISTRY_TABLE && { workspaceRegistryTable: JIRA_WORKSPACE_REGISTRY_TABLE }),
+    ...(ORCHESTRATION_TABLE && { orchestrationTable: ORCHESTRATION_TABLE }),
+    ...(USER_CONCURRENCY_TABLE && { userConcurrencyTable: USER_CONCURRENCY_TABLE }),
+    maxConcurrent: MAX_CONCURRENT,
+    botToken: getBotToken,
+  });
   await handlePlanAction(event, {
     ddb,
     tableName: PLANNING_SESSION_TABLE,
@@ -597,7 +615,22 @@ async function handlePlanButton(event: PlanActionEvent): Promise<void> {
     startDesignFromPrd,
     markPageFinal: (pageId, mapping) => markPageFinal(pageId, mapping),
     postInThread: postInPlanThread,
+    fileDesign: (session, leaseSince, design) => fileDesign(session, leaseSince, design, fileDeps),
+    updateDesignMessage: updatePlanMessage,
     replyEphemeral: postToSlack,
+  });
+}
+
+/** Replace the "Technical design ready" message, so its buttons go (#82 PR 3b-2). */
+async function updatePlanMessage(session: PlanningSession, message: SlackMessage): Promise<void> {
+  if (!session.slack_message_ts) return;
+  const botToken = await getBotToken(session.slack_team_id);
+  if (!botToken) return;
+  await slackFetch(botToken, 'chat.update', {
+    channel: session.slack_channel_id,
+    ts: session.slack_message_ts,
+    text: message.text,
+    blocks: message.blocks,
   });
 }
 

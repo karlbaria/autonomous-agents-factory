@@ -307,10 +307,11 @@ _PAGE_TITLE_PREFIXES: dict[str, str] = {"plan": "Technical design: ", "prd": "PR
 _PLAN_TITLE_ID_CHARS = 6
 _PLAN_FEATURE_MAX_CHARS = 200
 # A prefix the agent may have written itself (``Plan:`` from plans made before
-# #82 PR 3c), and a ``· <6-char id>`` suffix copied into its H1: both are
-# replaced by the deliverer's own.
+# #82 PR 3c), and any trailing ``· <token>`` it put in its H1 (an id of any
+# length, even two of them: LAB_LOG Task 15 §9 had ``· AW7G4 · ZAW7G4``): both
+# are replaced by the deliverer's own.
 _H1_KIND_PREFIX = re.compile(r"^(?:plan|technical\s+design|prd)\s*:\s*", re.IGNORECASE)
-_H1_ID_SUFFIX = re.compile(r"\s*·\s*[A-Za-z0-9]{6}$")
+_H1_ID_SUFFIX = re.compile(r"(?:\s*·\s*[A-Za-z0-9]{1,16})+\s*$")
 
 
 def _plan_page_title(

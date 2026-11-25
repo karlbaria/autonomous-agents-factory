@@ -889,7 +889,7 @@ describe('dispatchSlackEvent — planning sessions', () => {
 
     expect(lookupRepoMock).toHaveBeenCalledWith('karlbaria/factory-shop');
     expect(readPlanPageMock).toHaveBeenCalledWith('1015867', MAPPING, { kind: 'design' });
-    expect(postedText()).toBe('Technical design ready: 4 stories, about $2.00 for karlbaria/factory-shop');
+    expect(postedText()).toBe('Technical design ready: 4 stories, about $2.50 for karlbaria/factory-shop');
     expect(callsOfType('Put')[0].Item.confirm_digest).toBe(designNumbersDigest(4));
   });
 

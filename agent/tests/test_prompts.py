@@ -277,7 +277,7 @@ class TestGetSystemPrompt:
         # 3b-2 files into Jira.
         prompt = get_system_prompt("knowledge/feature-planning-v1", repo_less=True)
         for heading in (
-            "# Technical design: <short feature name> · <6-char id>",
+            "# Technical design: <short feature name>\n",
             "## Summary",
             "## Source",
             "## Repo findings",
@@ -351,7 +351,7 @@ class TestGetSystemPrompt:
 
     def test_prd_draft_fixes_the_prd_layout(self):
         prompt = get_system_prompt("knowledge/prd-draft-v1", repo_less=True)
-        layout = prompt[prompt.index("# PRD: <short feature name> · <6-char id>") :]
+        layout = prompt[prompt.index("# PRD: <short feature name>\n") :]
         order = [
             "## Problem",
             "## Users",

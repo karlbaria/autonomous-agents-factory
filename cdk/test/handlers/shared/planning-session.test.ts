@@ -20,16 +20,23 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
   APPROVAL_LEASE_SECONDS,
+  beginFiling,
   cancelPlanningSession,
   claimApprovalLease,
+  clearFilingInflight,
+  completeFiling,
   completePrdApproval,
   createPlanningSession,
   getPlanningSession,
+  markFilingInflight,
   newPlanningSessionId,
   pageIdFromPageUrl,
   parsePlanActionId,
   planActionId,
   PLANNING_SESSION_TTL_SECONDS,
+  recordBuildStarted,
+  recordFiledIssue,
+  recordFiledLink,
   releaseApprovalLease,
 } from '../../../src/handlers/shared/planning-session';
 
@@ -195,5 +202,54 @@ describe('cancelPlanningSession', () => {
     );
     send.mockRejectedValueOnce(conditionFailed);
     expect(await cancelPlanningSession(ddb, 'Sessions', 's', 1000)).toBe(false);
+  });
+});
+
+describe('filing checkpoints (#82 PR 3b-2)', () => {
+  const LEASE = '#state = :approving AND approving_since = :since';
+
+  test('every checkpoint write needs the lease taken at `since`', async () => {
+    await beginFiling(ddb, 'T', 'sid', 500, { planDigest: 'd', pageVersion: 4, approvedAt: '2027-01-01T00:00:00.000Z' });
+    await markFilingInflight(ddb, 'T', 'sid', 500, 'S2', 510);
+    await clearFilingInflight(ddb, 'T', 'sid', 500);
+    await recordFiledIssue(ddb, 'T', 'sid', 500, 'parent', { key: 'SHOP-1', id: '1' });
+    await recordFiledIssue(ddb, 'T', 'sid', 500, 'S2', { key: 'SHOP-3', id: '3' });
+    await recordFiledLink(ddb, 'T', 'sid', 500, 'S1>S2');
+    await recordBuildStarted(ddb, 'T', 'sid', 500);
+    await completeFiling(ddb, 'T', 'sid', 500);
+    for (const [command] of send.mock.calls) {
+      expect(command.input.ConditionExpression).toContain(LEASE);
+      expect(command.input.ExpressionAttributeValues).toMatchObject({ ':approving': 'approving', ':since': 500 });
+    }
+  });
+
+  test('filing is frozen once: the digest, the page version and the approval time', async () => {
+    await beginFiling(ddb, 'T', 'sid', 500, { planDigest: 'd', pageVersion: 4, approvedAt: '2027-01-01T00:00:00.000Z' });
+    const input = lastInput();
+    expect(input.ConditionExpression).toBe(`${LEASE} AND attribute_not_exists(filing_plan_digest)`);
+    expect(input.UpdateExpression).toContain('filing_plan_digest = :digest');
+    expect(input.UpdateExpression).toContain('filing_page_version = :version');
+    expect(input.ExpressionAttributeValues).toMatchObject({ ':digest': 'd', ':version': 4, ':at': '2027-01-01T00:00:00.000Z', ':empty': {} });
+  });
+
+  test('a filed issue clears the in-flight marker in the same write', async () => {
+    await recordFiledIssue(ddb, 'T', 'sid', 500, 'S2', { key: 'SHOP-3', id: '3' });
+    const input = lastInput();
+    expect(input.UpdateExpression).toBe('SET filing_children.#story = :issue REMOVE filing_inflight');
+    expect(input.ExpressionAttributeNames).toMatchObject({ '#story': 'S2' });
+    expect(input.ExpressionAttributeValues[':issue']).toEqual({ key: 'SHOP-3', id: '3' });
+    await markFilingInflight(ddb, 'T', 'sid', 500, 'S1>S2', 510);
+    expect(lastInput().ExpressionAttributeValues[':inflight']).toEqual({ step: 'S1>S2', since: 510 });
+  });
+
+  test('a lost lease is reported, not thrown', async () => {
+    send.mockRejectedValueOnce(conditionFailed);
+    expect(await recordFiledLink(ddb, 'T', 'sid', 500, 'S1>S2')).toBe(false);
+  });
+
+  test('a completed filing ends the session as filed', async () => {
+    await completeFiling(ddb, 'T', 'sid', 500);
+    expect(lastInput().UpdateExpression).toBe('SET #state = :filed REMOVE approving_since, filing_inflight');
+    expect(lastInput().ExpressionAttributeValues[':filed']).toBe('filed');
   });
 });

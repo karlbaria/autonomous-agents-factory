@@ -433,3 +433,138 @@ test('rejects a malformed project key, issue type, summary, or description befor
   }
   assert.equal(calls, 0);
 });
+
+// #82 PR 3b-2: Start files an Epic, its Story children and their Blocks links.
+const CREATE_BASE = {
+  version: 1,
+  operation: 'create_issue',
+  cloud_id: 'cloud-1',
+  project_key: 'SHOP',
+  issue_type_name: 'Story',
+  summary: 'Save a product for later',
+};
+
+test('creates a child issue under a parent with the plan label', async () => {
+  const calls = [];
+  const invoke = handler(async (...args) => {
+    calls.push(args);
+    return jiraResponse(201, '{"id":"10060","key":"SHOP-9"}');
+  });
+  const result = await invoke(event({ ...CREATE_BASE, parent_key: 'SHOP-8', labels: ['factory-plan-abcd2345'] }));
+  assert.equal(result.statusCode, 201);
+  assert.deepEqual(JSON.parse(calls[0][1].body).fields, {
+    project: { key: 'SHOP' },
+    issuetype: { name: 'Story' },
+    summary: 'Save a product for later',
+    parent: { key: 'SHOP-8' },
+    labels: ['factory-plan-abcd2345'],
+  });
+});
+
+test('sets an Epic Name field to the summary, and only to the summary', async () => {
+  const calls = [];
+  const invoke = handler(async (...args) => {
+    calls.push(args);
+    return jiraResponse(201, '{"id":"10061","key":"SHOP-10"}');
+  });
+  await invoke(event({ ...CREATE_BASE, issue_type_name: 'Epic', epic_name_field: 'customfield_10011', epic_name: 'ignored' }));
+  const fields = JSON.parse(calls[0][1].body).fields;
+  assert.equal(fields.customfield_10011, 'Save a product for later');
+  assert.equal(fields.epic_name, undefined);
+});
+
+test('rejects a malformed parent key before calling Jira', async () => {
+  let calls = 0;
+  const invoke = handler(async () => { calls += 1; return jiraResponse(201, '{}'); });
+  for (const parent_key of ['', '../SHOP-1', 'SHOP', 'SHOP-1/comment', 42]) {
+    const result = await invoke(event({ ...CREATE_BASE, parent_key }));
+    assert.equal(result.statusCode, 400, String(parent_key));
+    assert.match(result.body, /invalid_parent_key/);
+  }
+  assert.equal(calls, 0);
+});
+
+test('accepts only one factory-plan label, never a trigger label', async () => {
+  let calls = 0;
+  const invoke = handler(async () => { calls += 1; return jiraResponse(201, '{}'); });
+  const cases = [
+    ['bgagent'],
+    ['factory-plan'],
+    ['factory-plan-ABCD2345'],
+    ['factory-plan-abcd234'],
+    ['factory-plan-abcd23456'],
+    ['factory-plan-abcd2341'],
+    ['factory-plan-abcd2345', 'factory-plan-efgh2345'],
+    'factory-plan-abcd2345',
+    [7],
+  ];
+  for (const labels of cases) {
+    const result = await invoke(event({ ...CREATE_BASE, labels }));
+    assert.equal(result.statusCode, 400, JSON.stringify(labels));
+    assert.match(result.body, /invalid_plan_label/);
+  }
+  assert.equal(calls, 0);
+});
+
+test('rejects an Epic Name field that is not a custom field id', async () => {
+  let calls = 0;
+  const invoke = handler(async () => { calls += 1; return jiraResponse(201, '{}'); });
+  for (const epic_name_field of ['summary', 'labels', 'customfield_', 'customfield_1x', 'customfield_12345678901']) {
+    const result = await invoke(event({ ...CREATE_BASE, epic_name_field }));
+    assert.equal(result.statusCode, 400, epic_name_field);
+    assert.match(result.body, /invalid_epic_name_field/);
+  }
+  assert.equal(calls, 0);
+});
+
+test('links two issues with Blocks: outward blocks inward', async () => {
+  const calls = [];
+  const invoke = handler(async (...args) => {
+    calls.push(args);
+    return jiraResponse(201, '');
+  });
+  const result = await invoke(event({
+    version: 1,
+    operation: 'link_issues',
+    cloud_id: 'cloud-1',
+    link_type: 'Blocks',
+    outward_issue_key: 'SHOP-9',
+    inward_issue_key: 'SHOP-10',
+  }));
+  assert.equal(result.statusCode, 201);
+  assert.equal(calls[0][0], '/rest/api/3/issueLink');
+  assert.equal(calls[0][1].method, 'POST');
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    type: { name: 'Blocks' },
+    outwardIssue: { key: 'SHOP-9' },
+    inwardIssue: { key: 'SHOP-10' },
+  });
+});
+
+test('links only Blocks, between two different valid issue keys', async () => {
+  let calls = 0;
+  const invoke = handler(async () => { calls += 1; return jiraResponse(201, ''); });
+  const base = {
+    version: 1,
+    operation: 'link_issues',
+    cloud_id: 'cloud-1',
+    link_type: 'Blocks',
+    outward_issue_key: 'SHOP-9',
+    inward_issue_key: 'SHOP-10',
+  };
+  const cases = [
+    { ...base, link_type: 'blocks' },
+    { ...base, link_type: 'Relates' },
+    { ...base, link_type: undefined },
+    { ...base, outward_issue_key: 'SHOP-10' },
+    { ...base, outward_issue_key: '../SHOP-9' },
+    { ...base, inward_issue_key: '' },
+    { ...base, inward_issue_key: undefined },
+  ];
+  for (const payload of cases) {
+    const result = await invoke(event(payload));
+    assert.equal(result.statusCode, 400, JSON.stringify(payload));
+    assert.match(result.body, /invalid_link_issues_request/);
+  }
+  assert.equal(calls, 0);
+});

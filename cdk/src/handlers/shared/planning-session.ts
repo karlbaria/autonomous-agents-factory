@@ -56,7 +56,7 @@ export const PLANNING_SESSION_TTL_SECONDS = SESSION_TTL_DAYS * SECONDS_PER_DAY;
  * command processor's timeout, so a live invocation is never overtaken, and
  * short enough that a crashed one blocks a retry only briefly.
  */
-export const APPROVAL_LEASE_SECONDS = 60;
+export const APPROVAL_LEASE_SECONDS = 150;
 
 /** The session states. `approved` ends a PRD session; `filed` is set by PR 3b-2's filing. */
 export type PlanningSessionState = 'drafted' | 'approving' | 'approved' | 'filed' | 'cancelled';
@@ -88,15 +88,41 @@ export interface PlanningSession {
   readonly confirm_digest?: string;
   /** The design task an approved PRD started. */
   readonly design_task_id?: string;
+  // ── Filing checkpoints (#82 PR 3b-2). Written under the lease; a Start that
+  // fails part-way resumes from them, so nothing is filed twice. ──
+  /** `planDigest` of the design when filing began; a resume needs the same. */
+  readonly filing_plan_digest?: string;
+  /** The design page version filing began from (for the record). */
+  readonly filing_page_version?: number;
+  /** When the requester's Start began filing, ISO UTC (decision 18). */
+  readonly filing_approved_at?: string;
+  /** The filed parent: the Epic, or the only Story. */
+  readonly filing_parent?: FiledIssue;
+  /** Filed child issues by story id (`S<n>`). */
+  readonly filing_children?: Readonly<Record<string, FiledIssue>>;
+  /** Filed `Blocks` links, by `<blocker>><blocked>` story ids. */
+  readonly filing_links?: Readonly<Record<string, boolean>>;
+  /** A create or link sent but not yet recorded: its step and epoch seconds. */
+  readonly filing_inflight?: { readonly step: string; readonly since: number };
+  /** The build was started from the filed parent. */
+  readonly filing_build_started?: boolean;
   readonly created_at: string;
   /** TTL, epoch seconds. */
   readonly expires_at: number;
+}
+
+/** A filed Jira issue (#82 PR 3b-2). */
+export interface FiledIssue {
+  readonly key: string;
+  readonly id: string;
 }
 
 /** What the fan-out dispatcher knows when it creates a session. */
 export type NewPlanningSession = Omit<
   PlanningSession,
   'state' | 'approving_since' | 'created_at' | 'expires_at' | 'slack_message_ts' | 'design_task_id'
+  | 'filing_plan_digest' | 'filing_page_version' | 'filing_approved_at' | 'filing_parent'
+  | 'filing_children' | 'filing_links' | 'filing_inflight' | 'filing_build_started'
 >;
 
 /**
@@ -345,4 +371,138 @@ export async function cancelPlanningSession(
     if (isConditionalCheckFailed(err)) return false;
     throw err;
   }
+}
+
+// ─── Filing checkpoints (#82 PR 3b-2) ───────────────────────────────────────
+
+/** A checkpoint write the lease holder made; false when the lease was lost. */
+async function leaseUpdate(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  sessionId: string,
+  leaseSince: number,
+  update: string,
+  names: Record<string, string>,
+  values: Record<string, unknown>,
+  extraCondition = '',
+): Promise<boolean> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { session_id: sessionId },
+      UpdateExpression: update,
+      ConditionExpression: `#state = :approving AND approving_since = :since${extraCondition}`,
+      ExpressionAttributeNames: { '#state': 'state', ...names },
+      ExpressionAttributeValues: { ':approving': 'approving', ':since': leaseSince, ...values },
+    }));
+    return true;
+  } catch (err) {
+    if (isConditionalCheckFailed(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Freeze what is about to be filed: the design's digest, its page version and
+ * the approval time. Only when filing hasn't begun; returns false otherwise
+ * (or when the lease was lost), and the caller compares the frozen digest.
+ */
+export async function beginFiling(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  sessionId: string,
+  leaseSince: number,
+  freeze: { readonly planDigest: string; readonly pageVersion: number | null; readonly approvedAt: string },
+): Promise<boolean> {
+  return leaseUpdate(
+    ddb, tableName, sessionId, leaseSince,
+    'SET filing_plan_digest = :digest, filing_approved_at = :at, filing_children = :empty, filing_links = :empty'
+      + (freeze.pageVersion !== null ? ', filing_page_version = :version' : ''),
+    {},
+    {
+      ':digest': freeze.planDigest,
+      ':at': freeze.approvedAt,
+      ':empty': {},
+      ...(freeze.pageVersion !== null && { ':version': freeze.pageVersion }),
+    },
+    ' AND attribute_not_exists(filing_plan_digest)',
+  );
+}
+
+/** Mark a create or link as sent before sending it, so an unknown outcome is looked for, not repeated. */
+export async function markFilingInflight(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  sessionId: string,
+  leaseSince: number,
+  step: string,
+  nowSeconds: number,
+): Promise<boolean> {
+  return leaseUpdate(ddb, tableName, sessionId, leaseSince, 'SET filing_inflight = :inflight', {}, {
+    ':inflight': { step, since: nowSeconds },
+  });
+}
+
+/** Forget an in-flight marker whose request definitely failed. */
+export async function clearFilingInflight(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  sessionId: string,
+  leaseSince: number,
+): Promise<boolean> {
+  return leaseUpdate(ddb, tableName, sessionId, leaseSince, 'REMOVE filing_inflight', {}, {});
+}
+
+/** Record a filed issue: the parent (`step` = `parent`) or a story's child, and clear the in-flight marker. */
+export async function recordFiledIssue(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  sessionId: string,
+  leaseSince: number,
+  step: string,
+  issue: FiledIssue,
+): Promise<boolean> {
+  const value = { key: issue.key, id: issue.id };
+  return step === 'parent'
+    ? leaseUpdate(ddb, tableName, sessionId, leaseSince, 'SET filing_parent = :issue REMOVE filing_inflight', {}, {
+      ':issue': value,
+    })
+    : leaseUpdate(ddb, tableName, sessionId, leaseSince, 'SET filing_children.#story = :issue REMOVE filing_inflight', {
+      '#story': step,
+    }, { ':issue': value });
+}
+
+/** Record a filed `Blocks` link and clear the in-flight marker. */
+export async function recordFiledLink(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  sessionId: string,
+  leaseSince: number,
+  linkId: string,
+): Promise<boolean> {
+  return leaseUpdate(ddb, tableName, sessionId, leaseSince, 'SET filing_links.#link = :true REMOVE filing_inflight', {
+    '#link': linkId,
+  }, { ':true': true });
+}
+
+/** Record that the build was started from the filed parent. */
+export async function recordBuildStarted(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  sessionId: string,
+  leaseSince: number,
+): Promise<boolean> {
+  return leaseUpdate(ddb, tableName, sessionId, leaseSince, 'SET filing_build_started = :true', {}, { ':true': true });
+}
+
+/** End a design's session: filed and started (state `filed`). */
+export async function completeFiling(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  sessionId: string,
+  leaseSince: number,
+): Promise<boolean> {
+  return leaseUpdate(ddb, tableName, sessionId, leaseSince, 'SET #state = :filed REMOVE approving_since, filing_inflight', {}, {
+    ':filed': 'filed',
+  });
 }

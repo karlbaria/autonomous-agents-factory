@@ -1525,3 +1525,99 @@ describe('jira-webhook-processor handler', () => {
     });
   });
 });
+
+// #82 PR 3b-2, Phase 0 item 3: the webhooks Start's own Jira writes fire (the
+// Epic and Stories it creates with the factory-plan-<sid8> label, their parent
+// and Blocks links, the epic panel comment, the agents' transitions) must
+// never start a task or a second orchestration.
+describe('Start\'s own Jira writes start nothing', () => {
+  const PLAN_LABEL = 'factory-plan-abcdefgh';
+  const APP = { accountId: 'app-actor', accountType: 'app', displayName: 'bgagent' };
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset();
+    reportIssueFailureMock.mockReset();
+    reportIssueFailureMock.mockResolvedValue(undefined);
+    resolveJiraOauthTokenMock.mockReset();
+    resolveJiraOauthTokenMock.mockResolvedValue({
+      accessToken: 'jira_at',
+      scope: 'read:jira-work write:jira-work',
+      siteUrl: 'https://acme.atlassian.net',
+      oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-jira-oauth-cloud-1',
+    });
+    lookupRepoMock.mockReset();
+    lookupRepoMock.mockResolvedValue({ onboarded: true, config: null });
+    fetchRecentHumanCommentsMock.mockReset();
+    fetchRecentHumanCommentsMock.mockResolvedValue([]);
+    ddbSend.mockImplementation((command: { input: { TableName?: string } }) => {
+      if (command.input.TableName === 'JiraProjects') {
+        return Promise.resolve({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } });
+      }
+      if (command.input.TableName === 'JiraUsers') {
+        return Promise.resolve({ Item: { platform_user_id: 'user-pm', status: 'active' } });
+      }
+      return Promise.resolve({});
+    });
+  });
+
+  function filed(key: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: '20001',
+      key,
+      fields: { summary: 'Wishlist', labels: [PLAN_LABEL], project: { id: 'p1', key: 'ENG' }, ...extra },
+    };
+  }
+
+  test.each([
+    ['the Epic created', { webhookEvent: 'jira:issue_created', user: APP, issue: filed('ENG-50', { issuetype: { name: 'Epic' } }) }],
+    ['a Story created under it', { webhookEvent: 'jira:issue_created', user: APP, issue: filed('ENG-51', { parent: { key: 'ENG-50' } }) }],
+    ['a Blocks link added', {
+      webhookEvent: 'jira:issue_updated',
+      user: APP,
+      issue: filed('ENG-52'),
+      changelog: { items: [{ field: 'Link', fieldId: 'issuelinks', fromString: null, toString: 'This issue is blocked by ENG-51' }] },
+    }],
+    ['the parent set on a Story', {
+      webhookEvent: 'jira:issue_updated',
+      user: APP,
+      issue: filed('ENG-51'),
+      changelog: { items: [{ field: 'IssueParentAssociation', fromString: null, toString: 'ENG-50' }] },
+    }],
+    ['an agent moving the Story to In Progress', {
+      webhookEvent: 'jira:issue_updated',
+      user: APP,
+      issue: filed('ENG-51'),
+      changelog: { items: [{ field: 'status', fromString: 'To Do', toString: 'In Progress' }] },
+    }],
+    ['the plan label itself, added by a person', {
+      webhookEvent: 'jira:issue_updated',
+      user: { accountId: 'acc-1' },
+      issue: filed('ENG-51'),
+      changelog: { items: [{ field: 'labels', fromString: '', toString: PLAN_LABEL }] },
+    }],
+    ['the issuelink event', { webhookEvent: 'issuelink_created', issueLink: { id: 1 }, issue: filed('ENG-51') }],
+    ['the epic panel comment', {
+      webhookEvent: 'comment_created',
+      issue: { id: '20001', key: 'ENG-50', fields: { project: { id: 'p1', key: 'ENG' } } },
+      comment: { id: 'c-1', author: APP, body: { type: 'doc', version: 1, content: [] } },
+    }],
+  ])('%s', async (_name, payload) => {
+    await handler(eventWith({ cloudId: 'cloud-1', ...payload }));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+  });
+
+  // The control: the same delivery does trigger when the mapping's label is the
+  // plan label, which is why Start refuses such a mapping (plan-file.ts).
+  test('a mapping whose trigger label were the plan label would match', async () => {
+    ddbSend.mockImplementation((command: { input: { TableName?: string } }) => Promise.resolve(
+      command.input.TableName === 'JiraProjects'
+        ? { Item: { repo: 'org/repo', status: 'active', label_filter: PLAN_LABEL } }
+        : { Item: { platform_user_id: 'user-pm', status: 'active' } },
+    ));
+    createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+    await handler(eventWith({ cloudId: 'cloud-1', webhookEvent: 'jira:issue_created', user: { accountId: 'acc-1' }, issue: filed('ENG-50') }));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+  });
+});

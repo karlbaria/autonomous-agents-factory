@@ -164,6 +164,15 @@ describe('SlackIntegration construct', () => {
     });
   });
 
+  test('the command processor has 120 s for Start\'s filing (#82 decision 16)', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Timeout: 120,
+      Environment: {
+        Variables: Match.objectLike({ PLANNING_SESSION_TABLE_NAME: Match.anyValue() }),
+      },
+    });
+  });
+
   test('construct no longer owns a TaskEventsTable stream consumer', () => {
     // This construct used to own ``SlackNotifyFn`` plus its
     // own ``DynamoEventSource`` on ``TaskEventsTable``. Outbound Slack

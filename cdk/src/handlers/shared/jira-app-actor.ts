@@ -28,6 +28,10 @@ const PROXY_ERROR_CODES = new Set([
   'cloud_id_required',
   'invalid_comment_request',
   'invalid_create_issue_request',
+  'invalid_epic_name_field',
+  'invalid_link_issues_request',
+  'invalid_parent_key',
+  'invalid_plan_label',
   'invalid_update_comment_request',
   'invalid_issue_key',
   'invalid_json',
@@ -48,7 +52,7 @@ export interface JiraAppActorConfig {
 
 export interface JiraAppActorRequest {
   readonly version: 1;
-  readonly operation: 'comment' | 'update_comment' | 'get_transitions' | 'transition' | 'identity' | 'create_issue';
+  readonly operation: 'comment' | 'update_comment' | 'get_transitions' | 'transition' | 'identity' | 'create_issue' | 'link_issues';
   readonly cloud_id: string;
   readonly issue_key?: string;
   readonly comment_id?: string;
@@ -60,6 +64,18 @@ export interface JiraAppActorRequest {
   readonly issue_type_name?: string;
   /** `create_issue` only — the new issue's summary. */
   readonly summary?: string;
+  /** `create_issue` only — the parent issue's key (a Story under an Epic, #82 PR 3b-2). */
+  readonly parent_key?: string;
+  /** `create_issue` only — at most one label, `factory-plan-<8 base32 chars>`. */
+  readonly labels?: readonly string[];
+  /** `create_issue` only — a company-managed Epic's Epic Name field id, set to the summary. */
+  readonly epic_name_field?: string;
+  /** `link_issues` only — always `Blocks`. */
+  readonly link_type?: 'Blocks';
+  /** `link_issues` only — the issue that blocks. */
+  readonly outward_issue_key?: string;
+  /** `link_issues` only — the issue that is blocked. */
+  readonly inward_issue_key?: string;
 }
 
 export type JiraAppActorResult =
@@ -187,4 +203,126 @@ export async function requestJiraAppActor(
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ─── OAuth twins (#82 PR 3b-2) ──────────────────────────────────────────────
+// A tenant without the Forge app actor writes through its user-delegated 3LO
+// token instead (see resolveJiraOutboundAuth). These send the same requests
+// the proxy's `create_issue` and `link_issues` send, and return the same
+// result shape.
+
+const JIRA_API_BASE = 'https://api.atlassian.com/ex/jira';
+
+async function requestJiraViaOauth(
+  accessToken: string,
+  cloudId: string,
+  path: string,
+  body: unknown,
+  fetchImpl: typeof fetch,
+): Promise<JiraAppActorResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const result = await fetchImpl(`${JIRA_API_BASE}/${encodeURIComponent(cloudId)}${path}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const responseBody = await result.text();
+    if (result.ok) return { ok: true, status: result.status, body: responseBody };
+    return {
+      ok: false,
+      status: result.status,
+      retryable: result.status === 429 || result.status >= 500,
+      body: responseBody,
+    };
+  } catch (err) {
+    logger.warn('Jira OAuth write failed', {
+      jira_cloud_id: cloudId,
+      path,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, retryable: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The fields of an issue to create; mirrors the proxy's `create_issue`. */
+export interface JiraIssueCreateFields {
+  readonly projectKey: string;
+  readonly issueTypeName: string;
+  readonly summary: string;
+  readonly description?: Record<string, unknown>;
+  readonly parentKey?: string;
+  readonly labels?: readonly string[];
+  readonly epicNameField?: string;
+}
+
+/** The proxy request for {@link JiraIssueCreateFields}. */
+export function createIssueRequest(cloudId: string, fields: JiraIssueCreateFields): JiraAppActorRequest {
+  return {
+    version: 1,
+    operation: 'create_issue',
+    cloud_id: cloudId,
+    project_key: fields.projectKey,
+    issue_type_name: fields.issueTypeName,
+    summary: fields.summary,
+    ...(fields.description !== undefined && { body: fields.description }),
+    ...(fields.parentKey !== undefined && { parent_key: fields.parentKey }),
+    ...(fields.labels !== undefined && { labels: fields.labels }),
+    ...(fields.epicNameField !== undefined && { epic_name_field: fields.epicNameField }),
+  };
+}
+
+/** OAuth twin of the proxy's `create_issue`. */
+export async function createJiraIssueViaOauth(
+  accessToken: string,
+  cloudId: string,
+  fields: JiraIssueCreateFields,
+  fetchImpl: typeof fetch = fetch,
+): Promise<JiraAppActorResult> {
+  return requestJiraViaOauth(accessToken, cloudId, '/rest/api/3/issue', {
+    fields: {
+      project: { key: fields.projectKey },
+      issuetype: { name: fields.issueTypeName },
+      summary: fields.summary,
+      ...(fields.description !== undefined && { description: fields.description }),
+      ...(fields.parentKey !== undefined && { parent: { key: fields.parentKey } }),
+      ...(fields.labels !== undefined && fields.labels.length > 0 && { labels: fields.labels }),
+      ...(fields.epicNameField !== undefined && { [fields.epicNameField]: fields.summary }),
+    },
+  }, fetchImpl);
+}
+
+/** The proxy request for "`blockerKey` blocks `blockedKey`". */
+export function linkIssuesRequest(cloudId: string, blockerKey: string, blockedKey: string): JiraAppActorRequest {
+  return {
+    version: 1,
+    operation: 'link_issues',
+    cloud_id: cloudId,
+    link_type: 'Blocks',
+    outward_issue_key: blockerKey,
+    inward_issue_key: blockedKey,
+  };
+}
+
+/** OAuth twin of the proxy's `link_issues`: "`blockerKey` blocks `blockedKey`". */
+export async function linkJiraIssuesViaOauth(
+  accessToken: string,
+  cloudId: string,
+  blockerKey: string,
+  blockedKey: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<JiraAppActorResult> {
+  return requestJiraViaOauth(accessToken, cloudId, '/rest/api/3/issueLink', {
+    type: { name: 'Blocks' },
+    outwardIssue: { key: blockerKey },
+    inwardIssue: { key: blockedKey },
+  }, fetchImpl);
 }
