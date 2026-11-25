@@ -91,7 +91,9 @@ export async function screenStoryText(text: string, sessionId: string): Promise<
     if (!result) return 'unavailable';
     return result.action === 'GUARDRAIL_INTERVENED' ? 'blocked' : 'pass';
   } catch {
-    return 'unavailable'; // nosemgrep: ts-silent-success-masking -- fail-closed: a screening error stops the filing, which the caller reports
+    // Fail-closed: a screening error is `unavailable`, which stops the filing
+    // and is reported in the thread.
+    return 'unavailable';
   }
 }
 
