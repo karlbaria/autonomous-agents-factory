@@ -53,7 +53,8 @@ ARTIFACT_KEY_PREFIX = "artifacts"
 # background") appear verbatim in legitimate finished prose, so matching them
 # threw away good output — strictly worse than the placeholder bug this guards.
 # Matching also runs on prose with code fences / inline code / URLs stripped
-# (see `_strip_code_and_urls`) so a cited URL or code snippet can't trip it.
+# (see `_strip_code_and_urls`) so a cited URL or code snippet can't trip it,
+# and only on the message's closing lines (see `_closing_lines`, #94).
 _DEFERRAL_MARKERS = (
     "results will follow",
     "report will follow",
@@ -84,6 +85,20 @@ def _strip_code_and_urls(text: str) -> str:
     return _CODE_AND_URL_RE.sub(" ", text)
 
 
+# How many non-empty closing lines the deferral check reads (#94). A deferral
+# is how a message ENDS ("Results will follow shortly."); the body of a
+# finished PRD or design routinely uses the same words as product behavior
+# ("customers can come back later and still find their bag"), so matching the
+# whole document false-FAILed complete deliverables.
+_DEFERRAL_TAIL_LINES = 5
+
+
+def _closing_lines(text: str) -> str:
+    """The last ``_DEFERRAL_TAIL_LINES`` non-empty lines of ``text``, joined."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    return "\n".join(lines[-_DEFERRAL_TAIL_LINES:])
+
+
 def _reject_if_deferral(text: str) -> None:
     """Fail the deliver step if the final message defers instead of delivering.
 
@@ -92,10 +107,11 @@ def _reject_if_deferral(text: str) -> None:
     results elsewhere, which would then be uploaded as the artifact. Raising here
     routes to a terminal FAILED (see the pipeline delivery gate) so the
     placeholder is never presented as the result. Matches full deferral phrases
-    against prose with code/URLs stripped, to avoid false-FAILing a genuine
-    answer that merely quotes such a phrase in a link or snippet.
+    against the closing lines of the prose (see ``_closing_lines``), with
+    code/URLs stripped first, to avoid false-FAILing a genuine answer that
+    merely quotes such a phrase in a link, a snippet or its body.
     """
-    lowered = _strip_code_and_urls(text).lower()
+    lowered = _closing_lines(_strip_code_and_urls(text)).lower()
     hit = next((m for m in _DEFERRAL_MARKERS if m in lowered), None)
     if hit is not None:
         raise ValueError(
