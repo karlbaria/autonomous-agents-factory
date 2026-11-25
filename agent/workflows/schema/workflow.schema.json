@@ -226,7 +226,7 @@
           },
           "reviewer_max_turns": {
             "type": "integer",
-            "description": "For review_and_fix: the turn cap for each reviewer call, separate from the coder's run_agent step limit.",
+            "description": "For review_and_fix: the turn cap for each reviewer call, separate from the coder's run_agent step limit. Defaults to 30 when omitted (#98).",
             "minimum": 1
           },
           "max_iterations": {

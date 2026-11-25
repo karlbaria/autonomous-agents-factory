@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from .probes import ProbeResult
 
 FindingType = Literal["issue", "comment", "question", "good_point"]
 Severity = Literal["minor", "medium", "major", "critical"]
@@ -175,3 +178,44 @@ def parse_review_output(text: str) -> ReviewOutcome:
             return _not_ready(parsed)
         findings.append(parsed)
     return ReviewOutcome(verdict=verdict, findings=findings, invalid_probes=invalid_probes)
+
+
+def probe_waiver(result: ProbeResult, invalid_probes: dict[str, str]) -> str | None:
+    """Call 2's reason for marking ``result``'s probe invalid, or ``None`` (#97).
+
+    The prompt lists probes by key (``frontend/x.test.js``) and asks for the
+    name "exactly as given"; a reviewer often writes the bare filename
+    instead. Either one names the probe.
+    """
+    return invalid_probes.get(result.probe.key) or invalid_probes.get(result.probe.filename)
+
+
+def unwaived_failing_probes(
+    probe_results: list[ProbeResult], invalid_probes: dict[str, str]
+) -> list[ProbeResult]:
+    """Probes that ran, failed, and that Call 2 did not mark invalid."""
+    return [r for r in probe_results if r.failed and probe_waiver(r, invalid_probes) is None]
+
+
+def enforce_probe_waivers(
+    outcome: ReviewOutcome, probe_results: list[ProbeResult]
+) -> ReviewOutcome:
+    """Refuse a READY that a failing probe contradicts (#97).
+
+    A probe that ran and failed blocks READY unless Call 2 marked it invalid
+    with a reason. Until #97 that rule was only prompt text. A probe that
+    could not run says nothing about the code, so it never blocks. The
+    findings and waivers are kept, so the fixer and the PR body still see them.
+    """
+    if outcome.verdict != "READY":
+        return outcome
+    blocking = unwaived_failing_probes(probe_results, outcome.invalid_probes)
+    if not blocking:
+        return outcome
+    names = ", ".join(f"`{r.probe.key}`" for r in blocking)
+    return outcome.model_copy(
+        update={
+            "verdict": "NOT_READY",
+            "parse_error": f"READY refused: failing probe(s) not marked invalid: {names}",
+        }
+    )

@@ -33,14 +33,23 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from runtime_paths import unstage_runtime_written
 from shell import log, run_cmd
 
-from .findings import Finding, ReviewOutcome, Verdict, parse_review_output
+from .findings import (
+    Finding,
+    ReviewOutcome,
+    Verdict,
+    enforce_probe_waivers,
+    parse_review_output,
+    probe_waiver,
+)
 from .probes import Probe, ProbeResult, collect_probes, run_probes
 from .prompts import (
     CODE_REVIEWER_SYSTEM_PROMPT,
     FIXER_SYSTEM_PROMPT,
     PROBE_WRITER_SYSTEM_PROMPT,
+    VERDICT_ONLY_INSTRUCTION,
     code_reviewer_user_prompt,
     fixer_user_prompt,
     probe_writer_user_prompt,
@@ -66,7 +75,12 @@ if TYPE_CHECKING:
 # it. `claude-sonnet-4-6` is on the list and still distinct from the coder's
 # `claude-opus-5-5`.
 DEFAULT_REVIEWER_MODEL = "global.anthropic.claude-sonnet-4-6"
-DEFAULT_REVIEWER_MAX_TURNS = 15
+# #98: 15 was too few. On factory-shop#67 every reviewer attempt was still
+# reading files at turn 16 and never wrote a verdict.
+DEFAULT_REVIEWER_MAX_TURNS = 30
+# The retry after a call that ran out of turns: no investigation, just the
+# verdict block (#98).
+VERDICT_ONLY_MAX_TURNS = 2
 
 # Task 5 (ADR-026 (fork)) defaults — the base spec's Settings block.
 DEFAULT_MAX_ITERATIONS = 2
@@ -146,6 +160,12 @@ class ReviewAndFixResult(BaseModel):
     # The caller should fail the task instead of shipping a PR — set only
     # when unresolved and on_unresolved=="fail".
     should_fail_task: bool = False
+    # #97: the final verdict is READY, but every probe that failed was marked
+    # invalid and none passed, so no probe verified the change. The caller
+    # holds the PR (needs-human). A partial waiver doesn't set it.
+    no_independent_verification: bool = False
+    # The last round's waivers (filename or key -> reason), for the caller.
+    invalid_probes: dict[str, str] = Field(default_factory=dict)
 
 
 def _milestone(progress: _ProgressWriter | None, name: str, detail: str = "") -> None:
@@ -300,6 +320,8 @@ def _commit_fixer_changes(repo_dir: str) -> None:
     before the first round ever runs.
     """
     run_cmd(["git", "add", "-A"], label="review-fixer-add", cwd=repo_dir)
+    # #100: never commit what the runtime wrote (the channel's .mcp.json).
+    unstage_runtime_written(repo_dir)
     unchanged = run_cmd(
         ["git", "diff", "--cached", "--quiet", "--exit-code"],
         label="review-fixer-diff-check",
@@ -391,6 +413,17 @@ def _run_probe_writer(
 _CODE_REVIEWER_ATTEMPTS = 2  # one retry: "a review that doesn't finish is retried once"
 
 
+def _ran_out_of_turns(result: Any) -> bool:
+    """The call ended without a final message: the turn limit, or no text (#98)."""
+    return result.status == "error_max_turns" or not (result.result_text or "").strip()
+
+
+def _no_verdict_reason(result: Any, max_turns: int) -> str:
+    if result.status == "error_max_turns":
+        return f"reviewer hit the {max_turns}-turn limit before writing a verdict"
+    return "reviewer wrote no final message"
+
+
 def _run_code_reviewer(
     *,
     config: TaskConfig,
@@ -410,7 +443,13 @@ def _run_code_reviewer(
     A call that raises, or whose output doesn't fit the contract, is
     retried once before counting as ``NOT_READY`` (Task 5's "a review that
     doesn't finish" case) — each attempt that actually ran is billed to the
-    ledger regardless of outcome.
+    ledger regardless of outcome. A call that ran out of turns or wrote no
+    final message (#98) is retried with :data:`VERDICT_ONLY_INSTRUCTION` and
+    :data:`VERDICT_ONLY_MAX_TURNS` instead: rerunning the same investigation
+    with the same budget fails the same way.
+
+    A READY that a failing, unwaived probe contradicts is refused (#97,
+    :func:`enforce_probe_waivers`).
     """
     remaining = ledger.remaining_budget(config.max_budget_usd)
     if remaining is not None and remaining < _MIN_CALL_BUDGET_USD:
@@ -434,18 +473,24 @@ def _run_code_reviewer(
         }
     )
     user_prompt = code_reviewer_user_prompt(
-        issue_text, diff_text, probe_results, block_on_severity=block_on_severity
+        issue_text,
+        diff_text,
+        probe_results,
+        block_on_severity=block_on_severity,
+        max_turns=max_turns,
     )
 
     outcome: ReviewOutcome | None = None
     last_error = "code reviewer call did not run"
+    no_verdict: list[str] = []  # #98: attempts that ended without a final message
+    attempt_prompt, attempt_config, attempt_turns = user_prompt, call2_config, max_turns
     for attempt in range(1, _CODE_REVIEWER_ATTEMPTS + 1):
         try:
             result = asyncio.run(
                 _call_agent(
                     CODE_REVIEWER_SYSTEM_PROMPT,
-                    user_prompt,
-                    call2_config,
+                    attempt_prompt,
+                    attempt_config,
                     setup.repo_dir,
                     trajectory,
                 )
@@ -460,6 +505,16 @@ def _run_code_reviewer(
             turns=result.num_turns or result.turns,
             model=model,
         )
+        if _ran_out_of_turns(result):
+            no_verdict.append(_no_verdict_reason(result, attempt_turns))
+            log("WARN", f"review_and_fix: code-reviewer attempt {attempt}: {no_verdict[-1]}")
+            # Don't investigate again: ask for the verdict from the prompt alone.
+            # The tools stay read-only rather than none: an empty
+            # allowed_tools list means "unrestricted" to the runner.
+            attempt_prompt = user_prompt + VERDICT_ONLY_INSTRUCTION
+            attempt_turns = VERDICT_ONLY_MAX_TURNS
+            attempt_config = call2_config.model_copy(update={"max_turns": attempt_turns})
+            continue
         outcome = parse_review_output(result.result_text)
         if outcome.parse_error is None:
             break
@@ -469,11 +524,18 @@ def _run_code_reviewer(
             f"review_and_fix: code-reviewer attempt {attempt} output unparseable: "
             f"{outcome.parse_error}",
         )
+        attempt_prompt, attempt_config, attempt_turns = user_prompt, call2_config, max_turns
 
     if outcome is None:
-        outcome = ReviewOutcome(verdict="NOT_READY", findings=[], parse_error=last_error)
+        # Name the turn limit, not the missing VERDICT line it causes (#98).
+        error = "; ".join(no_verdict) if no_verdict else last_error
+        outcome = ReviewOutcome(verdict="NOT_READY", findings=[], parse_error=error)
+    outcome = enforce_probe_waivers(outcome, probe_results)
     _milestone(
-        progress, "review_verdict", f"verdict={outcome.verdict} findings={len(outcome.findings)}"
+        progress,
+        "review_verdict",
+        f"verdict={outcome.verdict} findings={len(outcome.findings)}"
+        + (f" ({outcome.parse_error})" if outcome.parse_error else ""),
     )
     return outcome
 
@@ -641,6 +703,26 @@ def _run_one_round(
     )
 
 
+def _waived_failing(round_outcome: RoundOutcome) -> list[ProbeResult]:
+    """The round's failing probes that Call 2 marked invalid (#97)."""
+    return [
+        r
+        for r in round_outcome.probe_results
+        if r.failed and probe_waiver(r, round_outcome.invalid_probes) is not None
+    ]
+
+
+def _no_independent_verification(round_outcome: RoundOutcome) -> bool:
+    """READY, at least one probe failed, every failure was waived, none passed (#97)."""
+    results = round_outcome.probe_results
+    return (
+        round_outcome.verdict == "READY"
+        and any(r.failed for r in results)
+        and not any(r.passed for r in results)
+        and len(_waived_failing(round_outcome)) == sum(1 for r in results if r.failed)
+    )
+
+
 def _probe_counts(probe_results: list[ProbeResult]) -> str:
     passed = sum(1 for r in probe_results if r.passed)
     failed = sum(1 for r in probe_results if r.failed)
@@ -716,6 +798,8 @@ def run_review_and_fix(
             reviewed_sha=round_outcome.reviewed_sha,
             committed_probe_paths=round_outcome.committed_probe_paths,
             parse_error=round_outcome.parse_error,
+            no_independent_verification=_no_independent_verification(round_outcome),
+            invalid_probes=round_outcome.invalid_probes,
         )
 
     repo = Path(setup.repo_dir)
@@ -745,13 +829,14 @@ def run_review_and_fix(
         reverted_paths = []
         committed_so_far.extend(round_outcome.committed_probe_paths)
         failed_count = sum(1 for r in round_outcome.probe_results if r.failed)
+        invalid_count = len(_waived_failing(round_outcome))
         not_runnable_count = sum(1 for r in round_outcome.probe_results if not r.runnable)
         _milestone(
             progress,
             "review_round",
             f"round {round_number}: verdict={round_outcome.verdict} "
             f"findings={len(round_outcome.findings)} probes_failed={failed_count} "
-            f"probes_not_runnable={not_runnable_count}",
+            f"probes_invalid={invalid_count} probes_not_runnable={not_runnable_count}",
         )
 
         if round_outcome.verdict == "READY":
@@ -767,7 +852,7 @@ def run_review_and_fix(
         carried_probes = [
             r.probe
             for r in round_outcome.probe_results
-            if r.failed and r.probe.filename not in round_outcome.invalid_probes
+            if r.failed and probe_waiver(r, round_outcome.invalid_probes) is None
         ]
         failing_probes = [r for r in round_outcome.probe_results if r.failed]
         protected = _protected_probe_dirs(round_outcome.probe_results, committed_so_far)
@@ -816,4 +901,6 @@ def run_review_and_fix(
         on_unresolved=on_unresolved,
         needs_unresolved_label=unresolved and on_unresolved == "pr_with_warning",
         should_fail_task=unresolved and on_unresolved == "fail",
+        no_independent_verification=_no_independent_verification(last),
+        invalid_probes=last.invalid_probes,
     )

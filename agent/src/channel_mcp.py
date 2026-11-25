@@ -41,6 +41,7 @@ import json
 import os
 from typing import TYPE_CHECKING, Any
 
+from runtime_paths import mark_runtime_written
 from shell import log
 
 if TYPE_CHECKING:
@@ -59,6 +60,9 @@ if TYPE_CHECKING:
 #: The LIVE outbound path is ``agent/src/jira_reactions.py``. It uses the
 #: signed Forge app proxy when configured and retains direct REST + OAuth only
 #: as a migration fallback. See ADR-015 and ``agent/src/prompt_builder.py``.
+#: The project MCP config the SDK loads (``setting_sources=["project"]``).
+MCP_CONFIG_FILENAME = ".mcp.json"
+
 JIRA_MCP_URL = "https://mcp.atlassian.com/v1/sse"
 
 #: Key name inside ``mcpServers``. Tools surface as ``mcp__jira-server__*``
@@ -149,7 +153,7 @@ def configure_channel_mcp(
         log("WARN", f"configure_channel_mcp: repo_dir missing or not a directory: {repo_dir!r}")
         return False
 
-    mcp_path = os.path.join(repo_dir, ".mcp.json")
+    mcp_path = os.path.join(repo_dir, MCP_CONFIG_FILENAME)
     config = _read_existing_mcp_config(mcp_path)
 
     servers = config.get("mcpServers")
@@ -165,6 +169,8 @@ def configure_channel_mcp(
     except OSError as e:
         log("ERROR", f"Failed to write {channel_source} MCP config to {mcp_path}: {e}")
         return False
+    # #100: task configuration, never part of the change.
+    mark_runtime_written(repo_dir, MCP_CONFIG_FILENAME)
 
     log(
         "TASK",
@@ -211,7 +217,7 @@ def strip_linear_mcp_servers(repo_dir: str) -> int:
     """
     if not repo_dir or not os.path.isdir(repo_dir):
         return 0
-    mcp_path = os.path.join(repo_dir, ".mcp.json")
+    mcp_path = os.path.join(repo_dir, MCP_CONFIG_FILENAME)
     config = _read_existing_mcp_config(mcp_path)
     servers = config.get("mcpServers")
     if not isinstance(servers, dict) or not servers:
@@ -248,6 +254,8 @@ def strip_linear_mcp_servers(repo_dir: str) -> int:
     except OSError as e:
         log("ERROR", f"strip_linear_mcp_servers: failed to rewrite/remove {mcp_path}: {e}")
         return 0
+    # #100: the scrub is the runtime's own edit; it must not land in a commit.
+    mark_runtime_written(repo_dir, MCP_CONFIG_FILENAME)
     log(
         "WARN",
         f"Removed {len(offending)} Linear MCP server entr(ies) from {mcp_path} "

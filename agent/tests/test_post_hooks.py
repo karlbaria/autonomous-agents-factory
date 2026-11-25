@@ -704,6 +704,94 @@ class TestPostReviewStatus:
 
         assert any("factory/review" in w for w in warns)
 
+    def test_ready_over_waived_probes_says_so(self, monkeypatch):
+        # #97: a READY whose failing probes were all waived isn't a clean pass.
+        review_outcome = {
+            "ran": True,
+            "verdict": "READY",
+            "reviewed_sha": "abc123def456",
+            "probe_results": [_waivable("a.test.js", "frontend"), _waivable("b.test.js")],
+            "invalid_probes": {"a.test.js": "x", "b.test.js": "y"},
+        }
+        run_cmd = self._post(monkeypatch, review_outcome)
+        cmd = run_cmd.cmd_for("post-review-status")
+        assert self._description(cmd) == (
+            "description=READY — 2/2 failing probes marked invalid (reviewed abc123def456)"
+        )
+
+
+def _waivable(filename: str, package_dir: str = "", *, passed: bool = False) -> dict:
+    return {
+        "probe": {"filename": filename, "package_dir": package_dir, "intent": "does a thing"},
+        "passed": passed,
+        "runnable": True,
+        "output": "",
+    }
+
+
+class TestWaiversShownInTheReviewSection:
+    """#97: a waived probe says so on its own line; a refusal is shown."""
+
+    def _section(self, round_outcome: dict) -> str:
+        return post_hooks._review_section({"ran": True, "mode": "advisory", **round_outcome})
+
+    def test_a_waived_failure_shows_its_reason_on_the_line(self):
+        body = self._section(
+            {
+                "verdict": "READY",
+                "probe_results": [
+                    _waivable("a.test.js", "frontend"),
+                    _waivable("ok.test.js", passed=True),
+                ],
+                "invalid_probes": {"frontend/a.test.js": "spec text dropped the underscores"},
+            }
+        )
+        assert (
+            "- ❌ FAIL (marked invalid: spec text dropped the underscores) `frontend/a.test.js`"
+            in body
+        )
+        assert "- ✅ PASS `ok.test.js`" in body
+
+    def test_an_unwaived_failure_is_a_plain_fail(self):
+        body = self._section(
+            {
+                "verdict": "NOT_READY",
+                "probe_results": [_waivable("a.test.js")],
+                "invalid_probes": {},
+            }
+        )
+        assert "- ❌ FAIL `a.test.js`" in body
+
+    def test_a_refused_ready_is_shown_next_to_findings(self):
+        body = self._section(
+            {
+                "verdict": "NOT_READY",
+                "probe_results": [_waivable("a.test.js")],
+                "findings": [
+                    {"type": "comment", "title": "t", "description": "d", "evidence": "e"}
+                ],
+                "parse_error": "READY refused: failing probe(s) not marked invalid: `a.test.js`",
+            }
+        )
+        assert "**Findings:**" in body
+        assert "⚠️ READY refused: failing probe(s) not marked invalid: `a.test.js`" in body
+        assert "could not be parsed" not in body
+
+    def test_a_parse_error_is_shown_even_with_findings(self):
+        body = self._section(
+            {
+                "verdict": "NOT_READY",
+                "findings": [
+                    {"type": "comment", "title": "t", "description": "d", "evidence": "e"}
+                ],
+                "parse_error": "reviewer hit the 30-turn limit before writing a verdict",
+            }
+        )
+        assert (
+            "_Review output could not be parsed: reviewer hit the 30-turn limit "
+            "before writing a verdict_" in body
+        )
+
 
 class TestEnsurePrPostsReviewStatus:
     """``ensure_pr`` posts ``factory/review`` on both its PR paths."""

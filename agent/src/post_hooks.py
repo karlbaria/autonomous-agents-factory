@@ -8,8 +8,9 @@ import re
 import shlex
 import subprocess
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from runtime_paths import unstage_runtime_written
 from shell import log, run_cmd
 
 if TYPE_CHECKING:
@@ -299,6 +300,10 @@ def ensure_committed(repo_dir: str) -> bool:
         log("WARN", f"git add -u failed (exit {add_result.returncode}): {stderr}")
         return False
 
+    # #100: a tracked file the runtime merged into (.mcp.json) is task
+    # configuration, not the agent's work.
+    unstage_runtime_written(repo_dir)
+
     # Check if there's anything staged after add -u
     staged = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
@@ -579,6 +584,30 @@ def _cost_line(agent_result: AgentResult | None, ledger: AgentInvocationLedger |
     return ""
 
 
+def _probe_name(probe: dict) -> str:
+    """A probe's key (``<package_dir>/<filename>``, or the bare filename)."""
+    filename = probe.get("filename") or ""
+    return f"{probe['package_dir']}/{filename}" if probe.get("package_dir") else filename
+
+
+def _probe_waiver_reason(result: dict, invalid_probes: dict) -> str | None:
+    """Call 2's waiver of this probe, by key or bare filename (#97)."""
+    probe = result.get("probe") or {}
+    return invalid_probes.get(_probe_name(probe)) or invalid_probes.get(probe.get("filename"))
+
+
+def _is_failed(result: dict) -> bool:
+    return result.get("runnable", True) is not False and not result.get("passed")
+
+
+def waived_probe_counts(round_outcome: dict) -> tuple[int, int]:
+    """``(waived, failed)``: failing probes Call 2 marked invalid, and all failing ones."""
+    invalid = round_outcome.get("invalid_probes") or {}
+    failed = [r for r in round_outcome.get("probe_results") or [] if _is_failed(r)]
+    waived = sum(1 for r in failed if _probe_waiver_reason(r, invalid))
+    return waived, len(failed)
+
+
 def _render_round_probes_and_findings(round_outcome: dict) -> list[str]:
     """The probes/committed/findings/parse_error lines shared by a single
     advisory round and a single round inside the adversarial table."""
@@ -590,13 +619,10 @@ def _render_round_probes_and_findings(round_outcome: dict) -> list[str]:
             "ever saw this diff):\n"
         )
         not_runnable = 0
+        invalid = round_outcome.get("invalid_probes") or {}
         for r in probe_results:
             probe = r.get("probe", {})
-            name = (
-                f"{probe['package_dir']}/{probe.get('filename')}"
-                if probe.get("package_dir")
-                else probe.get("filename")
-            )
+            name = _probe_name(probe)
             if r.get("runnable", True) is False:
                 # #69: written but never run — neither a pass nor a fail.
                 not_runnable += 1
@@ -606,6 +632,10 @@ def _render_round_probes_and_findings(round_outcome: dict) -> list[str]:
                 )
                 continue
             mark = "✅ PASS" if r.get("passed") else "❌ FAIL"
+            waiver = None if r.get("passed") else _probe_waiver_reason(r, invalid)
+            if waiver:
+                # #97: say on the line itself that the failure was waived.
+                mark = f"❌ FAIL (marked invalid: {waiver})"
             lines.append(f"- {mark} `{name}` — {probe.get('intent')}")
         if not_runnable:
             lines.append(
@@ -641,8 +671,12 @@ def _render_round_probes_and_findings(round_outcome: dict) -> list[str]:
                 f"_(evidence: {f['evidence']})_"
             )
         lines.append("")
-    elif round_outcome.get("parse_error"):
-        lines.append(f"_Review output could not be parsed: {round_outcome['parse_error']}_\n")
+    parse_error = round_outcome.get("parse_error")
+    if parse_error and parse_error.startswith("READY refused"):
+        # #97: the reviewer wrote READY over a failing probe it did not waive.
+        lines.append(f"⚠️ {parse_error}\n")
+    elif parse_error:
+        lines.append(f"_Review output could not be parsed: {parse_error}_\n")
 
     # Task 5 amendment 2: a probe Call 2 marked invalid (tests behavior the
     # issue never asked for) — recorded, not silently dropped.
@@ -752,8 +786,11 @@ def post_review_status(repo_dir: str, repo_url: str, review_outcome: dict | None
     sha = sha_result.stdout.strip()
     state = "success" if verdict == "READY" else "failure"
     reviewed_sha = (final_round.get("reviewed_sha") or sha)[:12]
+    waived, failed = waived_probe_counts(final_round)
+    # #97: a READY over waived probes says so, rather than reading as a clean pass.
+    waived_note = f" — {waived}/{failed} failing probes marked invalid" if waived else ""
     # GitHub's Statuses API caps `description` at 140 characters.
-    description = f"{verdict} (reviewed {reviewed_sha})"[:140]
+    description = f"{verdict}{waived_note} (reviewed {reviewed_sha})"[:140]
     result = run_cmd(
         [
             "gh",
@@ -902,67 +939,160 @@ def _hold_pr_with_label(
     return held
 
 
-def _inherited_hold_reason(repo_dir: str, repo_url: str, branch: str) -> str | None:
-    """Why this PR must inherit ``needs-human`` from ``branch``'s PR, or ``None``.
-
-    Any PR state counts (a predecessor's PR is normally still open). Fails
-    closed: when the PR list can't be read, the PR is held too, with the
-    reason saying so, since a flagged predecessor can't be ruled out.
-    """
-    unreadable = (
-        f"Could not check whether the PR of `{branch}`, which this PR builds on, is "
-        f"labelled `{NEEDS_HUMAN_LABEL}`, so this PR is held as well."
-    )
+def _gh_json(repo_dir: str, args: list[str], what: str) -> Any:
+    """Run a read-only ``gh`` command and parse its JSON; ``None`` when unreadable."""
     try:
         result = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--repo",
-                repo_url,
-                "--head",
-                branch,
-                "--state",
-                "all",
-                "--json",
-                "number,labels",
-            ],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=60,
+            ["gh", *args], cwd=repo_dir, capture_output=True, text=True, timeout=60
         )
-        prs = json.loads(result.stdout or "[]") if result.returncode == 0 else None
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        log("WARN", f"could not list PRs of {branch} ({type(exc).__name__}) — holding")
-        return unreadable
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("WARN", f"could not read {what} ({type(exc).__name__}) — holding")
+        # nosemgrep: py-silent-success-masking -- None means unreadable; every caller holds the PR
+        return None
+    if result.returncode != 0:
+        stderr = result.stderr.strip()[:200] if result.stderr else "(no stderr)"
+        log("WARN", f"could not read {what} (rc={result.returncode}): {stderr} — holding")
+        return None
+    try:
+        return json.loads(result.stdout or "null")
+    except json.JSONDecodeError:
+        log("WARN", f"could not parse {what} — holding")
+        # nosemgrep: py-silent-success-masking -- None means unreadable; every caller holds the PR
+        return None
+
+
+def _label_names(pr: dict[str, Any]) -> set[str]:
+    labels = pr.get("labels")
+    return {lbl.get("name") for lbl in labels or [] if isinstance(lbl, dict)}
+
+
+def _review_status(repo_dir: str, repo_url: str, sha: str) -> tuple[bool, dict[str, Any] | None]:
+    """``(readable, status)``: the ``factory/review`` status on ``sha``, or
+    ``None`` when the commit has none."""
+    combined = _gh_json(
+        repo_dir, ["api", f"repos/{repo_url}/commits/{sha}/status"], f"the review status of {sha}"
+    )
+    statuses = combined.get("statuses") if isinstance(combined, dict) else None
+    if not isinstance(statuses, list):
+        return False, None
+    for status in statuses:
+        if isinstance(status, dict) and status.get("context") == "factory/review":
+            return True, status
+    return True, None
+
+
+def _not_ready_reason(
+    repo_dir: str, repo_url: str, pr: dict[str, Any], *, review_ran: bool
+) -> str | None:
+    """Why ``pr``'s review blocks a PR built on it, or ``None`` (#97).
+
+    Its review ended NOT_READY when it carries ``review:unresolved`` or the
+    ``factory/review`` status on its head commit is anything but ``success``.
+    Fails closed: an unreadable status holds, and so does a missing one when
+    the dependent task itself ran a review (its predecessors ran one too).
+    """
+    number = pr["number"]
+    if UNRESOLVED_LABEL in _label_names(pr):
+        return (
+            f"Inherited from #{number}: this PR builds on #{number}, whose independent "
+            f"review ended NOT_READY (labelled `{UNRESOLVED_LABEL}`)."
+        )
+    sha = pr.get("headRefOid")
+    readable, status = (
+        _review_status(repo_dir, repo_url, sha) if isinstance(sha, str) and sha else (False, None)
+    )
+    if not readable:
+        return (
+            f"Could not read the independent review status of #{number}, which this PR "
+            "builds on, so this PR is held as well."
+        )
+    if status is None:
+        if not review_ran:
+            return None
+        return (
+            f"Inherited from #{number}: this PR builds on #{number}, which has no "
+            "`factory/review` status, so its review can't be confirmed."
+        )
+    if status.get("state") == "success":
+        return None
+    description = status.get("description") or status.get("state")
+    return (
+        f"Inherited from #{number}: this PR builds on #{number}, whose independent "
+        f"review ended NOT_READY (`factory/review`: {description})."
+    )
+
+
+def _inherited_hold_reason(
+    repo_dir: str, repo_url: str, branch: str, *, review_ran: bool = False
+) -> str | None:
+    """Why this PR must be held because of ``branch``'s PR, or ``None``.
+
+    Held when that PR is labelled ``needs-human`` (any PR state counts; a
+    predecessor's PR is normally still open), or (#97) when its review ended
+    NOT_READY (:func:`_not_ready_reason`, newest PR only). Fails closed: when
+    the PR list or a review status can't be read, the PR is held too, with
+    the reason saying so.
+    """
+    prs = _gh_json(
+        repo_dir,
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo_url,
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "number,labels,headRefOid",
+        ],
+        f"the PRs of {branch}",
+    )
     if not isinstance(prs, list):
-        log("WARN", f"could not list PRs of {branch} (rc={result.returncode}) — holding")
-        return unreadable
+        return (
+            f"Could not check whether the PR of `{branch}`, which this PR builds on, is "
+            f"labelled `{NEEDS_HUMAN_LABEL}`, so this PR is held as well."
+        )
+    prs: list[dict[str, Any]] = [
+        pr for pr in prs if isinstance(pr, dict) and isinstance(pr.get("number"), int)
+    ]
     for pr in prs:
-        labels = pr.get("labels") if isinstance(pr, dict) else None
-        names = {lbl.get("name") for lbl in labels or [] if isinstance(lbl, dict)}
-        if NEEDS_HUMAN_LABEL in names and isinstance(pr.get("number"), int):
+        if NEEDS_HUMAN_LABEL in _label_names(pr):
             number = pr["number"]
             return (
                 f"Inherited from #{number}: this PR builds on #{number}, which is labelled "
                 f"`{NEEDS_HUMAN_LABEL}`."
             )
-    return None
+    if not prs:
+        if not review_ran:
+            return None
+        return (
+            f"`{branch}`, which this PR builds on, has no PR, so its independent review "
+            "can't be confirmed; this PR is held."
+        )
+    # `gh pr list` lists the newest first: that is the story's current PR.
+    return _not_ready_reason(repo_dir, repo_url, prs[0], review_ran=review_ran)
 
 
 def hold_orchestration_pr(
-    repo_dir: str, config: TaskConfig, pr_url: str, default_branch: str
+    repo_dir: str,
+    config: TaskConfig,
+    pr_url: str,
+    default_branch: str,
+    *,
+    review_ran: bool = False,
 ) -> None:
     """Gate an orchestration child's new PR before its review status is posted (#89).
 
     - A story of an orchestration with an integration node is labelled
       ``factory-stacked``: only the integration PR is meant to reach main.
-    - A child built on a flagged predecessor inherits ``needs-human``: if the
+    - A child built on a held predecessor inherits ``needs-human``: if the
       PR of its base branch, or of any predecessor branch merged into it, is
-      labelled ``needs-human``, so is this one, with "inherited from #N" in
-      its body. That covers the integration PR, and chains transitively.
+      labelled ``needs-human``, or (#97) its review ended NOT_READY, this PR
+      is labelled ``needs-human`` too, with "inherited from #N" in its body.
+      That covers the integration PR, and chains transitively. ``review_ran``
+      says this task ran a review, so a predecessor without one is held.
 
     Runs before ``post_review_status`` so the watchdog never sees a green PR
     that is about to be held. No-op for a task that isn't an orchestration child.
@@ -988,12 +1118,50 @@ def hold_orchestration_pr(
         if b and b != default_branch
     ]
     for branch in predecessors:
-        reason = _inherited_hold_reason(repo_dir, config.repo_url, branch)
+        reason = _inherited_hold_reason(repo_dir, config.repo_url, branch, review_ran=review_ran)
         if reason is None:
             continue
         held = flag_pr_for_human(repo_dir, config.repo_url, pr_url, reason)
         log("POST", f"{NEEDS_HUMAN_LABEL} inherited through {branch} — PR held: {held}")
         return
+
+
+def _unverified_review_reason(review_outcome: dict) -> str:
+    final_round = _final_review_round(review_outcome) or review_outcome
+    waived, _failed = waived_probe_counts(final_round)
+    return (
+        "The independent review wrote READY, but every probe that failed "
+        f"({waived}) was marked invalid and none passed, so no probe verified this "
+        "change. Check the reviewer's reasons in the review section before merging."
+    )
+
+
+def hold_pr_before_status(
+    repo_dir: str,
+    config: TaskConfig,
+    pr_url: str,
+    default_branch: str,
+    review_outcome: dict | None,
+) -> None:
+    """Every hold that must be in place before ``factory/review`` is posted.
+
+    - #97: a READY with no independent verification (every failing probe
+      waived, none passed) is held with ``needs-human``.
+    - #89/#97: an orchestration child inherits its predecessors' holds
+      (:func:`hold_orchestration_pr`).
+    """
+    if review_outcome and review_outcome.get("no_independent_verification"):
+        held = flag_pr_for_human(
+            repo_dir, config.repo_url, pr_url, _unverified_review_reason(review_outcome)
+        )
+        log("POST", f"READY with no independent verification — PR held: {held}")
+    hold_orchestration_pr(
+        repo_dir,
+        config,
+        pr_url,
+        default_branch,
+        review_ran=bool(review_outcome and review_outcome.get("ran")),
+    )
 
 
 def _append_pr_appendix(repo_dir: str, repo_url: str, pr_url: str, appendix: str) -> None:
@@ -1150,7 +1318,7 @@ def ensure_pr(
         appendix = _cost_line(agent_result, ledger) + _review_section(review_outcome)
         if appendix.strip():
             _append_pr_appendix(repo_dir, config.repo_url, pr_url, appendix)
-        hold_orchestration_pr(repo_dir, config, pr_url, default_branch)
+        hold_pr_before_status(repo_dir, config, pr_url, default_branch, review_outcome)
         post_review_status(repo_dir, config.repo_url, review_outcome)
         return pr_url
 
@@ -1262,7 +1430,7 @@ def ensure_pr(
     if pr_result.returncode == 0:
         pr_url = pr_result.stdout.strip()
         log("POST", f"PR created: {pr_url}")
-        hold_orchestration_pr(repo_dir, config, pr_url, default_branch)
+        hold_pr_before_status(repo_dir, config, pr_url, default_branch, review_outcome)
         post_review_status(repo_dir, config.repo_url, review_outcome)
         return pr_url
     log("POST", "Failed to create PR")

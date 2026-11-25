@@ -7,6 +7,7 @@ from review.probes import Probe, ProbeResult
 from review.prompts import (
     CODE_REVIEWER_SYSTEM_PROMPT,
     PROBE_WRITER_SYSTEM_PROMPT,
+    VERDICT_ONLY_INSTRUCTION,
     code_reviewer_user_prompt,
     fixer_user_prompt,
     probe_writer_user_prompt,
@@ -163,3 +164,29 @@ class TestProbeWriterSystemPrompt:
         assert "relative to the current working directory" in PROBE_WRITER_SYSTEM_PROMPT
         assert 'Path("README.md")' in PROBE_WRITER_SYSTEM_PROMPT
         assert "Never build paths from `__file__`" in PROBE_WRITER_SYSTEM_PROMPT
+
+
+class TestTurnBudget:
+    """#98: the reviewer is told its turn budget and when to stop."""
+
+    def test_the_budget_and_stop_turn_are_stated(self):
+        prompt = code_reviewer_user_prompt("task", "diff", [], max_turns=30)
+        assert "You have at most 30 turns" in prompt
+        assert "Stop investigating by turn 28" in prompt
+
+    def test_no_budget_block_without_max_turns(self):
+        assert "Turn budget" not in code_reviewer_user_prompt("task", "diff", [])
+
+    def test_the_verdict_only_retry_keeps_everything_and_forbids_tools(self):
+        full = code_reviewer_user_prompt("Add gcd", "diff --git a/app.py", [], max_turns=30)
+        retry = full + VERDICT_ONLY_INSTRUCTION
+        assert "Add gcd" in retry
+        assert "diff --git a/app.py" in retry
+        assert "## Probe results" in retry
+        assert "do not use any tools" in retry
+        assert "VERDICT / FINDINGS / INVALID_PROBES" in retry
+
+    def test_the_system_prompt_states_that_ready_over_a_failing_probe_is_refused(self):
+        assert "is refused and counts as NOT-READY" in CODE_REVIEWER_SYSTEM_PROMPT.replace(
+            "\n", " "
+        )

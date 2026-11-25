@@ -55,3 +55,7 @@ Approved by the repo owner before implementation, amending `FACTORY_PLAN.md`'s T
   - The snapshot-and-revert (`_snapshot_dirs` / `_restore_and_diff`) and the `review_fixer_write_protected_root` Cedar roots also cover every package's `__probes__/` directory that a probe ran in or was committed to (see ADR-025's changelog).
   - Reverted paths are now reported repo-relative.
   - A not-runnable probe is not a failing probe: it is never carried into the next round or handed to the fixer.
+- **2026-11-25 — Review gates ([#97](https://github.com/karlbaria/autonomous-agents-factory/issues/97), [#98](https://github.com/karlbaria/autonomous-agents-factory/issues/98)).** Refinement of decision 5: blocking is still Call 2's verdict, but a READY verdict can no longer stand over a probe that ran, failed and was not marked invalid.
+  - `review/findings.py::enforce_probe_waivers` turns such a READY into NOT_READY with a `parse_error` naming the probes, so the fixer still runs. A waiver matches the probe's key or its bare filename.
+  - A final READY whose failing probes were all waived, with no probe passing, holds the PR with `needs-human` (no independent verification). A partial waiver doesn't.
+  - The reviewer's turn cap defaults to 30 (was 15) and is stated in its prompt. A call that runs out of turns, or writes no final message, is retried once with a verdict-only instruction and a 2-turn cap, rather than the same investigation again.
