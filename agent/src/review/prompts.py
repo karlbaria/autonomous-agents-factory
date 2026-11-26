@@ -41,6 +41,22 @@ the scratch directory named after the package's path in the repo, e.g. \
 run from `<package>/src/__probes__/` (or `<package>/__probes__/` if the \
 package has no `src/`), so import the code under test relative to that \
 directory, e.g. `import App from '../App'`.
+- Test through the app's public entry points, never its internal modules. \
+The requirements say what the app must do, not how the coder will name the \
+files and functions inside it, so a probe that imports a module or function \
+you guessed from the requirements fails on working code that simply chose \
+other names.
+- Frontend probes: find the app's top-level component by reading the repo \
+(for example `App.jsx`), render it through its router at the route under \
+test, and interact the way a user would: Testing Library queries by role or \
+label, clicks, typing. Import only the app entry and test libraries.
+- Backend probes: call the HTTP API through the framework's test client \
+(for FastAPI, `TestClient(app)` with `app` imported from the app's entry \
+module). Do not import internal functions.
+- The one exception: you may import a module or function only when the \
+requirements text itself names it as part of the contract (for example \
+"export `MAX_PER_LINE`"). Write the reason in a comment in the probe, next \
+to the import, quoting the requirement that names it.
 - Your tools are Read, Glob, Grep and Write. There is no shell: you cannot \
 run, compile or install anything, and you do not need to — a deterministic \
 step runs your probes after you finish.
@@ -138,6 +154,16 @@ INVALID_PROBES:
   }
 ]
 ```
+
+A probe that imports an internal module the task's requirements do not \
+name is invalid by default: probes must test through the app's public \
+entry points (the top-level component through its router, or the HTTP API \
+through the framework's test client), and an import of an internal name \
+is a guess at the coder's file layout, not a test of the requirements. \
+When such a probe FAILS, mark it invalid with that reason (it imports an \
+internal module the requirements do not name). An import is fine when the \
+requirements themselves name that module or function as part of the \
+contract.
 
 Omit the INVALID_PROBES: block entirely when every probe is in scope — it \
 is optional, unlike FINDINGS:. Blocking is still your verdict, never a raw \

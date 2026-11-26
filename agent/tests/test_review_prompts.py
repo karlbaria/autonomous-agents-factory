@@ -157,6 +157,57 @@ class TestCodeReviewerSystemPromptInvalidProbes:
         assert "filename" in CODE_REVIEWER_SYSTEM_PROMPT
         assert "reason" in CODE_REVIEWER_SYSTEM_PROMPT
 
+    def test_a_probe_importing_an_unnamed_internal_module_is_invalid_by_default(self):
+        # #105: probes that guessed internal module names failed on working code.
+        assert (
+            "A probe that imports an internal module the task's requirements do not "
+            "name is invalid by default" in CODE_REVIEWER_SYSTEM_PROMPT
+        )
+        assert "mark it invalid with that reason" in CODE_REVIEWER_SYSTEM_PROMPT
+
+    def test_an_import_the_requirements_name_stays_valid(self):
+        assert (
+            "An import is fine when the requirements themselves name that module "
+            "or function as part of the contract" in CODE_REVIEWER_SYSTEM_PROMPT
+        )
+
+
+class TestProbeWriterPublicEntryPoints:
+    """#105: probes test through public entry points, not guessed internal names."""
+
+    def test_probes_never_import_internal_modules(self):
+        assert (
+            "Test through the app's public entry points, never its internal modules"
+            in PROBE_WRITER_SYSTEM_PROMPT
+        )
+
+    def test_frontend_probes_render_the_app_through_its_router_and_act_as_a_user(self):
+        prompt = PROBE_WRITER_SYSTEM_PROMPT
+        assert "find the app's top-level component by reading the repo" in prompt
+        assert "`App.jsx`" in prompt
+        assert "render it through its router at the route under test" in prompt
+        assert "Testing Library queries by role or label, clicks, typing" in prompt
+        assert "Import only the app entry and test libraries" in prompt
+
+    def test_backend_probes_use_the_framework_test_client(self):
+        prompt = PROBE_WRITER_SYSTEM_PROMPT
+        assert "call the HTTP API through the framework's test client" in prompt
+        assert "`TestClient(app)`" in prompt
+        assert "from the app's entry module" in prompt
+        assert "Do not import internal functions" in prompt
+
+    def test_the_only_exception_is_a_name_the_requirements_give(self):
+        prompt = PROBE_WRITER_SYSTEM_PROMPT
+        assert "only when the requirements text itself names it as part of the contract" in prompt
+        assert "`MAX_PER_LINE`" in prompt
+        assert "Write the reason in a comment in the probe" in prompt
+
+    def test_probes_are_still_written_from_the_requirements_before_the_diff(self):
+        prompt = PROBE_WRITER_SYSTEM_PROMPT
+        assert "from the task's own requirements, never from the attempted solution" in prompt
+        assert "never the coder's diff or new code" in prompt
+        assert "checkout of the base branch, before the coder's change" in prompt
+
 
 class TestProbeWriterSystemPrompt:
     def test_tells_python_probes_to_read_repo_files_relative_to_cwd(self):
