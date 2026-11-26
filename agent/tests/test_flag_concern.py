@@ -13,7 +13,6 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -249,29 +248,24 @@ class TestPipeline:
             status="success", num_turns=5, cost_usd=0.2, result_text="Added the line.", **kw
         )
 
-    def test_a_flagged_run_labels_the_pr_and_emits_the_milestone(self, monkeypatch):
-        with patch("pipeline.flag_pr_for_human", return_value="labelled") as flag:
-            result, mocks = _run_adversarial(self._agent(concern_reason=_REASON), monkeypatch)
+    def test_a_flagged_run_emits_the_milestone_after_pr_created(self, monkeypatch):
+        # #103: ensure_pr applies the label (before factory/review); the pipeline
+        # only reports the reason. How the PR is held is its own pr_held event.
+        result, mocks = _run_adversarial(self._agent(concern_reason=_REASON), monkeypatch)
         assert result["pr_url"] == _PR
-        flag.assert_called_once_with("/workspace/repo", "o/r", _PR, _REASON)
         milestones = _milestones(mocks["progress"])
-        assert ("flagged_for_human", f"{_REASON} (PR held: labelled)") in milestones
-        # The milestone follows pr_created.
+        assert ("flagged_for_human", _REASON) in milestones
         names = [m[0] for m in milestones]
         assert names.index("flagged_for_human") > names.index("pr_created")
 
-    def test_an_unflagged_run_applies_no_label(self, monkeypatch):
-        with patch("pipeline.flag_pr_for_human") as flag:
-            result, mocks = _run_adversarial(self._agent(), monkeypatch)
+    def test_an_unflagged_run_emits_no_flag_milestone(self, monkeypatch):
+        result, mocks = _run_adversarial(self._agent(), monkeypatch)
         assert result["pr_url"] == _PR
-        flag.assert_not_called()
         assert not any(m[0] == "flagged_for_human" for m in _milestones(mocks["progress"]))
 
     def test_with_no_pr_the_flag_changes_nothing_else(self, monkeypatch):
-        with patch("pipeline.flag_pr_for_human") as flag:
-            result, mocks = _run_adversarial(
-                self._agent(concern_reason=_REASON), monkeypatch, pr_url=None
-            )
+        result, mocks = _run_adversarial(
+            self._agent(concern_reason=_REASON), monkeypatch, pr_url=None
+        )
         assert result["pr_url"] is None
-        flag.assert_not_called()
         assert not any(m[0] == "flagged_for_human" for m in _milestones(mocks["progress"]))

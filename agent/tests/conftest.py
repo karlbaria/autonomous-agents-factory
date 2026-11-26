@@ -355,3 +355,14 @@ def _clean_env(monkeypatch):
     from aws_session import reset_session_cache
 
     reset_session_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_post_hook_event_sink():
+    """#99: the pipeline points ``post_hooks``' event sink at its progress writer
+    (a module global); reset it so one test's writer never receives another's events."""
+    import post_hooks
+
+    post_hooks.set_event_sink(None)
+    yield
+    post_hooks.set_event_sink(None)
