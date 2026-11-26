@@ -54,7 +54,7 @@ from .prompts import (
     fixer_user_prompt,
     probe_writer_user_prompt,
 )
-from .signatures import extract_new_public_signatures, issue_names_interface
+from .routes import NewRoute, extract_new_routes, issue_names_routes
 from .worktree import probe_writer_workspace
 
 if TYPE_CHECKING:
@@ -368,7 +368,7 @@ def _run_probe_writer(
     model: str,
     max_turns: int,
     issue_text: str,
-    signatures_for_call1: list,
+    routes_for_call1: list[NewRoute],
     base_dir: str,
 ) -> list[Probe]:
     """Run Call 1 in its own worktree + scratch dir; return the probes it wrote."""
@@ -393,7 +393,7 @@ def _run_probe_writer(
                 "scratch_write_root": scratch_dir,
             }
         )
-        user_prompt = probe_writer_user_prompt(issue_text, signatures_for_call1, scratch_dir)
+        user_prompt = probe_writer_user_prompt(issue_text, routes_for_call1, scratch_dir)
         result = asyncio.run(
             _call_agent(
                 PROBE_WRITER_SYSTEM_PROMPT, user_prompt, call1_config, worktree_dir, trajectory
@@ -616,8 +616,8 @@ def _run_one_round(
     """
     reviewed_sha = _git_output(setup.repo_dir, "rev-parse", "HEAD").strip()
     diff_text = _git_output(setup.repo_dir, "diff", f"origin/{setup.default_branch}...HEAD")
-    signatures = extract_new_public_signatures(diff_text)
-    signatures_for_call1 = [] if issue_names_interface(issue_text, signatures) else signatures
+    routes = extract_new_routes(diff_text)
+    routes_for_call1 = [] if issue_names_routes(issue_text, routes) else routes
 
     fresh_probes: list[Probe] = []
     try:
@@ -630,7 +630,7 @@ def _run_one_round(
             model=model,
             max_turns=max_turns,
             issue_text=issue_text,
-            signatures_for_call1=signatures_for_call1,
+            routes_for_call1=routes_for_call1,
             base_dir=base_dir,
         )
     except Exception as e:
