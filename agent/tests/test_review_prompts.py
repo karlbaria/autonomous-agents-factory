@@ -12,7 +12,7 @@ from review.prompts import (
     fixer_user_prompt,
     probe_writer_user_prompt,
 )
-from review.signatures import PublicSignature
+from review.routes import NewRoute, extract_new_routes
 
 
 class TestProbeWriterUserPrompt:
@@ -20,13 +20,38 @@ class TestProbeWriterUserPrompt:
         prompt = probe_writer_user_prompt("Add a /gcd endpoint", [], "/tmp/scratch")
         assert "Add a /gcd endpoint" in prompt
         assert "/tmp/scratch" in prompt
-        assert "New interface" not in prompt
+        assert "New routes" not in prompt
 
-    def test_includes_signatures_when_present(self):
-        sigs = [PublicSignature(name="gcd", signature="def gcd(a, b):", file="app.py")]
-        prompt = probe_writer_user_prompt("Add an endpoint", sigs, "/tmp/scratch")
-        assert "New interface" in prompt
-        assert "def gcd(a, b):" in prompt
+    def test_includes_routes_when_present(self):
+        routes = [
+            NewRoute(kind="backend", method="GET", path="/gcd/{a}/{b}"),
+            NewRoute(kind="frontend", path="/bag"),
+        ]
+        prompt = probe_writer_user_prompt("Add an endpoint", routes, "/tmp/scratch")
+        assert "## New routes (paths and HTTP endpoints only" in prompt
+        assert "- Backend endpoint: `GET /gcd/{a}/{b}`" in prompt
+        assert "- Frontend route: `/bag`" in prompt
+
+    def test_no_function_signatures_from_the_diff_reach_the_probe_prompt(self):
+        # #105: the probe writer gets routes only, never the coder's function
+        # names or signatures, which would invite imports of internal modules.
+        diff = (
+            "+++ b/app/main.py\n"
+            '+@app.get("/gcd/{a}/{b}")\n'
+            "+def gcd(a: int, b: int) -> int:\n"
+            "+    return a\n"
+            "+def compute_total(bag: Bag) -> int:\n"
+            "+    return 0\n"
+            "+++ b/frontend/src/store/bag/bagStore.js\n"
+            "+export function addItem(bag, item) {\n"
+            "+  return bag;\n"
+            "+}\n"
+        )
+        prompt = probe_writer_user_prompt("Add an endpoint", extract_new_routes(diff), "/tmp/s")
+        assert "`GET /gcd/{a}/{b}`" in prompt
+        for leaked in ("def gcd", "gcd(a", "compute_total", "addItem", "bagStore", "-> int"):
+            assert leaked not in prompt
+        assert "signature" not in prompt.lower()
 
 
 class TestCodeReviewerUserPrompt:

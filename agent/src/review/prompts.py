@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .findings import Finding
     from .probes import ProbeResult
-    from .signatures import PublicSignature
+    from .routes import NewRoute
 
 _OUTPUT_PREVIEW_CHARS = 500
 
@@ -194,18 +194,21 @@ Write, Edit, Glob, Grep.
 """
 
 
-def probe_writer_user_prompt(
-    issue_text: str, signatures: list[PublicSignature], scratch_dir: str
-) -> str:
-    """Call 1's task-specific content: requirements, maybe signatures, scratch dir."""
+def probe_writer_user_prompt(issue_text: str, routes: list[NewRoute], scratch_dir: str) -> str:
+    """Call 1's task-specific content: requirements, maybe new routes, scratch dir.
+
+    Only routes (frontend paths, backend method + path) are ever passed on,
+    never function names or signatures (#105): probes test through the app's
+    public entry points, and a function name would invite an internal import.
+    """
     parts = [f"## Task requirements\n\n{issue_text}\n"]
-    if signatures:
-        sig_block = "\n\n".join(f"```\n{s.signature}\n```" for s in signatures)
+    if routes:
+        route_block = "\n".join(f"- {r.describe()}" for r in routes)
         parts.append(
-            "## New interface (names and signatures only — no implementation)\n\n"
-            "The requirements above don't already name the interface to test. Here are "
-            "the names and signatures of the new public functions/routes this task adds, "
-            f"with bodies stripped:\n\n{sig_block}\n"
+            "## New routes (paths and HTTP endpoints only — no implementation)\n\n"
+            "The requirements above don't already name the routes to test. These are "
+            "the frontend routes and backend endpoints this task adds; test through "
+            f"them:\n\n{route_block}\n"
         )
     parts.append(f"## Scratch directory\n\nWrite your probe test files into: `{scratch_dir}`\n")
     return "\n".join(parts)

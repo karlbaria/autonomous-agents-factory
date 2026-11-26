@@ -8,8 +8,8 @@ two separate Claude Agent SDK calls that share the task's
 - **Call 1, the probe writer** (``prompts.PROBE_WRITER_PROMPT`` via
   ``backend.ClaudeReviewerBackend``) — runs in a dedicated git worktree pinned
   to the base-branch commit, sees the issue (or, when the issue doesn't name
-  the interface, the new public signatures extracted by ``signatures``) and
-  never the coder's diff. It writes probe tests into a scratch directory.
+  the routes to test, the new routes extracted by ``routes``) and never the
+  coder's diff. It writes probe tests into a scratch directory.
 - A deterministic step (``probes.run_probes``) runs those probes against the
   coder's version.
 - **Call 2, the code reviewer** (``prompts.CODE_REVIEWER_PROMPT``) — sees the
@@ -27,18 +27,18 @@ from __future__ import annotations
 from .backend import ReviewAndFixResult, run_review_and_fix
 from .findings import Finding, ReviewOutcome, parse_review_output
 from .probes import Probe, ProbeResult, collect_probes, run_probes
-from .signatures import PublicSignature, extract_new_public_signatures, issue_names_interface
+from .routes import NewRoute, extract_new_routes, issue_names_routes
 
 __all__ = [
     "Finding",
+    "NewRoute",
     "Probe",
     "ProbeResult",
-    "PublicSignature",
     "ReviewAndFixResult",
     "ReviewOutcome",
     "collect_probes",
-    "extract_new_public_signatures",
-    "issue_names_interface",
+    "extract_new_routes",
+    "issue_names_routes",
     "parse_review_output",
     "run_probes",
     "run_review_and_fix",
