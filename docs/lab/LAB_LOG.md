@@ -806,8 +806,8 @@ The upstream integ, deploy and Documentation workflows are disabled on the fork.
 - **Screenshot links on auto-tracked (Slack/CLI) Jira cards,** if missing.
 - **React Router v7 future-flag warnings in factory-shop tests.**
 - **Probes should test through public entry points** (render the app at a route, or call the HTTP API), not internal modules, to cut false probe failures.
-- **Watchdog: re-read the inherited hold just before merging** (Task 15 §15).
-- **Live-verify chain inheritance** (flag request in the story text, not the technical notes) (Task 15 §15).
+- **Watchdog: re-read the inherited hold just before merging** (Task 15 §14).
+- **Live-verify chain inheritance** (flag request in the story text, not the technical notes) (Task 15 §14).
 
 ## Task 15: Feature-planning workflow — PR 1 (Slack intent routing + read-only planning)
 
@@ -1011,8 +1011,9 @@ All three were submitted from Slack against `karlbaria/factory-shop`.
 
   The lab is unchanged.
 - **Why Kiro.** Visual iteration needs a fast local feedback loop. The factory builds features on top.
+- **`demo-baseline` tag (factory-shop).** A lightweight tag on `9cf4ac7`, the merge of [factory-shop#64](https://github.com/karlbaria/factory-shop/pull/64) (2026-11-25 05:40 UTC): the storefront foundation plus the single-story lab price filter. Demos restore the store from it so that each run starts from the same code, as [factory-shop#78](https://github.com/karlbaria/factory-shop/pull/78) did after the incident in §14.
 
-### 15. Review and merge-gate hardening after the first multi-story builds
+### 14. Review and merge-gate hardening after the first multi-story builds
 
 - **Deferral check ([#95](https://github.com/karlbaria/autonomous-agents-factory/pull/95), closes [#94](https://github.com/karlbaria/autonomous-agents-factory/issues/94), merged 2026-11-25 16:24 UTC).** The check now reads only the closing lines of the final message. A `knowledge/prd-draft-v1` task for a shopping bag that "survives a page refresh" had failed with `matched 'come back later'`, a phrase from a requirement. Verified with the same request: task `01M89JD29MVF4YQHVYCC78XWJ9` FAILED before the fix, and task `01M89YBT35R1CR0TD3TMPME20P` COMPLETED after it (2026-11-25 18:09 UTC).
 - **First two-story bag build ([factory-shop#66](https://github.com/karlbaria/factory-shop/pull/66)–[#68](https://github.com/karlbaria/factory-shop/pull/68)).** Nothing merged: all three PRs were closed unmerged. But the review signals were unreliable, for five reasons:
