@@ -805,6 +805,9 @@ The upstream integ, deploy and Documentation workflows are disabled on the fork.
 - **Onboarded-repo filter for Slack repo detection** (needs events-Lambda read access to RepoConfig). Deferred from [#92](https://github.com/karlbaria/autonomous-agents-factory/issues/92) (Task 15 §12).
 - **Screenshot links on auto-tracked (Slack/CLI) Jira cards,** if missing.
 - **React Router v7 future-flag warnings in factory-shop tests.**
+- **Probes should test through public entry points** (render the app at a route, or call the HTTP API), not internal modules, to cut false probe failures.
+- **Watchdog: re-read the inherited hold just before merging** (Task 15 §15).
+- **Live-verify chain inheritance** (flag request in the story text, not the technical notes) (Task 15 §15).
 
 ## Task 15: Feature-planning workflow — PR 1 (Slack intent routing + read-only planning)
 
@@ -1008,3 +1011,45 @@ All three were submitted from Slack against `karlbaria/factory-shop`.
 
   The lab is unchanged.
 - **Why Kiro.** Visual iteration needs a fast local feedback loop. The factory builds features on top.
+
+### 15. Review and merge-gate hardening after the first multi-story builds
+
+- **Deferral check ([#95](https://github.com/karlbaria/autonomous-agents-factory/pull/95), closes [#94](https://github.com/karlbaria/autonomous-agents-factory/issues/94), merged 2026-11-25 16:24 UTC).** The check now reads only the closing lines of the final message. A `knowledge/prd-draft-v1` task for a shopping bag that "survives a page refresh" had failed with `matched 'come back later'`, a phrase from a requirement. Verified with the same request: task `01M89JD29MVF4YQHVYCC78XWJ9` FAILED before the fix, and task `01M89YBT35R1CR0TD3TMPME20P` COMPLETED after it (2026-11-25 18:09 UTC).
+- **First two-story bag build ([factory-shop#66](https://github.com/karlbaria/factory-shop/pull/66)–[#68](https://github.com/karlbaria/factory-shop/pull/68)).** Nothing merged: all three PRs were closed unmerged. But the review signals were unreliable, for five reasons:
+  - underscores were stripped from technical notes ([#96](https://github.com/karlbaria/autonomous-agents-factory/issues/96));
+  - READY was given over waived probes, and the waivers were neither shown nor enforced ([#97](https://github.com/karlbaria/autonomous-agents-factory/issues/97));
+  - the reviewer ran out of its 15 turns and wrote no verdict ([#98](https://github.com/karlbaria/autonomous-agents-factory/issues/98));
+  - the integration PR shared the last story's commit, and GitHub 502s during an incident made writes fail ([#99](https://github.com/karlbaria/autonomous-agents-factory/issues/99));
+  - the fixer committed the runtime's `.mcp.json` ([#100](https://github.com/karlbaria/autonomous-agents-factory/issues/100)).
+- **Fixes.**
+  - [#101](https://github.com/karlbaria/autonomous-agents-factory/pull/101) (closes #96): the parser keeps identifiers, and the publisher no longer bolds `__` inside a word.
+  - [#102](https://github.com/karlbaria/autonomous-agents-factory/pull/102) (closes #97, #98, #100):
+    - waivers are enforced and shown;
+    - a PR is held `needs-human` when every failing probe is waived and none passed;
+    - a NOT_READY story holds the PR built on it;
+    - the reviewer gets 30 turns, with a verdict-only retry;
+    - runtime files are kept out of commits.
+- **Incident ([factory-shop#72](https://github.com/karlbaria/factory-shop/pull/72)–[#75](https://github.com/karlbaria/factory-shop/pull/75)).** Integration PR #75 auto-merged to `main` at 2026-11-25 20:06 UTC although story 1 (#72) was labelled `needs-human`. GitHub then marked #72 merged, because its commits had reached `main`. Three causes ([#103](https://github.com/karlbaria/autonomous-agents-factory/issues/103)):
+  - #75 fast-forwarded onto story 3's commit and inherited its green `factory/review`.
+  - ABCA's hold ran only after the merge.
+  - Linear children never inherited a predecessor's `needs-human`: a filter bug that a test hid by passing unrealistic arguments.
+
+  The watchdog behaved as designed. A revert PR ([factory-shop#76](https://github.com/karlbaria/factory-shop/pull/76)) was closed unmerged. Instead the store was reset to `demo-baseline` ([factory-shop#78](https://github.com/karlbaria/factory-shop/pull/78)).
+  - **Reset lesson.** #78's first commit restored the files from the tag. A second commit had to remove the files added since, because restoring from a tag doesn't delete them. A reset must remove the folders and then restore them.
+  - There is no reset script in the repo.
+- **Fix ([#104](https://github.com/karlbaria/autonomous-agents-factory/pull/104), closes #99 and #103, merged 2026-11-26 02:53 UTC; [factory-shop#80](https://github.com/karlbaria/factory-shop/pull/80), merged 02:53 UTC).**
+  - Integration merges use `--no-ff`.
+  - The predecessor list is fixed.
+  - A guard holds a PR whose head equals a predecessor's head.
+  - The `flag_concern` label is applied before the review status.
+  - Failed GitHub writes are reported as events (`gh_write_failed`, `pr_held`), with one retry on a 5xx.
+  - The watchdog also holds a PR that contains the head commit of a `needs-human` PR, and it fails closed (holds) when the compare is truncated.
+  - **Known small gap:** the inherited hold isn't re-read just before merging.
+- **Rehearsal ([factory-shop#81](https://github.com/karlbaria/factory-shop/pull/81)–[#84](https://github.com/karlbaria/factory-shop/pull/84), 2026-11-26 03:28–04:36 UTC).** `FACTORY_AUTO_MERGE` was on, and a flag was requested in S1's technical notes.
+  - **DAG.** S1 (#81) → {S2 (#82), S3 (#83)} → integration (#84). S2 and S3 were both based on S1's branch, and their tasks started at the same second (03:52:17 UTC).
+  - **S1 didn't flag.** S1's coder didn't call `flag_concern`: #81 has no "Needs a human" section, and its only `pr_held` event is `factory-stacked`. S1's task text, as `bgagent status 01M8AYSBW7PW06N8R2HNX1GD2N` shows it, contains no flag instruction. So the request either didn't reach the coder or was ignored. An instruction in technical notes is weak: put it in the story text, and check that it appears in the task text.
+  - **S3 flagged itself.** #83 was labelled `needs-human` at 04:22 UTC, because its branch lacked S2's header count.
+  - **The integration held.** #84 inherited the hold ("Inherited from #83", labelled 04:33 UTC). The watchdog kept it at `factory/auto-merge: pending — labelled needs-human`, so it did not merge.
+  - **Result.** `main`'s `frontend/`, `backend/` and `infra/` still match `demo-baseline`. #81–#84 were later closed unmerged.
+  - **What is verified.** The integration hold was verified live. Chain inheritance is covered by #104's tests but hasn't been seen live yet.
+- **Tag.** `known-good-task15-merge-gate` at the commit of this entry.
