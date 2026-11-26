@@ -418,8 +418,11 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
 
         # Diamond: merge each predecessor branch into this child's branch
         # so it sees ALL predecessors' code (the base only gave it one).
+        # --no-ff (#99): a fast-forward would leave the branch's head on the
+        # last predecessor's commit — the integration node over a chain — so
+        # its PR would carry that predecessor's factory/review status.
         for pred_branch in config.merge_branches:
-            _merge_predecessor_branch(repo_dir, pred_branch, notes)
+            _merge_predecessor_branch(repo_dir, pred_branch, notes, no_ff=True)
     else:
         log("SETUP", f"Creating branch: {branch}")
         run_cmd(["git", "checkout", "-b", branch], label="create-branch", cwd=repo_dir)
@@ -680,8 +683,13 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
     )
 
 
-def _merge_predecessor_branch(repo_dir: str, pred_branch: str, notes: list[str]) -> None:
+def _merge_predecessor_branch(
+    repo_dir: str, pred_branch: str, notes: list[str], *, no_ff: bool = False
+) -> None:
     """Merge a predecessor branch into the current child branch (diamond stack).
+
+    ``no_ff`` always records a merge commit, so the branch gets a head commit
+    of its own even when the merge could fast-forward (#99).
 
     Fetches the predecessor branch and merges it so the child sees its
     code. On a clean merge: done. On a CONFLICT: abort the merge (leaving
@@ -705,7 +713,7 @@ def _merge_predecessor_branch(repo_dir: str, pred_branch: str, notes: list[str])
         return
 
     merge_res = run_cmd(
-        ["git", "merge", "--no-edit", f"origin/{pred_branch}"],
+        ["git", "merge", "--no-edit", *(["--no-ff"] if no_ff else []), f"origin/{pred_branch}"],
         label="merge-predecessor",
         cwd=repo_dir,
         check=False,

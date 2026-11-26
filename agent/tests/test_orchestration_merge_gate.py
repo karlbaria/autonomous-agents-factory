@@ -94,7 +94,7 @@ def _hold(monkeypatch, *, flagged=None, review=None, labels=None, review_ran=Fal
         post_hooks, "_append_pr_appendix", lambda _d, _r, _p, text: appended.append(text)
     )
     post_hooks.hold_orchestration_pr(
-        "/tmp/repo", make_task_config(**config), _PR, "main", review_ran=review_ran
+        "/tmp/repo", make_task_config(**config), _PR, review_ran=review_ran
     )
     added = [
         c["cmd"][c["cmd"].index("--add-label") + 1]
@@ -137,7 +137,6 @@ class TestStackedLabel:
             "/tmp/repo",
             make_task_config(channel_metadata={**_ORCH, "orchestration_stacked": "true"}),
             _PR,
-            "main",
         )
         assert run_cmd.labels() == [
             "apply-label",
@@ -197,7 +196,7 @@ class TestInheritedNeedsHuman:
             post_hooks, "_append_pr_appendix", lambda _d, _r, _p, text: appended.append(text)
         )
         post_hooks.hold_orchestration_pr(
-            "/tmp/repo", make_task_config(channel_metadata=_ORCH, base_branch="br-S1"), _PR, "main"
+            "/tmp/repo", make_task_config(channel_metadata=_ORCH, base_branch="br-S1"), _PR
         )
         assert run_cmd.labels() == ["apply-label"]
         assert "needs-human" in run_cmd.calls[0]["cmd"]
@@ -325,7 +324,7 @@ class TestHoldBeforeStatus:
             lambda *_a, **k: order.append(f"orchestration review_ran={k['review_ran']}"),
         )
         post_hooks.hold_pr_before_status(
-            "/tmp/repo", make_task_config(**config), _PR, "main", review_outcome
+            "/tmp/repo", make_task_config(**config), _PR, review_outcome
         )
         return order, flagged
 

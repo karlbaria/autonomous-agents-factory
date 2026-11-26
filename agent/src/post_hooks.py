@@ -7,13 +7,16 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from runtime_paths import unstage_runtime_written
-from shell import log, run_cmd
+from shell import log, redact_secrets, run_cmd
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from models import AgentInvocationLedger, AgentResult, RepoSetup, TaskConfig
 
 # Default verification commands. A repo that uses mise gets these for free; a
@@ -808,10 +811,10 @@ def post_review_status(repo_dir: str, repo_url: str, review_outcome: dict | None
         check=False,
     )
     if result.returncode != 0:
-        log(
-            "WARN",
-            f"failed to post factory/review status (non-fatal, rc={result.returncode}): "
-            f"{result.stderr.strip() if result.stderr else '(no stderr)'}",
+        error = " ".join((result.stderr or "").split()) or "(no stderr)"
+        _report(
+            "gh_write_failed",
+            f"post factory/review on {sha[:12]} (rc={result.returncode}): {redact_secrets(error)}",
         )
 
 
@@ -830,6 +833,59 @@ FACTORY_STACKED_LABEL = "factory-stacked"
 ORCHESTRATION_STACKED_KEY = "orchestration_stacked"
 
 
+#: #99: where post-hook events go (``(milestone, details)``). The pipeline
+#: points it at the task's progress writer; ``None`` (tests, local runs) logs only.
+_event_sink: Callable[[str, str], None] | None = None
+#: #99: the wait before the one retry of a ``gh`` write that got a 5xx.
+GH_RETRY_DELAY_S = 5.0
+#: A 5xx from GitHub, as ``gh`` prints it ("HTTP 502: Bad Gateway", or the
+#: proxy's bare "502 Bad Gateway").
+_SERVER_ERROR_RE = re.compile(
+    r"\bHTTP 5\d\d\b"
+    r"|\b5\d\d (?:Bad Gateway|Service Unavailable|Gateway Time-?out|Internal Server Error)\b",
+    re.IGNORECASE,
+)
+
+
+def set_event_sink(sink: Callable[[str, str], None] | None) -> None:
+    """Route post-hook events (#99: ``gh_write_failed``, ``pr_held``) to ``sink``."""
+    global _event_sink
+    _event_sink = sink
+
+
+def _report(milestone: str, details: str) -> None:
+    """Write a post-hook event: always logged, and sent to the sink when one is set."""
+    log("WARN" if milestone == "gh_write_failed" else "POST", f"{milestone}: {details}")
+    if _event_sink is None:
+        return
+    try:
+        _event_sink(milestone, details)
+    except Exception as exc:  # an event must never fail the post-hooks
+        log("WARN", f"could not write the {milestone} event: {type(exc).__name__}")
+
+
+def _is_server_error(stderr: str | None) -> bool:
+    return bool(stderr) and bool(_SERVER_ERROR_RE.search(stderr or ""))
+
+
+def _gh_write(cmd: list[str], label: str, repo_dir: str, what: str) -> subprocess.CompletedProcess:
+    """Run a ``gh`` write; retry it once after :data:`GH_RETRY_DELAY_S` on a 5xx (#99).
+
+    A 4xx (or any other failure) is not retried. A write that still fails is
+    reported as a ``gh_write_failed`` event naming ``what`` and the error
+    text, tokens redacted.
+    """
+    result = run_cmd(cmd, label=label, cwd=repo_dir, check=False)
+    if result.returncode != 0 and _is_server_error(result.stderr):
+        log("WARN", f"{what} got a server error; retrying once in {GH_RETRY_DELAY_S:g}s")
+        time.sleep(GH_RETRY_DELAY_S)
+        result = run_cmd(cmd, label=label, cwd=repo_dir, check=False)
+    if result.returncode != 0:
+        error = " ".join((result.stderr or "").split()) or "(no stderr)"
+        _report("gh_write_failed", f"{what} (rc={result.returncode}): {redact_secrets(error)}")
+    return result
+
+
 def apply_unresolved_label(
     repo_dir: str, repo_url: str, pr_url: str, label: str = UNRESOLVED_LABEL
 ) -> bool:
@@ -841,11 +897,11 @@ def apply_unresolved_label(
     non-fatal, same as the other PR-body cosmetic steps: the PR itself must
     not be lost over a label. Returns whether the label was applied.
     """
-    result = run_cmd(
+    result = _gh_write(
         ["gh", "pr", "edit", pr_url, "--repo", repo_url, "--add-label", label],
-        label="apply-unresolved-label" if label == UNRESOLVED_LABEL else "apply-label",
-        cwd=repo_dir,
-        check=False,
+        "apply-unresolved-label" if label == UNRESOLVED_LABEL else "apply-label",
+        repo_dir,
+        f"add label {label} to {pr_url}",
     )
     if result.returncode != 0:
         log(
@@ -902,9 +958,18 @@ def _hold_pr_with_label(
     Returns ``"labelled"``, ``"draft"`` or ``"unheld"`` (every step failed;
     logged as an error).
     """
+    held = _apply_or_draft(repo_dir, repo_url, pr_url, label, color=color, description=description)
+    # #99: its own event, so a truncated flagged_for_human can't hide how the PR is held.
+    _report("pr_held", f"{held} ({label}) {pr_url}")
+    return held
+
+
+def _apply_or_draft(
+    repo_dir: str, repo_url: str, pr_url: str, label: str, *, color: str, description: str
+) -> str:
     if apply_unresolved_label(repo_dir, repo_url, pr_url, label=label):
         return "labelled"
-    run_cmd(
+    _gh_write(
         [
             "gh",
             "label",
@@ -918,17 +983,17 @@ def _hold_pr_with_label(
             "--description",
             description,
         ],
-        label=f"create-{label}-label",
-        cwd=repo_dir,
-        check=False,
+        f"create-{label}-label",
+        repo_dir,
+        f"create label {label}",
     )
     if apply_unresolved_label(repo_dir, repo_url, pr_url, label=label):
         return "labelled"
-    draft = run_cmd(
+    draft = _gh_write(
         ["gh", "pr", "ready", pr_url, "--repo", repo_url, "--undo"],
-        label="draft-flagged-pr",
-        cwd=repo_dir,
-        check=False,
+        "draft-flagged-pr",
+        repo_dir,
+        f"convert {pr_url} to a draft",
     )
     held = "draft" if draft.returncode == 0 else "unheld"
     log(
@@ -1075,18 +1140,63 @@ def _inherited_hold_reason(
     return _not_ready_reason(repo_dir, repo_url, prs[0], review_ran=review_ran)
 
 
+def orchestration_predecessors(config: TaskConfig) -> list[str]:
+    """The branches an orchestration child builds on (#89, #103).
+
+    A diamond (the integration node included) merges ``merge_branches`` into a
+    branch off the default; a linear child stacks on ``base_branch``. Never
+    compared to ``setup.default_branch``: for a linear child that IS its
+    predecessor's branch, and the comparison dropped it (#103).
+    """
+    if config.merge_branches:
+        return list(dict.fromkeys(b for b in config.merge_branches if b))
+    return [config.base_branch] if config.base_branch else []
+
+
+def _shared_head_branch(repo_dir: str, branches: list[str]) -> str | None:
+    """The predecessor branch whose head commit is this branch's ``HEAD``, or ``None`` (#103).
+
+    A PR whose head is a predecessor's head carries that predecessor's
+    ``factory/review`` status, so it can look reviewed before its own review.
+    """
+    head = _rev_parse(repo_dir, "HEAD")
+    if not head:
+        return None
+    for branch in branches:
+        if _rev_parse(repo_dir, f"origin/{branch}") == head:
+            return branch
+    return None
+
+
+def _rev_parse(repo_dir: str, ref: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def hold_orchestration_pr(
     repo_dir: str,
     config: TaskConfig,
     pr_url: str,
-    default_branch: str,
     *,
     review_ran: bool = False,
-) -> None:
+) -> bool:
     """Gate an orchestration child's new PR before its review status is posted (#89).
 
     - A story of an orchestration with an integration node is labelled
       ``factory-stacked``: only the integration PR is meant to reach main.
+    - A child whose ``HEAD`` is a predecessor's head commit (#103) is held
+      ``needs-human`` and gets no ``factory/review`` of its own: the commit
+      already carries the predecessor's status. Returns ``True`` then, so the
+      caller skips the status.
     - A child built on a held predecessor inherits ``needs-human``: if the
       PR of its base branch, or of any predecessor branch merged into it, is
       labelled ``needs-human``, or (#97) its review ended NOT_READY, this PR
@@ -1099,7 +1209,7 @@ def hold_orchestration_pr(
     """
     meta = config.channel_metadata or {}
     if not meta.get("orchestration_id"):
-        return
+        return False
     if meta.get(ORCHESTRATION_STACKED_KEY) == "true":
         held = _hold_pr_with_label(
             repo_dir,
@@ -1110,20 +1220,26 @@ def hold_orchestration_pr(
             description="A story PR of a factory build: it reaches main through the integration PR",
         )
         log("POST", f"Story PR of a multi-story build — {FACTORY_STACKED_LABEL}: {held}")
-    predecessors = [
-        b
-        for b in dict.fromkeys(
-            [*([config.base_branch] if config.base_branch else []), *config.merge_branches]
+    predecessors = orchestration_predecessors(config)
+    shared = _shared_head_branch(repo_dir, predecessors)
+    if shared is not None:
+        held = flag_pr_for_human(
+            repo_dir,
+            config.repo_url,
+            pr_url,
+            f"This PR's head commit is the head of `{shared}`, which it builds on, so it "
+            "carries that branch's review status rather than its own; it is held.",
         )
-        if b and b != default_branch
-    ]
+        log("POST", f"PR head is the head of {shared} — PR held: {held}, no factory/review")
+        return True
     for branch in predecessors:
         reason = _inherited_hold_reason(repo_dir, config.repo_url, branch, review_ran=review_ran)
         if reason is None:
             continue
         held = flag_pr_for_human(repo_dir, config.repo_url, pr_url, reason)
         log("POST", f"{NEEDS_HUMAN_LABEL} inherited through {branch} — PR held: {held}")
-        return
+        return False
+    return False
 
 
 def _unverified_review_reason(review_outcome: dict) -> str:
@@ -1140,28 +1256,36 @@ def hold_pr_before_status(
     repo_dir: str,
     config: TaskConfig,
     pr_url: str,
-    default_branch: str,
     review_outcome: dict | None,
-) -> None:
+    concern: str = "",
+) -> bool:
     """Every hold that must be in place before ``factory/review`` is posted.
 
+    - #82 PR 3a / #103: the agent's ``flag_concern`` reason holds the PR
+      ``needs-human``.
     - #97: a READY with no independent verification (every failing probe
       waived, none passed) is held with ``needs-human``.
-    - #89/#97: an orchestration child inherits its predecessors' holds
+    - #89/#97/#103: an orchestration child inherits its predecessors' holds
       (:func:`hold_orchestration_pr`).
+
+    Returns whether ``factory/review`` may be posted: ``False`` when the PR's
+    head is a predecessor's head (#103), whose status it would overwrite.
     """
+    if concern:
+        held = flag_pr_for_human(repo_dir, config.repo_url, pr_url, concern)
+        log("POST", f"flag_concern — PR held: {held}")
     if review_outcome and review_outcome.get("no_independent_verification"):
         held = flag_pr_for_human(
             repo_dir, config.repo_url, pr_url, _unverified_review_reason(review_outcome)
         )
         log("POST", f"READY with no independent verification — PR held: {held}")
-    hold_orchestration_pr(
+    shared_head = hold_orchestration_pr(
         repo_dir,
         config,
         pr_url,
-        default_branch,
         review_ran=bool(review_outcome and review_outcome.get("ran")),
     )
+    return not shared_head
 
 
 def _append_pr_appendix(repo_dir: str, repo_url: str, pr_url: str, appendix: str) -> None:
@@ -1184,14 +1308,19 @@ def _append_pr_appendix(repo_dir: str, repo_url: str, pr_url: str, appendix: str
             timeout=60,
         )
         if current.returncode != 0:
-            log("WARN", f"could not read PR body to append review section: {current.stderr}")
+            error = " ".join((current.stderr or "").split()) or "(no stderr)"
+            _report(
+                "gh_write_failed",
+                f"edit the body of {pr_url}: could not read it (rc={current.returncode}): "
+                f"{redact_secrets(error)}",
+            )
             return
         new_body = f"{current.stdout}\n\n{appendix}"
-        run_cmd(
+        _gh_write(
             ["gh", "pr", "edit", pr_url, "--repo", repo_url, "--body", new_body],
-            label="append-review-section",
-            cwd=repo_dir,
-            check=False,
+            "append-review-section",
+            repo_dir,
+            f"edit the body of {pr_url}",
         )
     except (subprocess.SubprocessError, OSError) as e:
         log(
@@ -1235,6 +1364,8 @@ def ensure_pr(
     repo_dir = setup.repo_dir
     branch = setup.branch
     default_branch = setup.default_branch
+    # #103: the flag_concern hold lands with the others, before factory/review.
+    concern = (agent_result.concern_reason or "").strip() if agent_result else ""
 
     # push_resolve / resolve: skip PR creation — just resolve the existing URL.
     if strategy in ("push_resolve", "resolve"):
@@ -1318,8 +1449,8 @@ def ensure_pr(
         appendix = _cost_line(agent_result, ledger) + _review_section(review_outcome)
         if appendix.strip():
             _append_pr_appendix(repo_dir, config.repo_url, pr_url, appendix)
-        hold_pr_before_status(repo_dir, config, pr_url, default_branch, review_outcome)
-        post_review_status(repo_dir, config.repo_url, review_outcome)
+        if hold_pr_before_status(repo_dir, config, pr_url, review_outcome, concern):
+            post_review_status(repo_dir, config.repo_url, review_outcome)
         return pr_url
 
     # Check if there are any commits on this branch beyond the default branch
@@ -1430,8 +1561,8 @@ def ensure_pr(
     if pr_result.returncode == 0:
         pr_url = pr_result.stdout.strip()
         log("POST", f"PR created: {pr_url}")
-        hold_pr_before_status(repo_dir, config, pr_url, default_branch, review_outcome)
-        post_review_status(repo_dir, config.repo_url, review_outcome)
+        if hold_pr_before_status(repo_dir, config, pr_url, review_outcome, concern):
+            post_review_status(repo_dir, config.repo_url, review_outcome)
         return pr_url
     log("POST", "Failed to create PR")
     return None

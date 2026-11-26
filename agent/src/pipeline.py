@@ -52,8 +52,8 @@ from post_hooks import (
     apply_unresolved_label,
     ensure_committed,
     ensure_pr,
-    flag_pr_for_human,
     reconcile_agent_branch,
+    set_event_sink,
     verify_build,
     verify_lint,
 )
@@ -1576,9 +1576,10 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 _workflow, is_pr_workflow=config.is_pr_workflow
             ) and agent_requested_input(agent_result)
 
-            # #82 PR 3a: how a flag_concern'd PR is held ("" when not flagged).
-            flagged_hold = ""
+            # #82 PR 3a: the flag_concern reason ("" when not flagged).
             concern = ""
+            # #99: post-hook events (gh_write_failed, pr_held) go to this task's stream.
+            set_event_sink(progress.write_agent_milestone)
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
                 if needs_input:
@@ -1691,23 +1692,17 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                     if pr_url and review_outcome.get("needs_unresolved_label"):
                         apply_unresolved_label(setup.repo_dir, config.repo_url, pr_url)
                     # Merge gate (#82 PR 3a): the agent shipped but called
-                    # flag_concern → label the PR needs-human (the auto-merge
-                    # watchdog skips it) and put the reason in its body. With
-                    # no PR the flag changes nothing else.
+                    # flag_concern → ensure_pr labelled the PR needs-human
+                    # before factory/review (#103), and wrote how it is held as
+                    # its own pr_held event (#99). With no PR the flag changes
+                    # nothing else.
                     concern = (agent_result.concern_reason or "").strip()
-                    if concern and pr_url:
-                        flagged_hold = flag_pr_for_human(
-                            setup.repo_dir, config.repo_url, pr_url, concern
-                        )
-                    elif concern:
+                    if concern and not pr_url:
                         log("POST", "flag_concern was called but no PR opened — nothing to label")
             if pr_url:
                 progress.write_agent_milestone("pr_created", pr_url)
-                if flagged_hold:
-                    progress.write_agent_milestone(
-                        "flagged_for_human",
-                        f"{concern} (PR held: {flagged_hold})",
-                    )
+                if concern:
+                    progress.write_agent_milestone("flagged_for_human", concern)
                 # Move the Jira card In Progress → In Review now that a PR is
                 # open (issue #572) — but ONLY when the build passed. ensure_pr
                 # deliberately opens a PR even on a FAILED build (so the human
